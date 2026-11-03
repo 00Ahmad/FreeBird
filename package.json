@@ -1,0 +1,53 @@
+{
+  "name": "freebird",
+  "version": "0.0.1",
+  "description": "A team of AI bots you chat with like coworkers, on local models (Ollama, LM Studio, llama.cpp…) or any API provider.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/00Ahmad/FreeBird.git"
+  },
+  "homepage": "https://github.com/00Ahmad/FreeBird#readme",
+  "bugs": {
+    "url": "https://github.com/00Ahmad/FreeBird/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "ollama",
+    "local-llm",
+    "llm",
+    "chatbot",
+    "multi-agent",
+    "electron",
+    "desktop-app",
+    "mcp"
+  ],
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "node scripts/dev.mjs --web",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "package": "pnpm --filter @mrog/desktop package"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "esbuild": "0.28.2",
+    "oxlint": "1.90.0",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

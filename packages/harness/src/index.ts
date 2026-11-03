@@ -1,0 +1,75 @@
+import { join } from "node:path";
+
+import { openStore, type SettingsRepo } from "@mrog/store";
+import { KeyringBackend, MemoryBackend, moveSecrets, Vault, type NameIndex } from "@mrog/vault";
+
+import { EventBus } from "./bus";
+import type { HarnessConfig } from "./config";
+import { buildServer } from "./server";
+import { createServices } from "./services";
+
+export { EventBus } from "./bus";
+export { ModelCatalog } from "./catalog";
+export { loadConfig, type HarnessConfig } from "./config";
+export { buildServer, type RouteModule } from "./server";
+export { createServices, type Services } from "./services";
+export { ProviderManager } from "./providers";
+export { TurnManager } from "./turns";
+
+const VAULT_NAMES_KEY = "vault.names";
+
+export function settingsNameIndex(settings: SettingsRepo): NameIndex {
+  return {
+    load: () => settings.get<string[]>(VAULT_NAMES_KEY) ?? [],
+    save: (names) => settings.set(VAULT_NAMES_KEY, names),
+  };
+}
+
+export interface RunningHarness {
+  url: string;
+  close(): Promise<void>;
+}
+
+/** Opens storage and the vault, wires services, then listens. */
+export async function startHarness(config: HarnessConfig): Promise<RunningHarness> {
+  const store = openStore(join(config.dataDir, "app.db"));
+  const stale = store.messages.stopStreaming();
+  if (stale) console.log(`[harness] marked ${stale} interrupted message(s) as stopped`);
+  const backend = config.vault === "memory" ? new MemoryBackend() : new KeyringBackend(config.keyringService);
+  const names = settingsNameIndex(store.settings);
+  // Secrets saved before the app was renamed (OpenMrogBog → FreeBird) move to the new keychain name.
+  if (
+    config.vault === "keyring" &&
+    config.previousKeyringService &&
+    config.previousKeyringService !== config.keyringService
+  ) {
+    const moved = moveSecrets(names.load(), new KeyringBackend(config.previousKeyringService), backend);
+    if (moved)
+      console.log(`[harness] moved ${moved} saved secret(s) from "${config.previousKeyringService}"`);
+  }
+  const vault = new Vault(backend, names);
+  const bus = new EventBus();
+  const services = createServices({ config, store, vault, bus });
+  const app = await buildServer(services);
+  const url = await app.listen({ host: config.host, port: config.port });
+  services.routines.start();
+  void services.connectors.connectAll();
+  services.disposers.push(() => services.routines.stop());
+  // Start Ollama if asked, then load the shared model in the background so the first message is fast.
+  void (async () => {
+    if (services.runtime.settings.startOllama) {
+      const started = await services.ollamaLauncher
+        .start()
+        .catch((error: Error) => console.warn(`[harness] Ollama not started: ${error.message}`));
+      if (started === "started") console.log("[harness] started Ollama");
+    }
+    await services.runtime.warmup();
+  })().catch((error: Error) => console.warn(`[harness] warm-up skipped: ${error.message}`));
+  return {
+    url,
+    async close() {
+      await app.close();
+      store.close();
+    },
+  };
+}

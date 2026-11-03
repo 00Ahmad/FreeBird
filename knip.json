@@ -1,0 +1,12 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "workspaces": {
+    "apps/desktop": {
+      "entry": ["src/main.ts", "src/preload.ts", "build.mjs", "package.mjs"],
+      "ignoreDependencies": ["@napi-rs/keyring", "playwright-core", "electron-builder", "@mrog/harness"]
+    },
+    "packages/harness": {
+      "entry": ["src/main.ts", "evals/*.eval.ts"]
+    }
+  }
+}

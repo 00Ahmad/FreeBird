@@ -1,0 +1,23 @@
+{
+  "name": "@mrog/desktop",
+  "productName": "FreeBird",
+  "version": "0.0.1",
+  "private": true,
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "electron .",
+    "package": "node package.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "2.1.2",
+    "playwright-core": "1.64.1"
+  },
+  "devDependencies": {
+    "@mrog/harness": "workspace:*",
+    "@mrog/shared": "workspace:*",
+    "electron": "44.9.3",
+    "electron-builder": "26.18.0"
+  }
+}

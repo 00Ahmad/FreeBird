@@ -1,0 +1,16 @@
+{
+  "name": "@mrog/model-runtime",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mrog/providers": "workspace:*",
+    "@mrog/shared": "workspace:*"
+  }
+}

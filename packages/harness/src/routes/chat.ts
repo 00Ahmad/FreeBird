@@ -1,0 +1,69 @@
+import type { FastifyInstance } from "fastify";
+import { z } from "zod";
+
+import { MessageId, SendMessageInput, ThreadId } from "@mrog/shared";
+
+import { fail, parse } from "../http";
+import type { Services } from "../services";
+
+const ListQuery = z.object({
+  before: z.iso.datetime().optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
+
+export function registerChatRoutes(app: FastifyInstance, { store, turns, bus, discussions }: Services) {
+  app.get("/api/threads", async () => ({ threads: store.threads.list() }));
+
+  app.get("/api/activity", async () => ({ activity: turns.activities() }));
+
+  app.get<{ Params: { id: string } }>("/api/threads/:id/messages", async (request, reply) => {
+    const id = parse(ThreadId, request.params.id, reply);
+    if (!id) return reply;
+    const query = parse(ListQuery, request.query, reply);
+    if (!query) return reply;
+    if (!store.threads.get(id)) return fail(reply, 404, "not_found", "No thread has this id.");
+    return { messages: store.messages.list(id, query) };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/threads/:id/messages", async (request, reply) => {
+    const id = parse(ThreadId, request.params.id, reply);
+    if (!id) return reply;
+    const input = parse(SendMessageInput, request.body, reply);
+    if (!input) return reply;
+    if (!input.text.trim() && !input.images?.length) {
+      return fail(reply, 400, "invalid_request", "A message needs text or an image.");
+    }
+    const thread = store.threads.get(id);
+    if (!thread) return fail(reply, 404, "not_found", "No thread has this id.");
+    const message = await turns.send(thread, input);
+    return reply.code(201).send({ message });
+  });
+
+  /** "Clear chat": a fresh start for the conversation. Memory, skills and files are kept. */
+  app.delete<{ Params: { id: string } }>("/api/threads/:id/messages", async (request, reply) => {
+    const id = parse(ThreadId, request.params.id, reply);
+    if (!id) return reply;
+    if (!store.threads.get(id)) return fail(reply, 404, "not_found", "No thread has this id.");
+    discussions.stop(id);
+    turns.stop(id);
+    // Cached summaries of the old conversation go too.
+    const removed = store.messages.clear(id);
+    bus.publish({ type: "data.changed", keys: ["messages"], threadId: id });
+    return { removed };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/threads/:id/stop", async (request, reply) => {
+    const id = parse(ThreadId, request.params.id, reply);
+    if (!id) return reply;
+    discussions.stop(id);
+    turns.stop(id);
+    return reply.code(204).send();
+  });
+
+  app.get<{ Params: { id: string } }>("/api/messages/:id", async (request, reply) => {
+    const id = parse(MessageId, request.params.id, reply);
+    if (!id) return reply;
+    const message = store.messages.get(id);
+    return message ? { message } : fail(reply, 404, "not_found", "No message has this id.");
+  });
+}

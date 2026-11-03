@@ -1,0 +1,17 @@
+{
+  "name": "@mrog/tools",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mrog/engine": "workspace:*",
+    "@mrog/providers": "workspace:*",
+    "zod": "4.6.7"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "import", "unicorn"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+    "import/no-unassigned-import": ["warn", { "allow": ["**/*.css"] }],
+    "unicorn/require-post-message-target-origin": "off",
+    "eslint/no-unmodified-loop-condition": "off",
+    "unicorn/consistent-function-scoping": "off"
+  },
+  "overrides": [
+    {
+      "files": ["apps/ui/src/components/computer/ComputerPanel.tsx"],
+      "rules": { "react/iframe-missing-sandbox": "off" }
+    }
+  ],
+  "ignorePatterns": ["**/dist/**", "**/node_modules/**", ".data/**"]
+}

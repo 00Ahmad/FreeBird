@@ -1,0 +1,47 @@
+name: Bug report
+description: Something doesn't work the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please don't include API keys, passwords or private chats. For security problems, use the repository's **Security** tab instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a bot with …
+        2. Send "…"
+        3. See …
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and provider
+      placeholder: e.g. qwen3.5:9b on Ollama 0.13, or gpt-5 on OpenAI
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: FreeBird version or commit
+      placeholder: e.g. 0.0.1 or the commit hash from `git log -1`
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Terminal output from `pnpm dev` or a screenshot of the chat, with anything private removed.
