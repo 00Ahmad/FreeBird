@@ -189,10 +189,11 @@ export class ComputerManager {
   /** A deleted bot: its container and its home volume go with it. Nothing to do when Docker isn't there. */
   async remove(botId: string): Promise<void> {
     const name = containerName(botId);
-    await this.docker(["rm", "-f", name], 60_000).catch(() => null);
+    const removed = await this.docker(["rm", "-f", name], 60_000).catch(() => null);
     await this.docker(["volume", "rm", "-f", `${name}-home`], 60_000).catch(() => null);
-    this.running.delete(botId);
-    this.changed();
+    const wasRunning = this.running.delete(botId);
+    // Docker names the container it removed; a bot that never had one changes nothing on screen.
+    if (wasRunning || (removed?.code === 0 && removed.stdout.trim() !== "")) this.changed();
   }
 
   /** "Reset Bot's Computer": a fresh container (the home volume with its files is kept). */

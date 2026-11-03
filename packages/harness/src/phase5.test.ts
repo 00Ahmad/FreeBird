@@ -209,6 +209,25 @@ describe("computer", () => {
     });
   });
 
+  it("announces a removed computer only when there was one", async () => {
+    const { bot } = await withBot();
+    const seen: string[] = [];
+    const off = h!.bus.subscribe((event) => {
+      if (event.type === "data.changed") seen.push(event.keys.join());
+    });
+    await new ComputerManager(h!.services, fakeDocker({ running: false, available: false }).runner).remove(
+      bot.id,
+    );
+    expect(seen).toEqual([]);
+
+    const live = new ComputerManager(h!.services, fakeDocker({ running: false, available: true }).runner);
+    await live.start(bot.id);
+    seen.length = 0;
+    await live.remove(bot.id);
+    off();
+    expect(seen).toEqual(["computer"]);
+  });
+
   it("starts a desktop bound to this computer only, then offers the bot a command tool", async () => {
     const { bot } = await withBot();
     const docker = fakeDocker({ running: false, available: true });
