@@ -47,6 +47,12 @@ interface TurnOptions {
   parentSignal?: AbortSignal;
   delegated?: boolean;
   surface?: Surface;
+  /**
+   * Keep a local model for the whole turn instead of one reply at a time: bots that never wait for the user (racers)
+   * then finish one after another, and the model doesn't re-read each one's conversation (or swap models) between
+   * steps.
+   */
+  wholeTurn?: boolean;
 }
 
 /** Supplies per-turn tools and prompt additions (Phase 2+); the chat MVP runs without any. */
@@ -288,28 +294,35 @@ export class TurnManager {
    * waiting for the user (an approval, a question, a secret) or for its helpers holds no slot, so it never keeps
    * other bots, routines or helpers off the model.
    */
+  /** Waits for a shared-model slot, showing "queued" in the chat meanwhile. */
+  private async acquireSlot(
+    priority: Priority,
+    threadId: string,
+    botId: string,
+    signal?: AbortSignal,
+  ): Promise<() => void> {
+    let queued = false;
+    let before: ThreadActivity | undefined;
+    const release = await this.deps.runtime.acquire(priority, {
+      signal,
+      onQueued: () => {
+        queued = true;
+        before = this.activity.get(threadId)?.activity;
+        this.setActivity(threadId, botId, "queued");
+      },
+    });
+    // Back to what the chat showed before the wait.
+    if (queued) this.setActivity(threadId, botId, before && before !== "queued" ? before : "thinking");
+    return release;
+  }
+
   private withSlot(
     provider: ChatProvider,
     priority: Priority,
     threadId: string,
     botId: string,
   ): ChatProvider {
-    const { runtime } = this.deps;
-    const acquire = async (signal?: AbortSignal) => {
-      let queued = false;
-      let before: ThreadActivity | undefined;
-      const release = await runtime.acquire(priority, {
-        signal,
-        onQueued: () => {
-          queued = true;
-          before = this.activity.get(threadId)?.activity;
-          this.setActivity(threadId, botId, "queued");
-        },
-      });
-      // Back to what the chat showed before the wait.
-      if (queued) this.setActivity(threadId, botId, before && before !== "queued" ? before : "thinking");
-      return release;
-    };
+    const acquire = (signal?: AbortSignal) => this.acquireSlot(priority, threadId, botId, signal);
     return {
       id: provider.id,
       label: provider.label,
@@ -458,6 +471,7 @@ export class TurnManager {
     };
     // Tools may change a part's status (approval cards) through this hook.
     this.partHooks.set(message.id, { parts, publish: publishFull });
+    let releaseTurnSlot: (() => void) | undefined;
 
     try {
       if (!ref) {
@@ -474,9 +488,12 @@ export class TurnManager {
       if (!info) throw new ProviderError("model_missing", `The model ${ref} is not available.`);
       const settings = runtime.settings;
       const local = resolved.provider.local ? runtime.localOptions() : undefined;
-      const provider = resolved.provider.local
-        ? this.withSlot(resolved.provider, priority, thread.id, bot.id)
-        : resolved.provider;
+      if (resolved.provider.local && turn.options.wholeTurn)
+        releaseTurnSlot = await this.acquireSlot(priority, thread.id, bot.id, signal);
+      const provider =
+        resolved.provider.local && !releaseTurnSlot
+          ? this.withSlot(resolved.provider, priority, thread.id, bot.id)
+          : resolved.provider;
       const contextWindow = provider.local
         ? Math.min(settings.numCtx, info.contextWindow ?? settings.numCtx)
         : (info.contextWindow ?? 32_768);
@@ -575,6 +592,7 @@ export class TurnManager {
       }
       persist({ parts, status: stopped ? "stopped" : "error" });
     } finally {
+      releaseTurnSlot?.();
       clearInterval(saver);
       this.partHooks.delete(message.id);
       this.activityShown.delete(`${thread.id}:${bot.id}`);

@@ -37,6 +37,43 @@ async function startRace(
 }
 
 describe("races", () => {
+  it("lets one racer finish on the local model before the next starts", async () => {
+    const order: string[] = [];
+    const steps = new Map<string, number>();
+    h = await makeHarness({
+      handlers: fakeOllama((body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        const who = /^You are (\w+)/.exec(system)?.[1] ?? "?";
+        order.push(who);
+        if (system.includes("You are the judge of a race"))
+          return reply("Winner: Wren\n\n## Final result\nDone.");
+        const step = (steps.get(who) ?? 0) + 1;
+        steps.set(who, step);
+        // Each racer plans first, then answers: two model calls per racer.
+        if (step === 1)
+          return ndjson([
+            {
+              message: {
+                tool_calls: [
+                  { function: { name: "update_plan", arguments: { steps: [{ step: "Think" }] } } },
+                ],
+              },
+            },
+            { done: true },
+          ]);
+        return reply(`Strategy: be ${who}-ish.\n${who} says: Bean There.`);
+      }),
+    });
+    expect((await startRace(h)).statusCode).toBe(201);
+    expect(await ended(h)).toMatchObject({ status: "done" });
+
+    const racerCalls = order.filter((who) => who !== "Judge");
+    expect(racerCalls).toHaveLength(6);
+    // With one slot (the default), each racer's two calls come back to back instead of interleaved.
+    for (let i = 0; i < racerCalls.length; i += 2) expect(racerCalls[i + 1]).toBe(racerCalls[i]);
+    expect(new Set(racerCalls).size).toBe(3);
+  });
+
   it("runs every racer alone on the task, then the judge scores them and compiles the best", async () => {
     const seen: Seen[] = [];
     h = await makeHarness({

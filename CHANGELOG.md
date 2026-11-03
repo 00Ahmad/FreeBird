@@ -2,6 +2,16 @@
 
 All notable changes to FreeBird. The format follows [Keep a Changelog](https://keepachangelog.com), and the project uses [semantic versioning](https://semver.org).
 
+## 0.0.2 - 2026-11-03
+
+### Changed
+
+- **Races run one racer at a time on a local model again.** Each racer keeps the model until it has finished, then the next one starts, instead of the racers trading the model after every step. That avoids re-reading each racer's conversation, and switching models in the middle of a racer's work when racers use different local models. Raise **Bots at once** to run several racers at the same time.
+
+### Fixed
+
+- Deleting a bot no longer announces a change to its computer when it never had one.
+
 ## 0.0.1 - 2026-11-03
 
 The first public version.

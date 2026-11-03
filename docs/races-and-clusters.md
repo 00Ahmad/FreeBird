@@ -38,7 +38,7 @@ Press **Stop** at any time to end the race. Links the racers never actually open
 ### Tips
 
 - Races shine on open-ended tasks with many good answers. For a single fact, one bot is enough.
-- Each racer is a full bot run, so a race costs about racers × one reply. On one local model with **Bots at once** set to 1, racers take turns; raise it in **Settings → Local model** if your GPU has room.
+- Each racer is a full bot run, so a race costs about racers × one reply. On a local model, racers run **one after another**: each keeps the model until it has finished, then the next one starts (and if racers use different local models, the model is switched only between racers). Raise **Bots at once** in **Settings → Local model** to run several at the same time if your GPU has room.
 
 ---
 

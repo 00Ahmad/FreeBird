@@ -208,7 +208,7 @@ export function installRaces(services: Services) {
           racer.status = "running";
           racer.startedAt = new Date().toISOString();
           publish(state);
-          const reply = await turns.start(own, bot, "user");
+          const reply = await turns.start(own, bot, "user", { wholeTurn: true });
           racer.messageId = reply.id;
           racer.status = reply.status === "done" ? "done" : reply.status === "stopped" ? "stopped" : "error";
           racer.finishedAt = new Date().toISOString();
@@ -227,7 +227,9 @@ export function installRaces(services: Services) {
       }
       state.status = "judging";
       publish(state);
-      let report = await turns.start(store.threads.get(thread.id) ?? thread, judge, "user");
+      let report = await turns.start(store.threads.get(thread.id) ?? thread, judge, "user", {
+        wholeTurn: true,
+      });
       report = keepRacersLinks(report, racers) ?? report;
       state.reportId = report.id;
       state.winnerId = parseWinner(messageText(report), racers)?.id ?? null;

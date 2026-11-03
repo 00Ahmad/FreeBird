@@ -45,7 +45,7 @@ FreeBird is a TypeScript monorepo with three running pieces: an **Electron shell
 
 ## The shared model runtime
 
-Local models are expensive to load, so one model serves every bot. `ModelRuntime` keeps it loaded with the same `num_ctx` and `keep_alive` on every request, warms it at start, and hands out a limited number of slots (**Bots at once**) through a priority queue: user chats, then routines, then background jobs. A turn holds a slot only while the model is generating, never while it waits for you or for helpers, so an unanswered approval card can't block other bots.
+Local models are expensive to load, so one model serves every bot. `ModelRuntime` keeps it loaded with the same `num_ctx` and `keep_alive` on every request, warms it at start, and hands out a limited number of slots (**Bots at once**) through a priority queue: user chats, then routines, then background jobs. A turn holds a slot only while the model is generating, never while it waits for you or for helpers, so an unanswered approval card can't block other bots. Racers are the exception: they never wait for you, so each keeps the slot for its whole turn and racers finish one after another instead of swapping the model's attention (or the model itself) at every step.
 
 ## Events and resume
 
