@@ -2,8 +2,11 @@ import {
   AVATAR_COLORS,
   AVATAR_SHAPES,
   Bot,
+  BotTools,
   compareBots,
+  DEFAULT_BOT_TOOLS,
   newId,
+  restrictsTools,
   type Avatar,
   type CreateBotInput,
   type UpdateBotInput,
@@ -20,6 +23,20 @@ const SELECT_BOTS = `
     WHERE tm.bot_id = b.id AND t.kind = 'direct'
   ) AS thread_id
   FROM bots b`;
+
+/** The saved tool lists. A value that doesn't read (hand-edited, from a newer version) means "no restriction", not an error that hides every bot. */
+function readTools(value: unknown): BotTools {
+  if (typeof value !== "string" || !value) return DEFAULT_BOT_TOOLS;
+  try {
+    const parsed = BotTools.safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : DEFAULT_BOT_TOOLS;
+  } catch {
+    return DEFAULT_BOT_TOOLS;
+  }
+}
+
+/** Saved as NULL when there's nothing to restrict, so bots without a list keep a row exactly as before. */
+const writeTools = (tools: BotTools) => (restrictsTools(tools) ? JSON.stringify(tools) : null);
 
 function toBot(row: Row): Bot {
   return Bot.parse({
@@ -43,6 +60,7 @@ function toBot(row: Row): Bot {
     temporary: row.temporary === 1,
     visual: row.visual === 1,
     clusterId: row.cluster_id ?? null,
+    tools: readTools(row.tools),
     threadId: row.thread_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -85,8 +103,9 @@ export class BotRepo {
       this.db
         .prepare(
           `INSERT INTO bots (id, name, label, avatar_shape, avatar_color, avatar_image, is_primary, model,
-             instructions, coordinator, parent_id, temporary, section, visual, cluster_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             instructions, coordinator, parent_id, temporary, section, visual, cluster_id, tools, created_at,
+             updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -104,6 +123,7 @@ export class BotRepo {
           helper?.section ?? null,
           input.visual ? 1 : 0,
           clusterId ?? null,
+          writeTools(input.tools ?? DEFAULT_BOT_TOOLS),
           now,
           now,
         );
@@ -128,7 +148,7 @@ export class BotRepo {
         .prepare(
           `UPDATE bots SET name = ?, label = ?, avatar_shape = ?, avatar_color = ?, avatar_image = ?, is_primary = ?,
              pinned = ?, hidden = ?, model = ?, instructions = ?, section = ?, notifications = ?, coordinator = ?,
-             updated_at = ?
+             tools = ?, updated_at = ?
            WHERE id = ?`,
         )
         .run(
@@ -146,6 +166,7 @@ export class BotRepo {
           next.notifications ? 1 : 0,
           // Helpers never coordinate: that is what keeps delegation one level deep.
           next.coordinator && next.parentId === null ? 1 : 0,
+          writeTools(next.tools),
           new Date().toISOString(),
           id,
         );

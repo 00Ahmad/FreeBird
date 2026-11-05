@@ -62,6 +62,11 @@ export function shop(): Server {
       return;
     }
     if (url.pathname === "/check") return html(`<p>Please verify you are human to continue.</p>`);
+    // A check that goes away after a moment, as when the user solves it.
+    if (url.pathname === "/solvable") {
+      return html(`<p id="gate">Please verify you are human to continue.</p>
+        <script>setTimeout(() => { document.body.innerHTML = "<h1>Results</h1><p>" + "Plenty of results. ".repeat(200) + "</p>"; }, 1500);</script>`);
+    }
     // A mail page: a search box, a reply box, a Send button, an icon-only button and a link to a new tab.
     if (url.pathname === "/compose") {
       return html(`<input type="search" aria-label="Search mail"><br>
@@ -70,6 +75,35 @@ export function shop(): Server {
         <button id="bin" style="width:28px;height:28px"><span style="display:inline-block;width:14px;height:14px;background:#555"></span></button>
         <button onclick="this.textContent = 'Starred'">Star</button>
         <a href="/p/1" target="_blank">Open in a new tab</a>`);
+    }
+    // A harmless "Next page" button under a see-through "Subscribe now" layer (like a pop-up over a page), and a
+    // made-up checkbox whose input sits under its picture (as many sites draw them).
+    if (url.pathname === "/covered") {
+      // ?layer=off: nothing on top; ?layer=plain: a layer that is no control (like a video preview sliding over).
+      const kind = url.searchParams.get("layer") ?? "subscribe";
+      const layer = kind !== "off";
+      const action = kind === "plain" ? "" : `onclick="document.title='subscribed'"`;
+      return html(`<button id="next" style="position:absolute;left:300px;top:300px;width:160px;height:40px" onclick="document.title='next clicked'">Next page</button>
+        <label style="position:absolute;left:300px;top:420px">
+          <input type="checkbox" id="keep" onchange="document.title='kept'" style="position:absolute;left:0;top:0;width:20px;height:20px;margin:0">
+          <span style="position:relative;display:inline-block;width:20px;height:20px;background:#ccc"></span> Keep me posted
+        </label>
+        <label style="position:absolute;left:300px;top:480px"><input type="checkbox"> I agree to the terms</label>
+        ${layer ? `<div ${action} style="position:fixed;left:0;top:0;width:100%;height:380px;background:rgba(255,255,255,0.01)">${kind === "plain" ? "" : "Subscribe now"}</div>` : ""}`);
+    }
+    // What the page can tell about the browser: whether it says it is automated, and the name it gives.
+    if (url.pathname === "/whoami") {
+      return html(`<p id="who"></p><script>document.getElementById("who").textContent =
+        "webdriver=" + navigator.webdriver + " agent=" + navigator.userAgent;</script>`);
+    }
+    // An ordinary article that only looks like a human check: it talks about security checks at length and carries
+    // an invisible reCAPTCHA and a hidden captcha field, as many sign-in and contact pages do.
+    if (url.pathname === "/article") {
+      return html(`<h1>Getting through the airport security check</h1>
+        <p>${"Arrive early, keep liquids apart, and take your laptop out at the security check. ".repeat(60)}</p>
+        <iframe src="/recaptcha/api2/anchor?size=invisible" title="reCAPTCHA" width="256" height="60"></iframe>
+        <input type="hidden" id="captcha_token" value="x">
+        <button onclick="document.title='read more'">Read more</button>`);
     }
     // A page whose script calls the address given in ?to= (like a page probing a router).
     if (url.pathname === "/probe") {

@@ -10,15 +10,21 @@ import {
   NewPermissionRule,
   Permissions,
   PlanStepStatus,
+  restrictsTools,
+  toolAllowed,
   type Bot,
+  type AppToolKind,
+  type BotTools,
   type Thread,
+  type ToolGroup,
+  type ToolInfo,
 } from "@mrog/shared";
 import { BUILTIN_TOOLS, createToolHost, defineTool, safe, type Risk, type ToolSpec } from "@mrog/tools";
 
 import { fail, parse } from "../http";
 import type { TurnInfo } from "../turns";
 import type { Services } from "../services";
-import { VISUAL_BOT_KEEPS } from "../visual";
+import { VISUAL_BOT_KEEPS, VISUAL_TOOL_NAMES } from "../visual";
 import { ApprovalBroker, QuestionBroker, type TurnScope } from "./approvals";
 
 export { ApprovalBroker, QuestionBroker } from "./approvals";
@@ -40,6 +46,55 @@ export interface Agent {
   workspaceFor(botId: string): string;
   settings(): AgentSettings;
   saveSettings(next: AgentSettings): AgentSettings;
+  /** Every tool the bot would have if its own tool list allowed all of them (what the Details panel offers). */
+  listTools(bot: Bot): ToolInfo[];
+  /**
+   * Limits from outside the bot's own tool list (its coordinator's list, its access to a connected app). Each says
+   * why a tool is held off for this bot, or null. The bot's own list is checked separately.
+   */
+  toolGates: ((bot: Bot, toolName: string) => string | null)[];
+  /** Whether the bot may use this tool at all: its own list and every gate. */
+  allows(bot: Bot, toolName: string): boolean;
+  /** Why the bot may not use this tool, or null when it may. */
+  heldBy(bot: Bot, toolName: string): string | null;
+  /** Lines for the end of the prompt about limits a gate sets (e.g. "you can only read from Gmail"). */
+  limitNotes: ((bot: Bot) => string | null)[];
+  /** Takes the user's secret values out of tool results and errors (set once the scrubber exists). */
+  scrub?(text: string): string;
+  /** For a connected app's tool: the app and what the tool does there (set once connectors exist). */
+  describeApp?(toolName: string): { id: string; name: string; kind: AppToolKind } | null;
+}
+
+const GROUPS: [RegExp, ToolGroup][] = [
+  [/^(list_files|read_file|write_file|edit_file|search_files)$/, "files"],
+  [/^run_command$/, "commands"],
+  [/^(fetch_url|web_search)$/, "web"],
+  [/^(browser_|screen_)/, "browser"],
+  [/^computer_/, "computer"],
+  [/^(request_secret|use_login)$/, "vault"],
+  [/^(spawn_bot|delegate|dismiss_bot|message_bot)$/, "team"],
+  [/^(remember|forget)$/, "memory"],
+  [/__|^query_result$/, "apps"],
+];
+export const toolGroup = (name: string): ToolGroup =>
+  GROUPS.find(([pattern]) => pattern.test(name))?.[1] ?? "chat";
+
+/** The line that tells a model which of the tools mentioned elsewhere in its prompt it doesn't have. */
+export function toolLimitsNote(tools: BotTools): string | null {
+  if (!restrictsTools(tools)) return null;
+  const parts: string[] = [];
+  if (tools.allow !== null)
+    parts.push(
+      tools.allow.length === 0
+        ? "You have no tools in this chat: answer from what you know and what the user tells you."
+        : `You may use only these tools: ${tools.allow.join(", ")}.`,
+    );
+  if (tools.exclude.length > 0)
+    parts.push(`These tools are turned off for you and can't be used: ${tools.exclude.join(", ")}.`);
+  parts.push(
+    "This overrides anything above that says you have a tool: don't try to call one that isn't available. If a job needs one, say so plainly instead of working around it.",
+  );
+  return parts.join(" ");
 }
 
 const SETTINGS_KEY = "agent";
@@ -92,6 +147,9 @@ const ENVIRONMENT =
       ? "This computer runs macOS; commands run in sh."
       : "This computer runs Linux; commands run in sh.";
 
+/** Tools by which a coordinator hands work to others and waits: their calls are still "running" while a helper acts. */
+const HAND_OFFS = new Set(["delegate", "message_bot"]);
+
 const NO_CARDS_IN_GROUPS =
   "Not available in group chats: this needs the user's approval, and approval cards can't be shown here. Do without it, or tell the user to ask you in your own chat.";
 
@@ -137,6 +195,89 @@ export function installAgent(services: Services): Agent {
       bus.publish({ type: "data.changed", keys: ["agent-settings"] });
       return next;
     },
+    listTools: (bot) => listTools(bot),
+    toolGates: [],
+    limitNotes: [],
+    allows: (bot, name) => heldBy(bot, name) === null,
+    heldBy: (bot, name) => heldBy(bot, name),
+  };
+
+  /** The bot's own list first, then every gate. */
+  const heldBy = (bot: Bot, name: string): string | null => {
+    if (!toolAllowed(bot.tools, name)) return "switched off in its tool list";
+    for (const gate of agent.toolGates) {
+      const reason = gate(bot, name);
+      if (reason) return reason;
+    }
+    return null;
+  };
+
+  // A helper can't do more than the bot that made it: otherwise a coordinator with a tool switched off could make a
+  // helper and hand it the job. Checked through the coordinator's own gates too (its access to connected apps).
+  agent.toolGates.push((bot, name) => {
+    if (!bot.parentId) return null;
+    const parent = store.bots.get(bot.parentId);
+    if (!parent || agent.allows(parent, name)) return null;
+    return `held off for ${parent.name}, which made this helper`;
+  });
+
+  /** The tools a turn of this bot would be offered before the bot's own list is applied. */
+  const assemble = (bot: Bot, thread: Thread, messageId: string, info: TurnInfo): ToolSpec[] => {
+    const all = [
+      ...BUILTIN_TOOLS,
+      ...(agent.settings().planning ? [updatePlanTool] : []),
+      ...agent.toolSources.flatMap((source) => source(bot, thread, messageId, info)),
+    ];
+    // A Visual Bot works only from what it sees: no tools that read pages as text or run commands.
+    const visible = bot.visual
+      ? all.filter((spec) => VISUAL_TOOL_NAMES.has(spec.name) || VISUAL_BOT_KEEPS.has(spec.name))
+      : all;
+    return agent.toolFilters.reduce((list, filter) => filter(bot, thread, list), visible);
+  };
+
+  const listTools = (bot: Bot): ToolInfo[] => {
+    const thread = store.threads.get(bot.threadId);
+    const offered = thread ? assemble(bot, thread, "preview", { delegated: false }) : [];
+    const listed = offered.map((spec): ToolInfo => {
+      const app = agent.describeApp?.(spec.name) ?? null;
+      const own = toolAllowed(bot.tools, spec.name);
+      // Held off from outside the bot's list (its coordinator, its access to an app): no switch here can change that.
+      const gate = own ? heldBy(bot, spec.name) : null;
+      // Held off by a pattern (`gmail__*`) or by an allow list: the panel only edits exact names in `exclude`.
+      const exact = bot.tools.exclude.includes(spec.name);
+      const heldByAllow = bot.tools.allow !== null && !toolAllowed({ ...bot.tools, exclude: [] }, spec.name);
+      const heldByPattern = !own && !exact && bot.tools.exclude.some((pattern) => pattern.endsWith("*"));
+      return {
+        name: spec.name,
+        description: spec.description,
+        group: toolGroup(spec.name),
+        enabled: own && gate === null,
+        available: true,
+        editable: gate !== null ? false : own ? !heldByAllow : exact && !heldByAllow && !heldByPattern,
+        heldBy:
+          gate ??
+          (heldByAllow
+            ? "outside its allow list"
+            : heldByPattern
+              ? "switched off by a pattern in its list"
+              : null),
+        ...(app ? { app: { id: app.id, name: app.name, kind: app.kind } } : {}),
+      };
+    });
+    // Named in the list but not offered right now (a stopped computer, a disconnected app): still shown, so
+    // it can be switched back on.
+    const missing = bot.tools.exclude
+      .filter((name) => !name.endsWith("*") && !offered.some((spec) => spec.name === name))
+      .map((name): ToolInfo => ({
+        name,
+        description: "Not available right now.",
+        group: toolGroup(name),
+        enabled: false,
+        available: false,
+        editable: true,
+        heldBy: null,
+      }));
+    return [...listed, ...missing];
   };
 
   // Helpers hand their answer to a coordinator that checks it, so only top-level turns check themselves.
@@ -163,22 +304,11 @@ export function installAgent(services: Services): Agent {
       ...(surface ? { asBot: bot.name } : {}),
     };
     const workspace = agent.workspaceFor(bot.id);
-    const all = [
-      ...BUILTIN_TOOLS,
-      ...(agent.settings().planning ? [updatePlanTool] : []),
-      ...agent.toolSources.flatMap((source) => source(bot, thread, scope.messageId, info)),
-    ];
-    // A Visual Bot works only from what it sees: no tools that read pages as text or run commands.
-    const visible = bot.visual
-      ? all.filter(
-          (spec) =>
-            spec.name.startsWith("screen_") ||
-            spec.name.startsWith("browser_") ||
-            VISUAL_BOT_KEEPS.has(spec.name),
-        )
-      : all;
-    const filtered = agent.toolFilters.reduce((list, filter) => filter(bot, thread, list), visible);
-    const specs = scope.groupChat ? filtered.map((spec) => withoutCards(spec, approvals)) : filtered;
+    // The bot's own list comes last, so it narrows whatever the app offered for this kind of turn. The host is built
+    // from what is left: a tool that is off isn't just hidden, a call to it by name finds nothing to run.
+    const specs = assemble(bot, thread, scope.messageId, info)
+      .filter((spec) => agent.allows(bot, spec.name))
+      .map((spec) => (scope.groupChat ? withoutCards(spec, approvals) : spec));
     return createToolHost(
       specs,
       {
@@ -186,10 +316,41 @@ export function installAgent(services: Services): Agent {
         botId: bot.id,
         botName: bot.name,
         threadId: thread.id,
-        ask: (question) => questions.ask(question, scope),
+        ask: (question, choices) => questions.ask(question, scope, choices),
         env: agent.envFor?.(bot),
       },
       (request) => approvals.decide(request, scope),
+      {
+        // Marked on this turn's own message and saved before the call starts, so that if the app dies during it,
+        // the restart knows it may have happened (see the store's recoverInterrupted).
+        scrub: (text) => (agent.scrub ? agent.scrub(text) : text),
+        outward: (call) => {
+          const hook = turns.partHooks.get(messageId);
+          const part = hook?.parts.find((p) => p.type === "tool" && p.callId === call.id);
+          if (hook && part?.type === "tool") {
+            part.outward = true;
+            hook.publish();
+          }
+          // A helper works in a chat of its own, but the user is looking at the coordinator's message, where all it
+          // shows is the hand-off still running. After a crash that has to say "may have happened" too.
+          const coordinator =
+            surface && surface.messageId !== messageId ? turns.partHooks.get(surface.messageId) : null;
+          if (coordinator) {
+            let marked = false;
+            for (const handedOver of coordinator.parts) {
+              if (
+                handedOver.type === "tool" &&
+                handedOver.status === "running" &&
+                HAND_OFFS.has(handedOver.name)
+              ) {
+                handedOver.outward = true;
+                marked = true;
+              }
+            }
+            if (marked) coordinator.publish();
+          }
+        },
+      },
     );
   };
 
@@ -211,13 +372,28 @@ export function installAgent(services: Services): Agent {
       memory.push(...(result.memory ?? []));
       extra.push(...(result.extra ?? []));
     }
+    // Last, so it has the final word over the lines above that describe tools this bot may not have. A helper is held
+    // to the limits of the bot that made it as well as its own.
+    const parent = bot.parentId ? store.bots.get(bot.parentId) : null;
+    for (const note of [
+      toolLimitsNote(bot.tools),
+      parent && toolLimitsNote(parent.tools)
+        ? `The bot that made you has limits that apply to you too. ${toolLimitsNote(parent.tools)}`
+        : null,
+      ...agent.limitNotes.map((limitsOf) => limitsOf(bot)),
+    ])
+      if (note) extra.push(note);
     return { memory, extra };
   };
 
   return agent;
 }
 
-const Answer = z.object({ answer: z.string().trim().min(1).max(4000) });
+/** A typed answer, or the choices ticked on a card (up to six options, plus one the user typed). */
+const Answer = z.union([
+  z.object({ answer: z.string().trim().min(1).max(4000) }),
+  z.object({ choices: z.array(z.string().trim().min(1).max(200)).min(1).max(7) }),
+]);
 
 export function registerAgentRoutes(app: FastifyInstance, agent: Agent) {
   app.post<{ Params: { id: string } }>("/api/approvals/:id", async (request, reply) => {
@@ -232,7 +408,9 @@ export function registerAgentRoutes(app: FastifyInstance, agent: Agent) {
   app.post<{ Params: { id: string } }>("/api/questions/:id", async (request, reply) => {
     const body = parse(Answer, request.body, reply);
     if (!body) return reply;
-    if (!agent.questions.respond(request.params.id, body.answer)) {
+    // Several picks are kept one per line: a choice may have a comma in it.
+    const answer = "answer" in body ? body.answer : body.choices.join("\n");
+    if (!agent.questions.respond(request.params.id, answer)) {
       return fail(reply, 410, "expired", "This question is no longer waiting.");
     }
     return reply.code(204).send();

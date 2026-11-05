@@ -4,7 +4,7 @@ import { BotId } from "./ids";
 
 const Time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "HH:MM");
 
-/** When a routine runs (UI-SPEC §10). Times are local to this computer. */
+/** When a routine runs. Times are local to this computer. */
 export const RoutineTrigger = z.discriminatedUnion("type", [
   /** Days 0 = Sunday … 6 = Saturday. */
   z.object({

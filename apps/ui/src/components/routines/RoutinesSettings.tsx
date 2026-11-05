@@ -14,7 +14,7 @@ import { RoutineEditor } from "./RoutineEditor";
 const WEEK = [1, 2, 3, 4, 5, 6, 0];
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-/** Right-click actions shared by the calendar and lists (UI-SPEC §10). */
+/** Right-click actions shared by the calendar and lists. */
 export function useRoutineMenu() {
   const { save, remove, run } = useRoutineActions();
   const [menu, setMenu] = useState<{ x: number; y: number; entries: MenuEntry[] } | null>(null);

@@ -4,9 +4,23 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { z } from "zod";
+
 import { flattenSchema } from "@mrog/providers";
 
-import { BUILTIN_TOOLS, createToolHost, htmlToText, isPrivateHost, type ApprovalRequest } from ".";
+import {
+  BUILTIN_TOOLS,
+  cleanOptions,
+  createToolHost,
+  defineTool,
+  DENIED_RESULT,
+  htmlToText,
+  isPrivateHost,
+  TIMED_OUT_RESULT,
+  type ApprovalRequest,
+  type Risk,
+  type ToolSpec,
+} from ".";
 
 let workspace: string;
 beforeEach(() => {
@@ -36,6 +50,241 @@ function host(decision: "allow" | "deny" = "allow") {
   return { tools, asked, call };
 }
 
+describe("secrets given to one command", () => {
+  const withSecrets = (env: Record<string, string>) =>
+    createToolHost(
+      BUILTIN_TOOLS,
+      { workspace, botId: "bot_x", botName: "Ada", threadId: "thr_x", ask: async () => "", env },
+      async () => "allow",
+    );
+  // Prints how long the variable is (or "none"), so the test sees whether it arrived without printing it.
+  const probe = (name: string) =>
+    `node -e "console.log(process.env.${name} ? process.env.${name}.length : 'none')"`;
+
+  it("gives a command only the granted secrets it names", async () => {
+    const tools = withSecrets({ API_TOKEN: "tok-0123456789", OTHER_TOKEN: "other-0123456789" });
+    const run = (args: Record<string, unknown>) =>
+      tools.execute({ id: "c", name: "run_command", arguments: args }, new AbortController().signal);
+
+    expect((await run({ command: probe("API_TOKEN") })).result).toMatch(/^none/);
+    expect((await run({ command: probe("API_TOKEN"), secrets: ["API_TOKEN"] })).result).toMatch(/^14/);
+    // Named one, not the other.
+    expect((await run({ command: probe("OTHER_TOKEN"), secrets: ["API_TOKEN"] })).result).toMatch(/^none/);
+    // A model that writes the names as one string.
+    expect((await run({ command: probe("OTHER_TOKEN"), secrets: "API_TOKEN, OTHER_TOKEN" })).result).toMatch(
+      /^16/,
+    );
+  });
+
+  it("refuses a secret the bot wasn't given, and runs nothing", async () => {
+    const tools = withSecrets({ API_TOKEN: "tok-0123456789" });
+    const outcome = await tools.execute(
+      {
+        id: "c",
+        name: "run_command",
+        arguments: { command: "echo should-not-run", secrets: ["NOT_GRANTED"] },
+      },
+      new AbortController().signal,
+    );
+    expect(outcome.status).toBe("error");
+    expect(outcome.result).toMatch(/haven't been given NOT_GRANTED/);
+    expect(outcome.result).not.toContain("should-not-run");
+  });
+
+  it("names the secrets on the approval card, with a badge", async () => {
+    const asked: ApprovalRequest[] = [];
+    const tools = createToolHost(
+      BUILTIN_TOOLS,
+      {
+        workspace,
+        botId: "b",
+        botName: "B",
+        threadId: "t",
+        ask: async () => "",
+        env: { API_TOKEN: "tok-0123456789" },
+      },
+      async (request) => {
+        asked.push(request);
+        return "deny";
+      },
+    );
+    await tools.execute(
+      { id: "c", name: "run_command", arguments: { command: "gh pr list", secrets: ["API_TOKEN"] } },
+      new AbortController().signal,
+    );
+    expect(asked[0]?.risk.badges).toContain("Gives the command your saved secrets");
+    expect(asked[0]?.risk.summary).toContain("with your secrets: API_TOKEN");
+  });
+});
+
+describe("questions with choices", () => {
+  it("cleans up whatever form a model sends the choices in", () => {
+    expect(cleanOptions(["Red", "Green", "Blue"])).toEqual(["Red", "Green", "Blue"]);
+    expect(cleanOptions('["Red","Green"]')).toEqual(["Red", "Green"]);
+    expect(cleanOptions("Red\nGreen\nBlue")).toEqual(["Red", "Green", "Blue"]);
+    expect(cleanOptions("- Red\n* Green\n1. Blue\n2) Teal\n• Pink")).toEqual([
+      "Red",
+      "Green",
+      "Blue",
+      "Teal",
+      "Pink",
+    ]);
+    expect(cleanOptions([{ label: "Red" }, { text: "Green" }, { value: "Blue" }, { nope: 1 }, 7])).toEqual([
+      "Red",
+      "Green",
+      "Blue",
+      "7",
+    ]);
+  });
+
+  it("keeps a choice's own comma, and drops repeats, blanks and overlong choices", () => {
+    expect(cleanOptions("Paris, France\nBerlin, Germany")).toEqual(["Paris, France", "Berlin, Germany"]);
+    expect(cleanOptions(["Red", "red", " RED ", "Green", "", "  "])).toEqual(["Red", "Green"]);
+    expect(cleanOptions(["ok", "x".repeat(101), "fine"])).toEqual(["ok", "fine"]);
+    expect(cleanOptions(Array.from({ length: 10 }, (_, i) => `Option ${i}`))).toHaveLength(6);
+  });
+
+  it("is not a choice with fewer than two usable options", () => {
+    for (const value of [
+      undefined,
+      null,
+      "",
+      "   ",
+      [],
+      ["only one"],
+      "Just one line",
+      { a: 1 },
+      5,
+      ["a", "a"],
+    ])
+      expect(cleanOptions(value), JSON.stringify(value)).toBeUndefined();
+  });
+
+  it("passes choices to the question and reports several picks one per line", async () => {
+    const seen: unknown[] = [];
+    const tools = createToolHost(
+      BUILTIN_TOOLS,
+      {
+        workspace,
+        botId: "bot_x",
+        botName: "Ada",
+        threadId: "thr_x",
+        ask: async (_question, choices) => {
+          seen.push(choices);
+          return choices?.multiple ? "Paris, France\nBerlin" : "Red";
+        },
+      },
+      async () => "allow",
+    );
+    const ask = (args: Record<string, unknown>) =>
+      tools.execute({ id: "c", name: "ask_user", arguments: args }, new AbortController().signal);
+
+    expect(await ask({ question: "Colour?", options: "Red\nGreen" })).toMatchObject({
+      status: "done",
+      result: "The user answered: Red",
+    });
+    expect(seen.at(-1)).toEqual({ options: ["Red", "Green"], multiple: undefined });
+
+    // A model that writes "true" for a boolean, and the choices as a JSON string.
+    const several = await ask({
+      question: "Cities?",
+      options: '["Paris, France","Berlin"]',
+      multiple: "true",
+    });
+    expect(several.result).toBe("The user chose:\n- Paris, France\n- Berlin");
+    expect(seen.at(-1)).toEqual({ options: ["Paris, France", "Berlin"], multiple: true });
+
+    // One option is no choice: it is a plain question, asked as before.
+    expect(await ask({ question: "Name?", options: ["Only"] })).toMatchObject({ status: "done" });
+    expect(seen.at(-1)).toEqual({ options: undefined, multiple: undefined });
+  });
+});
+
+describe("outward calls and unanswered approvals", () => {
+  const spec = (name: string, risk: Risk, order: string[]) =>
+    defineTool({
+      name,
+      description: name,
+      args: z.object({}),
+      risk: () => risk,
+      run: async () => {
+        order.push("run");
+        return "ran";
+      },
+    });
+  const make = (
+    specs: ToolSpec[],
+    decision: "allow" | "deny" | "timeout",
+    order: string[],
+    outward: string[] = [],
+  ) =>
+    createToolHost(
+      specs,
+      { workspace, botId: "bot_x", botName: "Ada", threadId: "thr_x", ask: async () => "" },
+      async () => {
+        order.push("approve");
+        return decision;
+      },
+      {
+        outward: (call) => {
+          order.push("outward");
+          outward.push(call.name);
+        },
+      },
+    );
+  const exec = (tools: ReturnType<typeof createToolHost>, name: string) =>
+    tools.execute({ id: "c", name, arguments: {} }, new AbortController().signal);
+
+  it("marks a call that needs approval as outward only once it is approved, and before it runs", async () => {
+    const order: string[] = [];
+    const risky = spec("send", { level: "ask", kind: "general", badges: [], summary: "send" }, order);
+    expect(await exec(make([risky], "allow", order), "send")).toMatchObject({ status: "done" });
+    expect(order).toEqual(["approve", "outward", "run"]);
+  });
+
+  it("never marks a call that was refused or went unanswered, and says which it was", async () => {
+    const risky = (order: string[]) =>
+      spec("send", { level: "ask", kind: "general", badges: [], summary: "send" }, order);
+    const denied: string[] = [];
+    expect(await exec(make([risky(denied)], "deny", denied), "send")).toEqual({
+      status: "denied",
+      result: DENIED_RESULT,
+    });
+    expect(denied).toEqual(["approve"]);
+
+    const silent: string[] = [];
+    const outcome = await exec(make([risky(silent)], "timeout", silent), "send");
+    expect(outcome).toEqual({ status: "denied", result: TIMED_OUT_RESULT });
+    // Nobody saying no is a different fact from the user saying no, and the bot gets the difference.
+    expect(TIMED_OUT_RESULT).not.toBe(DENIED_RESULT);
+    expect(TIMED_OUT_RESULT).toMatch(/Nobody answered/);
+    expect(silent).toEqual(["approve"]);
+  });
+
+  it("leaves safe calls alone, but honours a call that is safe to run unasked and still acts", async () => {
+    const order: string[] = [];
+    const outward: string[] = [];
+    const tools = make(
+      [
+        spec("look", { level: "safe", kind: "general", badges: [], summary: "look" }, order),
+        spec("act", { level: "safe", kind: "general", badges: [], summary: "act", outward: true }, order),
+        spec(
+          "read_only",
+          { level: "ask", kind: "general", badges: [], summary: "read", outward: false },
+          order,
+        ),
+      ],
+      "allow",
+      order,
+      outward,
+    );
+    await exec(tools, "look");
+    await exec(tools, "act");
+    await exec(tools, "read_only");
+    expect(outward).toEqual(["act"]);
+  });
+});
+
 describe("built-in tools", () => {
   it("writes, reads, edits, lists and searches inside the bot folder without asking", async () => {
     const { call, asked } = host();
@@ -58,7 +307,7 @@ describe("built-in tools", () => {
     const outside = join(workspace, "..", "elsewhere.txt");
     expect(await call("write_file", { path: outside, content: "x" })).toEqual({
       status: "denied",
-      result: "The user denied this.",
+      result: "The user denied this action. Do not retry it.",
     });
     expect(asked[0]?.risk).toMatchObject({
       level: "ask",

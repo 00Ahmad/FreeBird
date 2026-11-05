@@ -1,5 +1,13 @@
-export { BUILTIN_TOOLS } from "./builtins";
-export { createToolHost, normalizeArgs, type ApprovalRequest, type Approver } from "./host";
+export { BUILTIN_TOOLS, cleanOptions } from "./builtins";
+export {
+  createToolHost,
+  DENIED_RESULT,
+  normalizeArgs,
+  TIMED_OUT_RESULT,
+  type ApprovalRequest,
+  type Approver,
+  type HostHooks,
+} from "./host";
 export { displayPath, resolvePath } from "./paths";
 export { looksDestructive, runShell } from "./shell";
 export {
@@ -7,6 +15,7 @@ export {
   BADGES,
   defineTool,
   safe,
+  type AskChoices,
   type Risk,
   type ToolContext,
   type ToolResult,

@@ -209,4 +209,10 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE role = 'bot' AND bot_id IS NULL AND thread_id IN (SELECT id FROM threads WHERE cluster = 1);
     `,
   },
+  {
+    id: 13,
+    name: "bot-tools",
+    // JSON {"allow": [...] | null, "exclude": [...]}; NULL = no restriction, which is every bot made before this.
+    sql: `ALTER TABLE bots ADD COLUMN tools TEXT;`,
+  },
 ];

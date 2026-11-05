@@ -15,6 +15,24 @@ import {
 import type { BrowserManager, PageElement } from "./browser";
 
 /**
+ * The Visual Bot's own tools (made by visualTools below), by exact name: a connected app called "screen" or
+ * "browser" has tools named `screen__…`, which must not slip through as if they were these.
+ */
+export const VISUAL_TOOL_NAMES = new Set([
+  "screen_look",
+  "screen_watch",
+  "screen_go_to",
+  "screen_click",
+  "screen_click_at",
+  "screen_type",
+  "screen_press",
+  "screen_scroll",
+  "screen_back",
+  "browser_handoff",
+  "browser_sign_in",
+]);
+
+/**
  * Tools a Visual Bot keeps besides its screen tools. Everything that reads pages as text (fetch_url, web_search,
  * browser_read…) or runs commands is left out, so every decision comes from looking at the screen.
  */
@@ -106,11 +124,11 @@ export function visualPrompt(bot: Bot): string[] {
       "On every new screen, first read the map to know what controls this screen has and where they are, then look at the picture to decide which one you want, then act. Check the next screenshot and its map before the next move.",
       "Move fast, like a person clicking around: before each action write at most one short sentence (or nothing), then act. Save explanations for your final answer.",
       "To follow something that moves (a playing video, a slideshow, a page that is still loading), use screen_watch: it shows you several frames over a few seconds.",
-      "To find something, start at google.com like a person: click the search box, type your search with enter, then look at the results and pick the one whose title, site name or picture matches what you want. Do the same on YouTube and other sites with their own search boxes.",
+      "To find something, start at bing.com like a person: click the search box, type your search with enter, then look at the results and pick the one whose title, site name or picture matches what you want. Do the same on YouTube and other sites with their own search boxes. Google often stops automated browsers with a check, so use it only when you're asked to.",
       "Numbered boxes on the screenshot mark what you can click or type into. Click a box by its number (screen_click). For a spot without a box, such as inside a video, use screen_click_at with pixel coordinates from the picture. To type, click the text box first, then screen_type.",
-      "Never guess web addresses. Only use screen_go_to for a site's home page you know (like google.com or youtube.com).",
+      "Never guess web addresses. Only use screen_go_to for a site's home page you know (like bing.com or youtube.com).",
       "Scroll to see more of a page. Read prices, names and details from the picture carefully, and say where you saw them (the address bar shows the page address).",
-      'If you see a CAPTCHA, a "verify you\'re human" check, a sign-in or a payment form, call browser_handoff so the user can do it, or browser_sign_in for a sign-in form when a saved login exists.',
+      'If you see a CAPTCHA, a "verify you\'re human" check, a sign-in or a payment form, call browser_handoff right away so the user can do it (never click the check yourself), or browser_sign_in for a sign-in form when a saved login exists. After a check, you carry on by yourself once it is gone.',
     ].join(" "),
   ];
 }
@@ -142,7 +160,7 @@ export function visualTools(browser: BrowserManager, bot: Bot, sites: string[]):
     defineTool({
       name: "screen_go_to",
       description:
-        "Type an address into the address bar, like a person would: for a site's home page you know (google.com, youtube.com). Never guess deeper addresses.",
+        "Type an address into the address bar, like a person would: for a site's home page you know (bing.com, youtube.com). Never guess deeper addresses.",
       args: z.object({ address: z.string().trim().min(3).max(500) }),
       prepare: (args) => {
         const address = typeof args.address === "string" ? args.address.trim() : args.address;
@@ -254,14 +272,12 @@ export function visualTools(browser: BrowserManager, bot: Bot, sites: string[]):
       args: z.object({ reason: z.string().trim().min(1).max(500).describe("What the user should do") }),
       risk: () => safe("Ask the user to take over the browser"),
       run: async (args, ctx) => {
-        const shown = browser.settings().show;
-        if (shown) await browser.focus(id);
-        const where = shown
-          ? `in the browser window (${bot.name}'s tab) or in the Browser panel of this chat`
-          : "in the Browser panel of this chat";
-        const answer = await ctx.ask(`${args.reason}\n\nDo it ${where}, then reply here, e.g. “done”.`);
+        const { solved, answer } = await browser.handOff(id, bot.name, args.reason, ctx);
         const after = await browser.look(id);
-        return { text: `The user replied: ${answer}\n${after.text}`, images: after.images };
+        const said = solved
+          ? "The user solved the check; it's gone from the page."
+          : `The user replied: ${answer}`;
+        return { text: `${said}\n${after.text}`, images: after.images };
       },
     }),
     ...(sites.length > 0

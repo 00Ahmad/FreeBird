@@ -10,9 +10,17 @@ export interface RuntimeSettingsStore {
 export type Priority = "user" | "routine" | "background";
 const RANK: Record<Priority, number> = { user: 0, routine: 1, background: 2 };
 
+/**
+ * Every this long a request has waited, it counts as one rank more urgent. Without it, a busy conversation keeps a
+ * routine or a background job off the model for as long as the conversation lasts.
+ */
+export const AGING_MS = 60_000;
+
 interface Waiter {
   rank: number;
   seq: number;
+  /** When it joined the queue (the runtime's clock). */
+  since: number;
   grant(release: () => void): void;
 }
 
@@ -29,6 +37,7 @@ export class ModelRuntime {
     private readonly store: RuntimeSettingsStore,
     readonly ollama: OllamaProvider,
     private readonly onChange: () => void = () => {},
+    private readonly timing: { agingMs?: number; now?: () => number } = {},
   ) {}
 
   get settings(): RuntimeSettings {
@@ -88,6 +97,7 @@ export class ModelRuntime {
       const waiter: Waiter = {
         rank: RANK[priority],
         seq: this.seq++,
+        since: this.now(),
         grant: (release) => {
           signal?.removeEventListener("abort", onAbort);
           resolve(release);
@@ -101,7 +111,6 @@ export class ModelRuntime {
       };
       signal?.addEventListener("abort", onAbort, { once: true });
       this.waiting.push(waiter);
-      this.waiting.sort((a, b) => a.rank - b.rank || a.seq - b.seq);
       onQueued?.();
       this.onChange();
     });
@@ -131,9 +140,31 @@ export class ModelRuntime {
     };
   }
 
+  private now(): number {
+    return (this.timing.now ?? Date.now)();
+  }
+
+  /**
+   * Who goes next: the most urgent, where a request that has waited gets more urgent with time but never beyond a
+   * user's chat; first come first served among equals. Looked at when a slot frees up, since it changes as they wait.
+   */
+  private takeNext(): Waiter {
+    const aging = this.timing.agingMs ?? AGING_MS;
+    const now = this.now();
+    const urgency = (waiter: Waiter) =>
+      Math.max(0, waiter.rank - Math.floor(Math.max(0, now - waiter.since) / aging));
+    let best = 0;
+    for (let i = 1; i < this.waiting.length; i++) {
+      const a = this.waiting[i]!;
+      const b = this.waiting[best]!;
+      if (urgency(a) < urgency(b) || (urgency(a) === urgency(b) && a.seq < b.seq)) best = i;
+    }
+    return this.waiting.splice(best, 1)[0]!;
+  }
+
   private pump() {
     while (this.running < this.settings.parallel && this.waiting.length > 0) {
-      const next = this.waiting.shift()!;
+      const next = this.takeNext();
       this.running += 1;
       next.grant(this.releaser());
     }

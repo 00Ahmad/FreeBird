@@ -329,7 +329,9 @@ describe("how bots work", () => {
   });
 
   it("uses the step limit and self-check from settings", async () => {
-    const loop = () => [toolCall("update_plan", { steps: ["x"] })];
+    // A different plan each step: the same call with the same result three times in a row ends the turn early.
+    let n = 0;
+    const loop = () => [toolCall("update_plan", { steps: [`x${++n}`] })];
     const { bot, requests } = await setup([loop(), loop(), loop(), loop(), loop(), loop(), loop()]);
     const saved = await h!.app.inject({
       method: "PUT",

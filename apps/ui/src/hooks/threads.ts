@@ -3,7 +3,7 @@ import { useMemo } from "react";
 
 import type { Message, MessagePart, SendMessageInput, Thread } from "@mrog/shared";
 
-import { api } from "../lib/api";
+import { api, ApiRequestError } from "../lib/api";
 import { keepStreamed, type Delta } from "../lib/messages";
 
 const THREADS_KEY = ["threads"] as const;
@@ -145,6 +145,31 @@ export function useSendMessage(threadId: string) {
         .message,
     onSuccess: (message) => upsertMessage(client, message),
   });
+}
+
+/**
+ * "Try again" on a reply that failed or never got going. A 409 "stale" means the reply was already replaced (a second
+ * click, another window): nothing is wrong, so it is not reported. Anything else the server refuses is.
+ */
+export function useRetryReply() {
+  return useMutation({ mutationFn: retryReply });
+}
+
+/** The request behind "Try again", for callers that outlive the component that started it. */
+export async function retryReply(input: {
+  threadId: string;
+  botId: string;
+  messageId: string;
+}): Promise<void> {
+  try {
+    await api(`/threads/${input.threadId}/retry`, {
+      method: "POST",
+      body: { botId: input.botId, messageId: input.messageId },
+    });
+  } catch (error) {
+    if (error instanceof ApiRequestError && error.status === 409 && error.body?.error === "stale") return;
+    throw error;
+  }
 }
 
 export function useStopThread(threadId: string) {

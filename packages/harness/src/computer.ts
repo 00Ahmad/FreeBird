@@ -43,6 +43,21 @@ const runDocker: DockerRunner = (args, timeoutMs = 60_000, signal) =>
 
 const containerName = (botId: string) => `mrog-${botId}`;
 
+/**
+ * Limits for a bot's computer. The image runs its init as root and bots use `sudo`, so `--cap-drop ALL` and
+ * `no-new-privileges` would break it: only what a desktop never needs is taken away.
+ *  - the process cap stops a fork bomb from taking the host's process table (browsers use many threads);
+ *  - the memory cap keeps a runaway browser from starving this computer (room for Chrome and a few tabs);
+ *  - no raw sockets (packet crafting, ARP spoofing; ping still works) and no device nodes.
+ * They apply to a container when it is created; an existing one gets them on Reset.
+ */
+export const COMPUTER_LIMITS = [
+  "--pids-limit=4096",
+  "--memory=8g",
+  "--cap-drop=NET_RAW",
+  "--cap-drop=MKNOD",
+] as const;
+
 /** Exit codes of `timeout` when it ended the command: 124, or 137 when the KILL signal also reached `timeout`. */
 const TIMED_OUT = new Set([124, 137]);
 
@@ -71,9 +86,10 @@ function computerRisk(command: string): Risk {
     const host = (match[1] ?? match[0]).toLowerCase();
     const loopback = host === "localhost" || host.startsWith("127.") || host === "0.0.0.0";
     if (!loopback && isPrivateHost(host))
-      return { level: "ask", kind: "general", badges: [BADGES.network], summary };
+      return { level: "ask", kind: "general", badges: [BADGES.network], summary, outward: true };
   }
-  return safe(summary);
+  // Runs without asking, but it still does things (in its own container): a restart mid-command must say so.
+  return { ...safe(summary), outward: true };
 }
 
 /**
@@ -156,6 +172,7 @@ export class ComputerManager {
               "-p",
               `127.0.0.1::${WEB_PORT}`,
               "--shm-size=1g",
+              ...COMPUTER_LIMITS,
               "-e",
               "PUID=1000",
               "-e",

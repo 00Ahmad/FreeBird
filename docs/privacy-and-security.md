@@ -11,12 +11,13 @@ To report a vulnerability, see [SECURITY.md](../SECURITY.md).
 | Bots, chats, memory, routines, settings     | A local SQLite database in the app's data folder                                                       |
 | Each bot's files                            | Its own folder under the data folder                                                                   |
 | API keys, vault logins, cards, contact info | Your operating system's keychain (Windows Credential Manager, macOS Keychain, Secret Service on Linux) |
-| The bots' browser profile                   | A separate browser profile inside the data folder, apart from your own                                 |
+| The bots' browser profiles                  | Inside the data folder, apart from your own: one per bot in `browser-profiles/`, or one shared         |
+| Sign-ins to connected apps (OAuth)          | Your operating system's keychain, as `MCP_OAUTH_<APP>`                                                 |
 
 - **No account, no telemetry, no analytics.** FreeBird doesn't phone home.
 - **With a local model, nothing leaves your computer** except what a bot fetches from the web for you.
 - **With a cloud model**, that bot's conversation goes to the provider you chose, under that provider's terms. Other bots aren't affected.
-- Secrets are never stored in the database or in files: only their **names** are, and the app never shows or returns values.
+- Secrets are never stored in the database or in files: only their **names** are, and the app never shows or returns values. (The [event log](#the-event-log) is a record of chats and redacts anything that looks like a key or token.)
 - Running from source, the dev data folder `.data/` is git-ignored, so your chats can't end up in a commit.
 
 ## The local server
@@ -51,6 +52,9 @@ You decide globally in **Settings → General → Execution on this computer** (
 
 - **Secure secret cards** (`request_secret`): you type a value into the card; the bot only learns its name.
 - **Logins for commands** (`use_login`): passed to the command as environment variables, and the values are blanked out of anything the command prints.
+- **Secrets for one command**: a bot names the secrets a single `run_command` needs, and the card says so. Only those reach that command, and only if the bot was given them. That card always asks, whatever the command policy (except **never**, which refuses).
+- **Saved values are hidden everywhere.** Every saved secret, login password, card number and app sign-in token is replaced with `[hidden]` in command output, connected-app results, error text and the event log, also when it is percent-encoded, JSON-escaped, base64-encoded or part of a `user:password` sign-in. Values shorter than 8 characters aren't matched, because they would hide ordinary words, so keep secrets longer than that.
+- **App sign-ins** (OAuth with PKCE): you sign in on the app's own page in your browser; FreeBird never sees your password there. Each sign-in link works once and for 10 minutes. The tokens are tied to the app's address and are never sent to another server, even if you change the address. Sign-ins and Vault entries (`MCP_OAUTH_…`, `VAULT_ITEM_…`) are never handed to a command, and a bot can't ask you to type into one.
 - **Web sign-ins** (`browser_sign_in`): the app types a vault login into the page itself, only on the login's own site and only over HTTPS. The password never appears in what the model sees, including page snapshots.
 - Bots never type passwords or card numbers themselves: sign-ins, human checks and payments are handed to you (`browser_handoff`).
 - Saved logins match their exact site by default; subdomains only when you allow it.
@@ -58,15 +62,32 @@ You decide globally in **Settings → General → Execution on this computer** (
 ## Each bot has its own space
 
 - **Files**: each bot works in its own folder, free inside it and asking outside it. Links that point out of the folder count as outside.
-- **Browser**: one tab per bot in a bot-only profile. The automated browser is never disguised.
+- **Browser**: one tab per bot, and by default a profile per bot (helpers use their maker's), so one bot's sign-ins aren't open to another. The bots of one race or cluster share one. A deleted bot's (or race's) profile is deleted, and any left behind are removed the next time the app starts. By default the browser leaves out the signals only automated browsers send (**Look like an ordinary browser** in Settings → Browser & search), so sites can't tell it apart by those; it never solves human checks or fakes who is browsing. Some sites' terms forbid automated use whether or not it shows: switch the setting off, or keep bots away from those sites, if that matters to you.
+- **Connected apps**: per bot, **Can make changes**, **Read only** or **No access**. Read-only is decided by the app's own hints checked against tool names, the stricter of the two winning; an app that misdescribes a tool as read-only can still mislead it, so **Ask first** remains the safety net for apps you don't trust.
 - **Computer**: an optional Docker desktop per bot, bound to 127.0.0.1, separate from your machine.
+
+## The event log
+
+To help work out what went wrong after a crash or a bad turn, FreeBird keeps a record of what happened: every event the app published, one line each, in `logs/<chat>.ndjson` in the data folder (events that belong to no chat go in `logs/_app.ndjson`).
+
+- **It is a second copy of your chats**, in readable text, next to the database that already holds them. It never leaves your computer.
+- **Secrets are redacted** (API keys, tokens, bearer headers, private keys, `password`/`token`-style fields, the app's own launch token) and **pictures are left out**. Redaction looks for patterns, so a secret in an unusual shape can slip through; this is why the log is not shared or uploaded by anything.
+- **It goes when the chat goes.** Clear chat deletes the chat's log, and so does deleting the chat or its bot. Logs of chats that no longer exist are removed when the app starts.
+- **Not everything is per chat.** Events about the app as a whole go in `_app.ndjson`, including the creation and edits of bots with their instructions. That file is **not** cleaned when a bot is deleted; its contents go when the file rotates.
+- **It stays small.** A file that reaches 8 MB is renamed to `.1` (replacing the previous `.1`) and a new one starts, so a chat keeps at most about 16 MB of log. If the disk can't keep up, newer events are dropped (with a note in the log) rather than slowing the app.
+- **It is on by default.** Turn it off with the environment variable `MROG_EVENT_LOG=off` (there is no Settings switch yet), and delete the `logs` folder at any time.
+
+## When approvals go unanswered
+
+An approval card that nobody answers expires after 15 minutes and the action is **not run**. The bot is told that nobody answered, which is different from you saying no. Questions to you (`ask_user`) never expire while the turn is running. After the app restarts, cards from an interrupted turn are closed rather than left looking answerable, and a turn that was in the middle of something that changes things outside the chat is shown as an error that says so, so you can check before asking again.
 
 ## Known limits
 
 We'd rather you know these than discover them:
 
-- A bot's Docker computer has normal network access. Commands that name local-network addresses ask first, but there's no firewall-level egress filtering yet.
+- A bot's Docker computer has normal network access. Commands that name local-network addresses ask first, but there's no firewall-level egress filtering yet. Computers are created with a process limit, a memory limit and without raw-socket and device-node privileges; the image needs root for its start-up and the bot uses `sudo`, so broader hardening (dropping all capabilities, `no-new-privileges`) isn't applied. New limits only apply to a computer when it is created: press **Reset** on an existing one.
 - The browser's local-network guard checks page loads and the page's own requests, but not images, scripts, or a popup's very first request.
+- Visual Bots judge a click by the control at that spot on the page. Inside an embedded frame from another site (a video, a payment form) nothing can be read, so such clicks always ask first.
 - Models can be tricked by text on web pages ("prompt injection"). Approval cards are your safety net: read them before you allow.
 
 See the [roadmap](roadmap.md) for planned improvements.

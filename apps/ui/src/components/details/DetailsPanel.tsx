@@ -19,8 +19,9 @@ import { exportTemplate } from "../../lib/templates";
 import { useUi } from "../../state";
 import { ModelMenu } from "../chat/ModelMenu";
 import { BotRoutines } from "../routines/BotRoutines";
+import { ToolsBlock } from "./ToolsBlock";
 
-/** Single-column details pane (UI-SPEC §4). */
+/** Single-column details pane. */
 export function DetailsPanel({ thread }: { thread: Thread }) {
   const { data: bots } = useBots();
   const setPanel = useUi((state) => state.setPanel);
@@ -170,6 +171,8 @@ function BotDetails({ bot }: { bot: Bot }) {
       </Block>
 
       <TeamBlock bot={bot} />
+
+      <ToolsBlock bot={bot} />
 
       <MemoryBlock bot={bot} />
       <SkillsBlock bot={bot} />

@@ -91,6 +91,35 @@ describe("chat turns", () => {
     expect(reply.parts[0]).toMatchObject({ type: "error", code: "model_missing" });
   });
 
+  it("tells a Visual Bot on a model that can't see to switch, instead of letting it flail", async () => {
+    h = await makeHarness();
+    h.store.settings.set("runtime", { ...DEFAULT_RUNTIME_SETTINGS, sharedModel: "ollama:test:1b" });
+    const bot = (
+      await h.app.inject({
+        method: "POST",
+        url: "/api/bots",
+        headers: auth,
+        payload: { name: "Eyes", visual: true },
+      })
+    ).json().bot as Bot;
+    const done = finished(h);
+    await h.app.inject({
+      method: "POST",
+      url: `/api/threads/${bot.threadId}/messages`,
+      headers: auth,
+      payload: { text: "find a phone" },
+    });
+    const reply = await done;
+    expect(reply.status).toBe("error");
+    expect(reply.parts[0]).toMatchObject({
+      type: "error",
+      code: "needs_vision",
+      message: expect.stringContaining("test:1b can't see pictures"),
+    });
+    // Nothing was sent to the model.
+    expect(h.calls.some((call) => call.path === "/api/chat")).toBe(false);
+  });
+
   it("stops a running turn and keeps what was written", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));

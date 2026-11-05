@@ -241,12 +241,28 @@ describe("group discussions", () => {
   it("lets a Visual Bot look at the web while discussing, without clicking", async () => {
     const offered: string[][] = [];
     h = await makeHarness({
-      handlers: fakeOllama((body) => {
-        const system: string = body.messages[0]?.content ?? "";
-        if (system.startsWith("You are Iris") && system.includes("structured discussion"))
-          offered.push((body.tools ?? []).map((tool: { function: { name: string } }) => tool.function.name));
-        return reply("ok");
-      }),
+      handlers: {
+        ...fakeOllama((body) => {
+          const system: string = body.messages[0]?.content ?? "";
+          if (system.startsWith("You are Iris") && system.includes("structured discussion"))
+            offered.push(
+              (body.tools ?? []).map((tool: { function: { name: string } }) => tool.function.name),
+            );
+          return reply("ok");
+        }),
+        // A Visual Bot needs a model that can see.
+        "/api/tags": () =>
+          Response.json({
+            models: [
+              {
+                name: "test:1b",
+                size: 1,
+                capabilities: ["completion", "tools", "vision"],
+                details: { context_length: 8192 },
+              },
+            ],
+          }),
+      },
     });
     h.store.settings.set("runtime", { ...DEFAULT_RUNTIME_SETTINGS, sharedModel: "ollama:test:1b" });
     const ada = h.store.bots.create({ name: "Ada" });

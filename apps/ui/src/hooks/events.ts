@@ -8,6 +8,7 @@ import { harnessInfo } from "../lib/harness";
 import { coalesceDeltas, type Delta } from "../lib/messages";
 import { connectEvents } from "../lib/sse";
 import { useConnection, useUi } from "../state";
+import { isWatching, useUnread } from "../unread";
 import { BOTS_KEY, removeBot, upsertBot } from "./bots";
 import { setDiscussion } from "./discussion";
 import { setRace } from "./race";
@@ -30,6 +31,39 @@ function notifyIfAway(client: QueryClient, message: Message) {
   notification.addEventListener("click", () => {
     window.focus();
     useUi.getState().select(message.threadId);
+  });
+}
+
+/** Chats where a bot is waiting for you and you've been told: told once per wait. */
+const waitingNoticed = new Set<string>();
+
+/**
+ * A desktop notification when a bot starts waiting for you (a check to solve, a question, an approval) while you're
+ * in another chat or app, so you needn't keep watching it work. Same per-bot switch as replies.
+ */
+function notifyWaiting(
+  client: QueryClient,
+  threadId: string,
+  botId: string | null,
+  activity: ThreadActivity,
+) {
+  const key = `${threadId}:${botId ?? ""}`;
+  if (activity !== "waiting_user") {
+    waitingNoticed.delete(key);
+    return;
+  }
+  if (waitingNoticed.has(key)) return;
+  waitingNoticed.add(key);
+  const bot = client.getQueryData<Bot[]>(BOTS_KEY)?.find((candidate) => candidate.id === botId);
+  const watching = document.hasFocus() && useUi.getState().selectedThreadId === threadId;
+  if (!bot?.notifications || watching || typeof Notification === "undefined") return;
+  const notification = new Notification(bot.name, {
+    body: `${bot.name} needs you for a moment.`,
+    silent: false,
+  });
+  notification.addEventListener("click", () => {
+    window.focus();
+    useUi.getState().select(threadId);
   });
 }
 
@@ -115,6 +149,7 @@ export function useHarnessEvents() {
             break;
           case "thread.deleted":
             removeThread(client, event.threadId);
+            useUnread.getState().forget(event.threadId);
             if (useUi.getState().selectedThreadId === event.threadId) ui.select(null);
             break;
           case "message.created":
@@ -123,9 +158,11 @@ export function useHarnessEvents() {
           case "message.updated":
             upsertMessage(client, event.message);
             notifyIfAway(client, event.message);
+            useUnread.getState().arrive(event.message, isWatching(event.message.threadId));
             break;
           case "thread.activity":
             ui.setActivity(event.threadId, event.botId, event.activity);
+            notifyWaiting(client, event.threadId, event.botId, event.activity);
             break;
           case "runtime.status":
             client.setQueryData<RuntimeStatus>(RUNTIME_KEY, event.status);

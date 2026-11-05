@@ -17,6 +17,14 @@ export const MessagePart = z.discriminatedUnion("type", [
     args: z.record(z.string(), z.unknown()),
     status: ToolStatus,
     result: z.string().optional(),
+    /**
+     * Set just before a call that changes something outside the chat runs (a command, a click that acts, a connected
+     * app). If the app dies while it runs, a restart knows it may have happened and says so instead of offering a
+     * silent retry. Saved before the call starts, so it survives a crash in the middle of it.
+     */
+    outward: z.boolean().optional(),
+    /** Who settled an approval: the user, a saved rule, the command policy, the group-chat rule, the clock or Stop. */
+    decidedBy: z.enum(["user", "rule", "policy", "group_chat", "timeout", "stopped"]).optional(),
     /** Set while the call waits for the user's decision (drives the approval card). */
     approval: z
       .object({
@@ -32,6 +40,10 @@ export const MessagePart = z.discriminatedUnion("type", [
     type: z.literal("question"),
     questionId: z.string(),
     question: z.string(),
+    /** Choices the user can tap instead of typing (2 to 6); they can always type something else. */
+    options: z.array(z.string()).max(6).optional(),
+    /** The choices are checkboxes: pick any number. The answer then lists the picks, one per line. */
+    multiple: z.boolean().optional(),
     answer: z.string().optional(),
     /** Set when the turn ended before it was answered: the card can no longer be answered. */
     expired: z.boolean().optional(),
@@ -111,6 +123,19 @@ export type SendMessageInput = z.infer<typeof SendMessageInput>;
 /** What a thread's bot is doing right now; drives "Waiting for model" / "Thinking…" in the UI. */
 export const ThreadActivity = z.enum(["idle", "queued", "thinking", "working", "waiting_user"]);
 export type ThreadActivity = z.infer<typeof ThreadActivity>;
+
+/**
+ * Whether answering this message again could do something twice: it started a call that changes things outside the
+ * chat (marked `outward` before it ran), or it was cut off by a restart in the middle of one. Retrying such a reply
+ * is the user's call to make by asking again, never a button.
+ */
+export function repeatsAction(message: Pick<Message, "parts">): boolean {
+  return message.parts.some(
+    (part) =>
+      (part.type === "tool" && part.outward === true) ||
+      (part.type === "error" && part.code === "interrupted"),
+  );
+}
 
 /** Plain text of a message, for previews, search and prompts. */
 export function messageText(message: Pick<Message, "parts">): string {

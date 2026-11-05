@@ -13,7 +13,7 @@ This guide takes you from nothing to chatting with your first bot, on a local mo
 
 Optional extras, only for the features that use them:
 
-- **Microsoft Edge or Google Chrome**: the bots' web browser. FreeBird drives the browser you already have installed, with a separate profile just for bots.
+- **Microsoft Edge or Google Chrome**: the bots' web browser. FreeBird drives the browser you already have installed, with separate profiles just for bots (one per bot, by default).
 - **Docker Desktop**: gives each bot its own Linux desktop computer.
 - **API keys** for cloud providers (OpenAI, Anthropic, Gemini, Groq, xAI and others).
 - An **OpenAI-compatible transcription endpoint** for voice dictation.

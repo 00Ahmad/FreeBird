@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -8,23 +9,95 @@ import {
   AddConnectorInput,
   APP_NAME,
   APP_VERSION,
+  appAccess,
   ConnectorConfig,
   UpdateConnectorInput,
+  type AppToolKind,
+  type Bot,
   type ConnectorView,
 } from "@mrog/shared";
 import { BADGES, defineTool, safe, type ToolSpec } from "@mrog/tools";
 
 import { fail, parse } from "./http";
+import {
+  ConnectorSignIn,
+  OAUTH_CALLBACK_PATH,
+  oauthSecretName,
+  PendingSignIns,
+  SIGN_IN_PAGE_HEADERS,
+  signInPage,
+} from "./oauth";
+import { answerQuery, KEEP_OVER, ResultStore, summary } from "./results";
 import type { Services } from "./services";
 
 const KEY = "connectors";
 const MAX_RESULT = 20_000;
+/** The most of one result that is kept for query_result (a result bigger than this is cut, then kept). */
+const MAX_KEPT = 2_000_000;
 
 interface McpTool {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  /** What the server says about the tool (MCP annotations). Claims, not facts: see classifyTool. */
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
+
+const READ_VERBS = new Set(
+  "get list read search find fetch query describe show view lookup look count check retrieve browse explore inspect preview download export summarize summarise whoami status info stat ping validate resolve".split(
+    " ",
+  ),
+);
+const DESTRUCTIVE_VERBS = new Set(
+  "delete remove destroy drop purge wipe erase truncate revoke cancel terminate kill reset overwrite unpublish archive empty clear ban block".split(
+    " ",
+  ),
+);
+const WRITE_VERBS = new Set(
+  "create add insert update edit modify set put patch post send write upload move rename copy share publish merge close reopen open start stop run execute exec trigger submit pay buy purchase transfer mark label assign unassign comment reply forward invite schedule book approve reject star unstar like follow subscribe unsubscribe enable disable install uninstall deploy apply commit push sync import restore grant link unlink attach detach tag untag pin unpin react draft save store register login logout sign accept decline".split(
+    " ",
+  ),
+);
+
+/** The words in a tool name: `send_email`, `createIssue` and `get-file` all split. */
+const words = (name: string) =>
+  name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+
+/** What a tool's name says it does. Any destructive word wins; a read only counts when nothing says otherwise. */
+function kindFromName(name: string): AppToolKind | null {
+  const parts = words(name);
+  if (parts.some((word) => DESTRUCTIVE_VERBS.has(word))) return "destructive";
+  if (parts.some((word) => WRITE_VERBS.has(word))) return "write";
+  if (parts[0] && READ_VERBS.has(parts[0])) return "read";
+  return null;
+}
+
+/**
+ * What a connected app's tool does. The server's annotations come first, but they are claims from a program the user
+ * installed, not something the app can check, so where the name says something worse the name wins: a "read-only"
+ * delete_file is a delete. With no annotations the name is all there is; only a plain read verb makes a tool
+ * read-only, and anything unclear counts as changing things.
+ */
+export function classifyTool(tool: Pick<McpTool, "name" | "annotations">): AppToolKind {
+  const byName = kindFromName(tool.name);
+  const notes = tool.annotations ?? {};
+  if (notes.readOnlyHint === true) return byName === "destructive" || byName === "write" ? byName : "read";
+  if (notes.readOnlyHint === false || notes.destructiveHint !== undefined) {
+    // It says it changes things; the protocol's default is that the change can't be undone unless it says otherwise.
+    return notes.destructiveHint === false && byName !== "destructive" ? "write" : "destructive";
+  }
+  return byName ?? "write";
+}
+
+const KIND_WORDS: Record<AppToolKind, string> = {
+  read: "only reads",
+  write: "changes things",
+  destructive: "changes things for good",
+};
 
 interface Live {
   client: Client;
@@ -44,6 +117,41 @@ export class ConnectorManager {
    * closes what it opened instead of keeping it.
    */
   private readonly generation = new Map<string, number>();
+
+  /** Takes the user's secret values out of what a connected app returns (set once the scrubber exists). */
+  scrub: (text: string) => string = (text) => text;
+  /** Big results, kept per bot and chat for query_result. */
+  readonly results = new ResultStore();
+  /** Sign-ins under way, by their state, and each HTTP app's sign-in keeper. */
+  readonly pendingSignIns = new PendingSignIns();
+  private readonly signIns = new Map<string, ConnectorSignIn>();
+  /** The harness's own address, where a sign-in comes back to (set once it listens). */
+  private base: string | null = null;
+
+  setCallbackBase(url: string): void {
+    this.base = url;
+  }
+
+  /** The sign-in keeper for an HTTP app, made again if its address changed. */
+  private signInFor(config: ConnectorConfig): ConnectorSignIn | null {
+    if (config.transport.type !== "http") return null;
+    // A token the user pasted in is how this app signs in: a refusal is that token's error, not a sign-in to offer.
+    if (Object.keys(config.transport.headers).some((name) => name.toLowerCase() === "authorization"))
+      return null;
+    const url = config.transport.url;
+    const existing = this.signIns.get(config.id);
+    if (existing?.serverUrl === url) return existing;
+    const signIn = new ConnectorSignIn({
+      vault: this.services.vault,
+      bus: this.services.bus,
+      connectorId: config.id,
+      serverUrl: url,
+      base: () => this.base,
+      pending: this.pendingSignIns,
+    });
+    this.signIns.set(config.id, signIn);
+    return signIn;
+  }
 
   constructor(private readonly services: Pick<Services, "store" | "vault" | "bus">) {}
 
@@ -92,6 +200,8 @@ export class ConnectorManager {
     this.status.set(config.id, { state: "connecting", error: null });
     this.changed();
     const client = new Client({ name: APP_NAME, version: APP_VERSION });
+    const signIn = this.signInFor(config);
+    if (signIn) signIn.signInUrl = null;
     try {
       const transport =
         config.transport.type === "stdio"
@@ -103,6 +213,8 @@ export class ConnectorManager {
             })
           : new StreamableHTTPClientTransport(new URL(config.transport.url), {
               requestInit: { headers: this.resolve(config.transport.headers) },
+              // A server that asks for OAuth gets it; one that doesn't never notices.
+              ...(signIn ? { authProvider: signIn } : {}),
             });
       await client.connect(transport, { timeout: 30_000 });
       const { tools } = await client.listTools(undefined, { timeout: 30_000 });
@@ -116,13 +228,63 @@ export class ConnectorManager {
     } catch (error) {
       await client.close().catch(() => {});
       if (!this.current(config.id, token)) return;
-      const message = (error as Error).message;
-      this.status.set(config.id, {
-        state: "error",
-        error: /401|unauthori[sz]ed|forbidden/i.test(message) ? `Needs auth: ${message}` : message,
-      });
+      // The SDK's HTTP errors keep the status in `code` and often leave the message empty.
+      const status = (error as { code?: unknown }).code;
+      const message =
+        status === 401 || status === 403
+          ? `${config.name} refused the sign-in (HTTP ${status}). Check the token in its settings.`
+          : (error as Error).message;
+      // The server wants the user to sign in: a button, not an error. Nothing is opened until it is pressed.
+      if (error instanceof UnauthorizedError || signIn?.signInUrl) {
+        this.status.set(config.id, { state: "auth", error: `Sign in to ${config.name} to use it.` });
+      } else {
+        this.status.set(config.id, {
+          state: "error",
+          error: /401|unauthori[sz]ed|forbidden/i.test(message) ? `Needs auth: ${message}` : message,
+        });
+      }
     }
     this.changed();
+  }
+
+  /**
+   * "Sign in": connects again so the server asks for a fresh sign-in, and returns the address to send the user to.
+   * `connected` when no sign-in was needed after all (tokens still worked).
+   */
+  async signIn(id: string): Promise<{ url: string } | { connected: true } | { error: string }> {
+    const config = this.configs().find((candidate) => candidate.id === id);
+    if (!config) return { error: "No connector has this id." };
+    const signIn = this.signInFor(config);
+    if (!signIn) return { error: "Only apps added by web address sign in this way." };
+    if (!this.base) return { error: "The app isn't ready to receive a sign-in yet. Try again in a moment." };
+    signIn.prepareSignIn();
+    await this.connect(config);
+    if (this.status.get(id)?.state === "connected") return { connected: true };
+    return signIn.signInUrl
+      ? { url: signIn.signInUrl.toString() }
+      : { error: this.status.get(id)?.error ?? "The app didn't offer a way to sign in." };
+  }
+
+  /** The user's browser came back with a code: swap it for tokens, then connect with them. */
+  async finishSignIn(state: string | undefined, code: string): Promise<{ name: string } | { error: string }> {
+    const id = this.pendingSignIns.take(state);
+    if (!id)
+      return { error: "This sign-in link has expired or was already used. Press Sign in again in FreeBird." };
+    const config = this.configs().find((candidate) => candidate.id === id);
+    const signIn = config && this.signInFor(config);
+    if (!config || !signIn || config.transport.type !== "http")
+      return { error: "That app is no longer set up." };
+    try {
+      const transport = new StreamableHTTPClientTransport(new URL(config.transport.url), {
+        requestInit: { headers: this.resolve(config.transport.headers) },
+        authProvider: signIn,
+      });
+      await transport.finishAuth(code);
+    } catch (error) {
+      return { error: `${config.name} didn't accept the sign-in: ${this.scrub((error as Error).message)}` };
+    }
+    await this.connect(config);
+    return { name: config.name };
   }
 
   async disconnect(id: string): Promise<void> {
@@ -209,8 +371,49 @@ export class ConnectorManager {
     if (!configs.some((config) => config.id === id)) return false;
     await this.disconnect(id);
     this.status.delete(id);
-    this.save(configs.filter((config) => config.id !== id));
+    // Its sign-in goes with it.
+    // (Also one kept from before the user pasted their own token in, which no sign-in keeper is made for.)
+    if (this.services.vault.get(oauthSecretName(id)) !== null) {
+      this.services.vault.delete(oauthSecretName(id));
+      this.services.bus.publish({ type: "secrets.changed", names: this.services.vault.names() });
+    }
+    this.signIns.delete(id);
+    this.save(configs.filter((candidate) => candidate.id !== id));
     return true;
+  }
+
+  /** The connected app a bot tool belongs to, and what the tool does there; null for a tool that isn't an app's. */
+  describe(specName: string): { id: string; name: string; tool: string; kind: AppToolKind } | null {
+    for (const config of this.configs()) {
+      const live = this.live.get(config.id);
+      const tool = live?.tools.find((candidate) => toolName(config.id, candidate.name) === specName);
+      if (tool) return { id: config.id, name: config.name, tool: tool.name, kind: classifyTool(tool) };
+    }
+    return null;
+  }
+
+  /**
+   * Why a bot may not use this app tool, or null when it may: no access to the app, or read-only access and a tool
+   * that changes things. Put in the agent's gates, so it narrows the same list as the bot's tool switches.
+   */
+  gate(bot: Bot, specName: string): string | null {
+    const app = this.describe(specName);
+    if (!app) return null;
+    const access = appAccess(bot.tools, app.id);
+    if (access === "off") return `no access to ${app.name}`;
+    if (access === "read" && app.kind !== "read")
+      return `read-only access to ${app.name} (this tool ${KIND_WORDS[app.kind]})`;
+    return null;
+  }
+
+  /** The prompt's line about apps this bot may only read from. */
+  accessNote(bot: Bot): string | null {
+    const readOnly = this.configs().filter(
+      (config) => this.live.has(config.id) && appAccess(bot.tools, config.id) === "read",
+    );
+    if (readOnly.length === 0) return null;
+    const names = readOnly.map((config) => config.name).join(", ");
+    return `You may only look things up in ${names}: tools that change anything there are not available to you. If a job needs a change there, say so instead of trying.`;
   }
 
   /** Every enabled tool of every connected app, as bot tools. */
@@ -221,21 +424,31 @@ export class ConnectorManager {
       if (!config.enabled || !live) continue;
       for (const tool of live.tools) {
         if (config.disabledTools.includes(tool.name)) continue;
+        const kind = classifyTool(tool);
         specs.push(
           defineTool({
             name: toolName(config.id, tool.name),
             description: `[${config.name}] ${tool.description ?? tool.name}`.slice(0, 1000),
             args: z.record(z.string(), z.unknown()),
             jsonSchema: { type: "object", ...tool.inputSchema },
-            risk: (args) =>
-              config.askBeforeUse
-                ? {
-                    level: "ask",
-                    kind: "general",
-                    badges: [BADGES.shares],
-                    summary: `${config.name} → ${tool.name}(${JSON.stringify(args).slice(0, 200)})`,
-                  }
-                : safe(`${config.name} → ${tool.name}`),
+            risk: (args) => {
+              const what = `${config.name} → ${tool.name}(${JSON.stringify(args).slice(0, 200)})`;
+              // Only a tool that only reads leaves nothing behind if the app dies mid-call.
+              const outward = kind !== "read";
+              // One that can't be undone asks every time, even from an app set not to ask. The user's "ask first" is
+              // never loosened by what a server says about its tools.
+              if (kind === "destructive")
+                return {
+                  level: "ask",
+                  kind: "general",
+                  badges: [BADGES.irreversible, BADGES.shares],
+                  summary: what,
+                  outward,
+                };
+              return config.askBeforeUse
+                ? { level: "ask", kind: "general", badges: [BADGES.shares], summary: what, outward }
+                : { ...safe(`${config.name} → ${tool.name}`), outward };
+            },
             run: async (args, ctx) => {
               const result = (await live.client.callTool({ name: tool.name, arguments: args }, undefined, {
                 signal: ctx.signal,
@@ -244,24 +457,64 @@ export class ConnectorManager {
                 content?: { type: string; text?: string; resource?: { text?: string } }[];
                 isError?: boolean;
               };
-              const text = (result.content ?? [])
-                .map((item) =>
-                  item.type === "text"
-                    ? (item.text ?? "")
-                    : item.type === "resource"
-                      ? (item.resource?.text ?? "")
-                      : `[${item.type}]`,
-                )
-                .join("\n")
-                .slice(0, MAX_RESULT);
-              if (result.isError) throw new Error(text || `${tool.name} failed.`);
-              return text || "(no output)";
+              // Secrets out first: what is kept below must be as clean as what is shown.
+              const text = this.scrub(
+                (result.content ?? [])
+                  .map((item) =>
+                    item.type === "text"
+                      ? (item.text ?? "")
+                      : item.type === "resource"
+                        ? (item.resource?.text ?? "")
+                        : `[${item.type}]`,
+                  )
+                  .join("\n")
+                  .slice(0, MAX_KEPT),
+              );
+              if (result.isError) throw new Error(text.slice(0, MAX_RESULT) || `${tool.name} failed.`);
+              if (!text) return "(no output)";
+              if (text.length <= KEEP_OVER) return text;
+              // Too big to show whole: kept, and the bot is shown its structure to read from.
+              const label = `${config.name} → ${tool.name}`;
+              const id = this.results.put(ctx.botId, ctx.threadId, label, text);
+              return summary(id, label, this.results.get(ctx.botId, ctx.threadId, id)!);
             },
           }),
         );
       }
     }
+    // Offered from the start of the turn whenever there are app tools: a turn's tools are fixed once it starts, so it
+    // can't appear only after a big result arrives.
+    if (specs.length > 0) specs.push(this.queryTool());
     return specs;
+  }
+
+  private queryTool(): ToolSpec {
+    return defineTool({
+      name: "query_result",
+      description:
+        'Read part of a large result from a connected app that was kept instead of shown whole (its id looks like "r1"). For JSON give a path: "items[0:10].name", "items[*].id", "items[?status==open]", "items[?subject~invoice].from". For text give lines ("100-200") or find (a word). With only the id you get its shape.',
+      args: z.object({
+        id: z.string().trim().min(1).max(20),
+        path: z.string().max(300).optional(),
+        find: z.string().max(200).optional(),
+        lines: z.string().max(30).optional(),
+      }),
+      risk: (args) => safe(`Read part of kept result ${args.id}`),
+      run: async (args, ctx) => {
+        const kept = this.results.get(ctx.botId, ctx.threadId, args.id);
+        if (!kept) {
+          const known = this.results.list(ctx.botId, ctx.threadId);
+          return known.length > 0
+            ? `There is no kept result "${args.id}" in this chat. Kept: ${known.map((entry) => `${entry.id} (${entry.label})`).join(", ")}.`
+            : `There is no kept result "${args.id}": nothing has been kept in this chat (or it was cleared).`;
+        }
+        try {
+          return answerQuery(kept, args);
+        } catch (error) {
+          return (error as Error).message;
+        }
+      },
+    });
   }
 }
 
@@ -292,6 +545,36 @@ export function registerConnectorRoutes(app: FastifyInstance, manager: Connector
     await manager.connect(config);
     return { connector: manager.view(config) };
   });
+
+  /** "Sign in": the address to open in the user's browser (the UI opens it; the harness never does). */
+  app.post<{ Params: { id: string } }>("/api/connectors/:id/sign-in", async (request, reply) => {
+    const outcome = await manager.signIn(request.params.id);
+    if ("error" in outcome) return fail(reply, 409, "sign_in_failed", outcome.error);
+    return outcome;
+  });
+
+  /**
+   * Where the user's browser comes back after signing in. Outside /api and without the app's token (the browser
+   * has none): what makes it safe is the state, which works once, for one sign-in, for ten minutes.
+   */
+  app.get<{ Querystring: Record<string, string | undefined> }>(
+    OAUTH_CALLBACK_PATH,
+    async (request, reply) => {
+      const { code, state, error, error_description: description } = request.query;
+      const page = (status: number, title: string, detail: string) =>
+        reply.code(status).headers(SIGN_IN_PAGE_HEADERS).send(signInPage(title, detail));
+      if (error) {
+        // Still used up, so the same link can't be tried again.
+        manager.pendingSignIns.take(state);
+        return page(400, "Sign-in didn't finish", description ? `${error}: ${description}` : error);
+      }
+      if (!code) return page(400, "Sign-in didn't finish", "The app didn't send back a sign-in code.");
+      const outcome = await manager.finishSignIn(state, code);
+      return "error" in outcome
+        ? page(400, "Sign-in didn't finish", outcome.error)
+        : page(200, `Signed in to ${outcome.name}`, "You can close this tab and go back to FreeBird.");
+    },
+  );
 
   app.delete<{ Params: { id: string } }>("/api/connectors/:id", async (request, reply) => {
     return (await manager.remove(request.params.id))

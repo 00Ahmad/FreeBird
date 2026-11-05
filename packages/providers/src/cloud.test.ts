@@ -417,3 +417,27 @@ describe("schema flattening", () => {
     expect(JSON.stringify(flat)).not.toMatch(/\$ref/);
   });
 });
+
+describe("telling out-of-memory from other failures", () => {
+  it("knows memory trouble when it is named, and not when a word merely contains 'oom'", async () => {
+    const { httpError, runtimeErrorCode } = await import("./types");
+    for (const detail of [
+      "model requires more system memory",
+      "CUDA out of memory",
+      "OOM killed",
+      "the runtime hit an OOM",
+    ]) {
+      expect(runtimeErrorCode(detail), detail).toBe("oom");
+      expect(httpError(500, detail, "X").code, detail).toBe("oom");
+    }
+    for (const detail of [
+      "boom",
+      "no room left in the queue",
+      "bloom filter failed",
+      "upstream ECONNRESET boom",
+    ]) {
+      expect(runtimeErrorCode(detail), detail).toBe("provider_down");
+      expect(httpError(500, detail, "X").code, detail).toBe("provider_down");
+    }
+  });
+});

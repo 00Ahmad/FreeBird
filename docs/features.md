@@ -38,6 +38,11 @@ In a chat you can:
 - **Attach pictures** by pasting, dragging or picking; models that can see will look at them.
 - **Reply to** a message with a quote, react with an emoji, copy, or have it read aloud.
 - **Switch models mid-conversation** from the model menu in the chat header.
+- **Answer a bot's question with a tap** when it offers choices, or tick several; you can always type your own answer.
+- **See what's new.** A chat with replies you haven't seen shows a badge (and a count in the window title), and opens with a **New messages** line. It counts what arrives while the app is open, and starts again when the app restarts.
+- **Recover from a problem** without retyping: an error says in plain words what happened, with **Try again**, **Switch model** or **Open settings**, and the technical text behind **Details**. A reply that hasn't started after 20 seconds offers the same ways out (a model on your computer gets a minute and a half first, since loading takes a while). **Try again** is never offered where it could repeat something the bot already did.
+
+Long chats draw only the newest messages and add earlier ones as you scroll up, so they stay quick.
 
 ## Group chats
 
@@ -90,6 +95,10 @@ Every bot has built-in tools:
 
 Plus browser, computer, vault and connected-app tools, described below.
 
+**Choose each bot's tools** in **Details → Tools**: every tool is on until you switch it off. A tool that is off is not offered to the model, and the bot is told it can't use it. Fewer tools means a shorter prompt, which small local models need to choose well, and a bot that only reads files can't be talked into running a command. (A bot's list can also hold an allow list, set through the API: then only those tools exist for it. `name*` stands for a whole family, such as one connected app's tools.)
+
+`ask_user` can offer choices (`options`, and `multiple` to tick several) so you can answer with a tap.
+
 **Approval cards** show exactly what the bot wants to do, with warning badges such as _"This can't be undone"_, _"This may buy, send or change something on the site"_ or _"Outside the bot's folder"_. Choose:
 
 - **Allow once**,
@@ -102,31 +111,35 @@ Small local models get extra help: arguments they get slightly wrong are repaire
 
 ## The bots' web browser
 
-Bots get a real browser: FreeBird drives your installed **Edge or Chrome** with a separate profile only for bots, one tab per bot. The window is shown by default so you can watch, and the chat's **Browser** panel shows a live view where you can click, type and scroll into the bot's tab.
+Bots get a real browser: FreeBird drives your installed **Edge or Chrome** with profiles only for bots, one tab per bot. The window is shown by default so you can watch. The chat's **Browser** panel shows a live view where you can click, type and scroll in the bot's tab, or type an address into it.
 
-| Tool                                                             | Does                                                                                        |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `web_search`                                                     | Searches through the browser (Bing, then DuckDuckGo), the Brave Search API, or your SearXNG |
-| `browser_open`, `browser_read`, `browser_scroll`, `browser_back` | Open and read pages as text with numbered elements                                          |
-| `browser_click`, `browser_type`                                  | Act on the page                                                                             |
-| `browser_screenshot`                                             | A picture of the page for models that can see                                               |
-| `browser_handoff`                                                | Hands control to you for human checks, sign-ins and payments                                |
-| `browser_sign_in`                                                | Types a saved Vault login into a sign-in form                                               |
+**Each bot has its own sign-ins.** By default each bot's browser has its own profile (cookies, sign-ins), and its helpers use the same one, so a site you sign in to for one bot isn't open to the others. To sign in for a bot, open the **Browser** panel in its chat, press **Open Ada's browser**, and sign in there. The bots of one race or cluster share one browser between them. At most three browsers run at once. When another is needed, the one used longest ago closes if nobody has used it for two minutes; one that is working, waiting for you or being watched is never closed, and the bot that needs a browser is told to try again later instead. Deleting a bot deletes its profile. To have all bots share one profile, pick **All bots share one** in **Settings → Browser & search → Sign-ins**. Installs that used the browser before this keep sharing until you switch. Switching closes the browser, and sign-ins aren't moved, so you sign in again where bots need it.
+
+| Tool                                                             | Does                                                                                                               |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `web_search`                                                     | Searches through the browser (Bing, then DuckDuckGo), the Brave Search API, or your SearXNG                        |
+| `browser_open`, `browser_read`, `browser_scroll`, `browser_back` | Open and read pages as text with numbered elements                                                                 |
+| `browser_click`, `browser_type`                                  | Act on the page                                                                                                    |
+| `browser_screenshot`                                             | A picture of the page for models that can see                                                                      |
+| `browser_handoff`                                                | Hands control to you for human checks, sign-ins and payments; after a check, carries on by itself once it's solved |
+| `browser_sign_in`                                                | Types a saved Vault login into a sign-in form                                                                      |
 
 Safety rules:
 
 - Clicks like **Buy, Pay, Send, Delete, Subscribe** ask first, in many languages, and so do buttons with no name.
 - Bots never type passwords or card numbers. `browser_sign_in` fills a login from the Vault without the password ever reaching the model or page snapshots, only on that login's own site and only over HTTPS.
-- The automated browser is never disguised as a person.
+- **Look like an ordinary browser** (Settings → Browser & search, on by default): the browser leaves out what only automated browsers send (`navigator.webdriver`, the "controlled by automated software" bar, "Headless" in a hidden window's name), so fewer sites stop bots with checks. It doesn't solve checks, fake a fingerprint or change your address; checks still come to you. Switch it off to have the browser say it is automated.
 - Pages on your local network (your router, NAS, other devices) ask first.
 
 Choose the search engine in **Settings → Browser & search**.
+
+**Fewer checks, less effort.** Bots search on Bing first; Google stops automated browsers with checks much more often. When a check does appear, the bot brings its window to the front and hands it to you. Solve it, and the bot carries on by itself as soon as the check is gone. Turn on **Notify me** in a bot's Details to get a desktop notification whenever it needs you. A check you've solved once is remembered in that bot's browser profile, so the same site rarely asks again.
 
 ## Visual Bots
 
 **+ → New Visual Bot** makes a bot that uses the web **only by looking**: screenshot, decide, act, screenshot. It sees numbered boxes on everything it can click or type into, and works with `screen_look`, `screen_click`, `screen_click_at`, `screen_type`, `screen_press`, `screen_scroll`, `screen_back`, `screen_go_to` and `screen_watch` (a short clip to follow videos and pages that change).
 
-A red dot shows where it's about to click. The same safety rules apply: consequential clicks and Enter in forms ask first, and it never types passwords. Use a model that can see, such as `qwen3.5:9b`.
+A red dot shows where it's about to click. The same safety rules apply: consequential clicks and Enter in forms ask first, and it never types passwords. A click that would land on something covering the box it chose (a pop-up, a cookie banner) is refused when that something would ask first. Use a model that can see, such as `qwen3.5:9b`; with an Ollama model that can't, the reply says so and offers **Switch model**.
 
 ## A computer for each bot
 
@@ -150,7 +163,13 @@ See all routines on a weekly calendar in **Settings → Routines**, and pause, r
 
 ## Connect apps (MCP)
 
-Connect any [Model Context Protocol](https://modelcontextprotocol.io) server, local (a command) or remote (an HTTP URL), in **Settings → Connect apps** (Ctrl+Shift+M). Turn individual tools on or off, mark tools **Ask first**, and pass secrets as `vault:NAME` so they never sit in plain text. MCP servers that need OAuth currently need a token you paste in.
+Connect any [Model Context Protocol](https://modelcontextprotocol.io) server, local (a command) or remote (an HTTP URL), in **Settings → Connect apps** (Ctrl+Shift+M). Turn individual tools on or off, mark tools **Ask first**, and pass secrets as `vault:NAME` so they never sit in plain text.
+
+**Apps that need a sign-in.** A remote app that asks you to sign in shows **Needs you to sign in** with a **Sign in** button. It opens the app's sign-in page in your own browser, and after you sign in you're sent back to FreeBird (OAuth with PKCE). The sign-in is kept in your keychain as `MCP_OAUTH_<APP>` and refreshed by itself. Changing the app's address or removing the app deletes it. An app you gave an `Authorization` header (a token you pasted in) keeps using that token and is never offered a sign-in.
+
+**What each bot may do with an app.** In **Details → Tools**, each connected app has **Can make changes**, **Read only** or **No access**. With **Read only**, the bot gets only the tools that just read. FreeBird tells them apart by what the app says about each tool (`readOnlyHint`, `destructiveHint`) and by the tool's name. When the two disagree, the stricter wins, and a tool it can't place counts as one that makes changes. A tool that can't be undone asks you every time, even from an app set not to ask. A helper never gets more than the bot that made it.
+
+**Big results.** When an app sends back more than about 4,000 characters, the bot gets the result's shape and a preview. It then picks out what it needs with `query_result`: a path such as `messages[0:5].subject` or `items[?status==open]`, a search, or a range of lines.
 
 ## Vault
 

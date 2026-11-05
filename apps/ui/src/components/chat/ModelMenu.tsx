@@ -1,5 +1,5 @@
 import { Check, Settings2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { parseModelRef, type Bot } from "@mrog/shared";
 import { Button, cn } from "@mrog/ui-kit";
@@ -7,36 +7,56 @@ import { Button, cn } from "@mrog/ui-kit";
 import { useUpdateBot } from "../../hooks/bots";
 import { useProviders } from "../../hooks/providers";
 import { useModels, useRuntime } from "../../hooks/runtime";
+import { retryReply } from "../../hooks/threads";
 import { useUi } from "../../state";
 import { ModelBadge } from "../ModelBadge";
 import { CapabilityBadges } from "../settings/ModelPicker";
 
-/** The chat header's model switch: provider rail on the left, its models on the right (UI-SPEC §4). */
+/** The chat header's model switch: provider rail on the left, its models on the right. */
 export function ModelMenu({ bot }: { bot: Bot }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const request = useUi((state) => (state.modelSwitch?.botId === bot.id ? state.modelSwitch : null));
+  const clearRequest = useUi((state) => state.clearModelSwitch);
+
+  // A reply that is stuck or failed asked for this menu: it is open for as long as that request stands.
+  const shown = open || request !== null;
+
+  /** Closing without picking drops the request, so a later pick can't try an old reply again. */
+  const close = useCallback(() => {
+    setOpen(false);
+    clearRequest();
+  }, [clearRequest]);
 
   useEffect(() => {
-    if (!open) return;
-    const close = (event: PointerEvent) => !ref.current?.contains(event.target as Node) && setOpen(false);
-    const key = (event: KeyboardEvent) => event.key === "Escape" && setOpen(false);
-    window.addEventListener("pointerdown", close, true);
+    if (!shown) return;
+    const outside = (event: PointerEvent) => !ref.current?.contains(event.target as Node) && close();
+    const key = (event: KeyboardEvent) => event.key === "Escape" && close();
+    window.addEventListener("pointerdown", outside, true);
     window.addEventListener("keydown", key);
     return () => {
-      window.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("pointerdown", outside, true);
       window.removeEventListener("keydown", key);
     };
-  }, [open]);
+  }, [shown, close]);
 
   return (
     <div ref={ref} className="relative">
-      <ModelBadge botModel={bot.model} onClick={() => setOpen((value) => !value)} />
-      {open && <ModelPanel bot={bot} onClose={() => setOpen(false)} />}
+      <ModelBadge botModel={bot.model} onClick={() => (shown ? close() : setOpen(true))} />
+      {shown && <ModelPanel bot={bot} request={request} onClose={close} />}
     </div>
   );
 }
 
-function ModelPanel({ bot, onClose }: { bot: Bot; onClose(): void }) {
+function ModelPanel({
+  bot,
+  request,
+  onClose,
+}: {
+  bot: Bot;
+  request: NonNullable<ReturnType<typeof useUi.getState>["modelSwitch"]> | null;
+  onClose(): void;
+}) {
   const { data: catalog } = useModels();
   const { data: providers } = useProviders();
   const { data: runtime } = useRuntime();
@@ -60,7 +80,16 @@ function ModelPanel({ bot, onClose }: { bot: Bot; onClose(): void }) {
     (model) => model.providerId === rail && !model.capabilities.every((cap) => cap === "embedding"),
   );
   const pick = (ref: string | null) => {
-    update.mutate({ id: bot.id, patch: { model: ref } });
+    // The menu closes right away, which unmounts this panel; a callback passed to `mutate` would then never run. The
+    // promise lives on without it.
+    const switched = update.mutateAsync({ id: bot.id, patch: { model: ref } });
+    if (request?.retryMessageId) {
+      const { threadId, retryMessageId } = request;
+      // The model is chosen when a reply starts, so the one that was stuck or failed has to start again to use it.
+      void switched
+        .then(() => retryReply({ threadId, botId: bot.id, messageId: retryMessageId }))
+        .catch(() => {});
+    } else void switched.catch(() => {});
     onClose();
   };
 

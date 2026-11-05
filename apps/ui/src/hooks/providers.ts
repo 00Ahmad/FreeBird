@@ -1,6 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { AddProviderInput, ProviderPreset, ProviderView, UpdateProviderInput } from "@mrog/shared";
+import {
+  parseModelRef,
+  type AddProviderInput,
+  type ProviderPreset,
+  type ProviderView,
+  type UpdateProviderInput,
+} from "@mrog/shared";
 
 import { api } from "../lib/api";
 import { MODELS_KEY } from "./runtime";
@@ -12,6 +18,17 @@ export function useProviders() {
     queryKey: PROVIDERS_KEY,
     queryFn: () => api<{ providers: ProviderView[]; presets: ProviderPreset[] }>("/providers"),
   });
+}
+
+/** Whether a model (a "provider:model" ref) runs on this computer, which decides how long a silent reply is normal. */
+export function useModelIsLocal(ref: string | null | undefined): boolean {
+  const { data } = useProviders();
+  if (!ref) return true;
+  const providerId = parseModelRef(ref).providerId;
+  return (
+    providerId === "ollama" ||
+    (data?.providers.find((provider) => provider.id === providerId)?.local ?? false)
+  );
 }
 
 function useInvalidate() {

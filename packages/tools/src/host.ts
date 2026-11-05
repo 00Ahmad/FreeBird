@@ -10,7 +10,21 @@ export interface ApprovalRequest {
   risk: Risk;
 }
 
-export type Approver = (request: ApprovalRequest) => Promise<"allow" | "deny">;
+/** "timeout": nobody answered the card in time. That is not the user saying no, and the bot is told so. */
+export type Approver = (request: ApprovalRequest) => Promise<"allow" | "deny" | "timeout">;
+
+/** What the bot is told when a call isn't run, and why: a refusal and silence mean different things. */
+export const DENIED_RESULT = "The user denied this action. Do not retry it.";
+export const TIMED_OUT_RESULT =
+  "Nobody answered the approval request in time, so this was not run. Don't retry it unless the user asks for it again.";
+
+/** Things the host tells its owner about a call as it goes. */
+export interface HostHooks {
+  /** Right before a call that changes something outside the chat runs (after any approval). */
+  outward?(call: ToolCall): void;
+  /** Takes the user's known secret values out of a result or error before the model or the chat sees it. */
+  scrub?(text: string): string;
+}
 
 const MAX_RESULT = 20_000;
 
@@ -61,6 +75,7 @@ export function createToolHost(
   specs: ToolSpec[],
   context: Omit<ToolContext, "signal">,
   approve: Approver,
+  hooks: HostHooks = {},
 ): ToolHost {
   const byName = new Map(specs.map((spec) => [spec.name, spec]));
   const schemas = new Map(specs.map((spec) => [spec.name, argsSchema(spec)]));
@@ -68,7 +83,9 @@ export function createToolHost(
   const secrets = Object.values(context.env ?? {})
     .filter((value) => value.length >= 4)
     .toSorted((a, b) => b.length - a.length);
-  const hide = (text: string) => secrets.reduce((out, value) => out.replaceAll(value, "[hidden]"), text);
+  const masked = (text: string) => secrets.reduce((out, value) => out.replaceAll(value, "[hidden]"), text);
+  // The command's own secrets first (they may be short), then everything the app knows is secret.
+  const hide = (text: string) => (hooks.scrub ? hooks.scrub(masked(text)) : masked(text));
   return {
     definitions: () =>
       specs.map((spec) => ({
@@ -104,8 +121,11 @@ export function createToolHost(
       }
       if (risk.level === "ask") {
         const decision = await approve({ call, spec, args: parsed.data, risk });
-        if (decision === "deny") return { status: "denied", result: "The user denied this." };
+        if (decision === "deny") return { status: "denied", result: DENIED_RESULT };
+        if (decision === "timeout") return { status: "denied", result: TIMED_OUT_RESULT };
       }
+      // Saved by the owner before the call starts: if the app dies during it, the restart knows it may have happened.
+      if (risk.outward ?? risk.level === "ask") hooks.outward?.(call);
       try {
         const output = await spec.run(parsed.data, ctx);
         const result = hide(typeof output === "string" ? output : output.text);

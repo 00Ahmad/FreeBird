@@ -119,6 +119,91 @@ describe("bots", () => {
     expect(store.bots.delete(bot.id)).toBe(false);
   });
 
+  describe("tool lists", () => {
+    it("gives a bot made before the column existed no restriction, and keeps the row untouched", () => {
+      const dir = mkdtempSync(join(tmpdir(), "mrog-store-"));
+      const path = join(dir, "app.db");
+      try {
+        const old = openDatabase(
+          path,
+          MIGRATIONS.filter((migration) => migration.id <= 12),
+        );
+        const now = new Date().toISOString();
+        const id = `bot_${"a".repeat(32)}`;
+        old
+          .prepare(
+            "INSERT INTO bots (id, name, avatar_shape, avatar_color, created_at, updated_at) VALUES (?, 'Ada', 'leaf', 'lime', ?, ?)",
+          )
+          .run(id, now, now);
+        old
+          .prepare("INSERT INTO threads (id, kind, created_at, updated_at) VALUES (?, 'direct', ?, ?)")
+          .run(`thr_${"1".repeat(32)}`, now, now);
+        old
+          .prepare("INSERT INTO thread_members (thread_id, bot_id) VALUES (?, ?)")
+          .run(`thr_${"1".repeat(32)}`, id);
+        old.close();
+
+        store = openStore(path);
+        expect(store.bots.get(id)?.tools).toEqual({ allow: null, exclude: [], apps: {} });
+        const column = store.db
+          .prepare("SELECT name FROM pragma_table_info('bots') WHERE name = 'tools'")
+          .all();
+        expect(column).toHaveLength(1);
+      } finally {
+        store?.close();
+        store = undefined;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("saves, changes and clears a list, and stores nothing when there is nothing to restrict", () => {
+      store = openStore(":memory:");
+      const bot = store.bots.create({
+        name: "Ada",
+        tools: { allow: null, exclude: ["run_command"], apps: {} },
+      });
+      expect(bot.tools).toEqual({ allow: null, exclude: ["run_command"], apps: {} });
+      const raw = () => store!.db.prepare("SELECT tools FROM bots WHERE id = ?").get(bot.id)?.tools;
+      expect(JSON.parse(String(raw()))).toEqual({ allow: null, exclude: ["run_command"], apps: {} });
+
+      // Updating something else leaves the list alone.
+      expect(store.bots.update(bot.id, { pinned: true })?.tools.exclude).toEqual(["run_command"]);
+      expect(store.bots.update(bot.id, { tools: { allow: [], exclude: [], apps: {} } })?.tools).toEqual({
+        allow: [],
+        exclude: [],
+        apps: {},
+      });
+      expect(store.bots.update(bot.id, { tools: { allow: null, exclude: [], apps: {} } })?.tools).toEqual({
+        allow: null,
+        exclude: [],
+        apps: {},
+      });
+      expect(raw()).toBeNull();
+      expect(store.bots.create({ name: "Plain" }).tools).toEqual({ allow: null, exclude: [], apps: {} });
+    });
+
+    it("reads a value it can't understand as no restriction, so one bad row never hides every bot", () => {
+      store = openStore(":memory:");
+      const good = store.bots.create({
+        name: "Good",
+        tools: { allow: null, exclude: ["fetch_url"], apps: {} },
+      });
+      const bad = store.bots.create({ name: "Bad" });
+      for (const value of [
+        "{not json",
+        '{"exclude": "run_command"}',
+        '{"exclude":["has space"]}',
+        "[]",
+        "7",
+      ]) {
+        store.db.prepare("UPDATE bots SET tools = ? WHERE id = ?").run(value, bad.id);
+        expect(store.bots.get(bad.id)?.tools, value).toEqual({ allow: null, exclude: [], apps: {} });
+        expect(store.bots.list()).toHaveLength(2);
+      }
+      expect(store.bots.get(good.id)?.tools.exclude).toEqual(["fetch_url"]);
+    });
+  });
+
   it("keeps at most one primary bot", () => {
     store = openStore(":memory:");
     const a = store.bots.create({ name: "A", isPrimary: true });
@@ -272,6 +357,116 @@ describe("messages", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  describe("recovering messages a restart interrupted", () => {
+    const tool = (over: Record<string, unknown>) => ({
+      type: "tool" as const,
+      callId: "c1",
+      name: "run_command",
+      args: {},
+      status: "running" as const,
+      ...over,
+    });
+
+    it("closes cards nobody can answer and ends a mid-action turn as an error, not a quiet 'stopped'", () => {
+      store = openStore(":memory:");
+      const bot = store.bots.create({ name: "Ada" });
+      const make = (parts: unknown[]) =>
+        store!.messages.create({
+          threadId: bot.threadId,
+          role: "bot",
+          botId: bot.id,
+          status: "streaming",
+          parts: parts as never,
+        });
+      const acting = make([
+        { type: "text", text: "Sending it now." },
+        tool({ callId: "c1", name: "gmail__send", outward: true }),
+      ]);
+      const waiting = make([
+        tool({
+          callId: "c2",
+          status: "pending_approval",
+          // A card is already live-looking when the app dies: it must not stay answerable.
+          approval: { id: "apr_1", kind: "terminal", summary: "rm x", badges: [], canAlways: false },
+        }),
+        { type: "question", questionId: "q1", question: "Which?" },
+        { type: "question", questionId: "q2", question: "Done?", answer: "yes" },
+        { type: "secret", requestId: "s1", name: "KEY", reason: "login", saved: false },
+        { type: "secret", requestId: "s2", name: "KEY2", reason: "login", saved: true },
+      ]);
+      const reading = make([tool({ callId: "c3", name: "read_file" })]);
+      const finished = store.messages.create({
+        threadId: bot.threadId,
+        role: "bot",
+        botId: bot.id,
+        status: "done",
+        parts: [tool({ status: "done", outward: true })],
+      });
+
+      expect(store.messages.recoverInterrupted()).toEqual({ stopped: 2, failed: 1 });
+
+      // Mid-action: an error that names it and says to check, so a retry can't silently do it twice.
+      const a = store.messages.get(acting.id)!;
+      expect(a.status).toBe("error");
+      expect(a.parts[1]).toMatchObject({
+        status: "error",
+        outward: true,
+        result: expect.stringContaining("may or may not have finished"),
+      });
+      expect(a.parts.at(-1)).toMatchObject({
+        type: "error",
+        code: "interrupted",
+        message: expect.stringContaining("gmail__send"),
+      });
+
+      // Waiting for the user: stopped, with nothing left to click.
+      const w = store.messages.get(waiting.id)!;
+      expect(w.status).toBe("stopped");
+      expect(w.parts[0]).toMatchObject({ status: "error", result: "Stopped before anyone answered." });
+      expect(w.parts[0]).not.toHaveProperty("approval");
+      expect(w.parts[1]).toMatchObject({ expired: true });
+      expect(w.parts[2]).not.toHaveProperty("expired"); // answered
+      expect(w.parts[3]).toMatchObject({ expired: true });
+      expect(w.parts[4]).not.toHaveProperty("expired"); // saved
+
+      // A read-only call that was cut off is simply stopped.
+      expect(store.messages.get(reading.id)).toMatchObject({
+        status: "stopped",
+        parts: [{ status: "error", result: "Stopped before it finished." }],
+      });
+      expect(store.messages.get(reading.id)!.parts).toHaveLength(1);
+
+      // Finished messages are left as they are, even if an outward call ran in them.
+      expect(store.messages.get(finished.id)).toMatchObject({ status: "done" });
+      expect(store.messages.recoverInterrupted()).toEqual({ stopped: 0, failed: 0 });
+    });
+
+    it("does not call a call 'mid-action' unless it was running: one still waiting for approval never started", () => {
+      store = openStore(":memory:");
+      const bot = store.bots.create({ name: "Ada" });
+      const waiting = store.messages.create({
+        threadId: bot.threadId,
+        role: "bot",
+        botId: bot.id,
+        status: "streaming",
+        parts: [tool({ status: "pending_approval", outward: true })],
+      });
+      expect(store.messages.recoverInterrupted()).toEqual({ stopped: 1, failed: 0 });
+      expect(store.messages.get(waiting.id)!.status).toBe("stopped");
+    });
+
+    it("keeps the new part fields through a read (the schema does not strip them)", () => {
+      store = openStore(":memory:");
+      const bot = store.bots.create({ name: "Ada" });
+      const message = store.messages.create({
+        threadId: bot.threadId,
+        role: "bot",
+        parts: [tool({ status: "denied", outward: true, decidedBy: "timeout" })],
+      });
+      expect(store.messages.get(message.id)!.parts[0]).toMatchObject({ outward: true, decidedBy: "timeout" });
+    });
   });
 });
 

@@ -54,9 +54,3 @@ The UI keeps one Server-Sent Events stream open. Durable events carry ids and th
 ## Security boundaries
 
 The harness binds to 127.0.0.1, rejects non-loopback `Host` headers (DNS rebinding), checks a per-launch bearer token on every `/api` route it matched (so encoded paths can't skip it), and serves the packaged UI with a strict CSP. Secrets live in the OS keychain and are masked out of tool results. See [Privacy & security](privacy-and-security.md).
-
-## Design documents
-
-- [Plan](design/PLAN.md): goals, research, tech choices and phases.
-- [UI spec](design/UI-SPEC.md): the interface, flow by flow.
-- [Code audit (November 2026)](design/audit-2026-11.md): what was found and fixed.

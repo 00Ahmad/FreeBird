@@ -1,0 +1,41 @@
+/** Where Tab goes next inside a dialog, so focus never leaves it. */
+
+/** What can take focus with Tab, in the order the page lists it. */
+export const FOCUSABLE =
+  'a[href], button, input, select, textarea, summary, [contenteditable=""], [contenteditable="true"], [tabindex]';
+
+/** The minimum of an element this needs, so the rule can be tested without a browser. */
+export interface Focusable {
+  disabled?: boolean;
+  hidden?: boolean;
+  tabIndex: number;
+  /** `type` of an input; hidden inputs never take focus. */
+  type?: string;
+  /** Whether it takes up room on the page (display: none and detached nodes do not). */
+  rendered: boolean;
+  /** Inside something inert or `aria-hidden`. */
+  blocked?: boolean;
+}
+
+/** Whether Tab can land on it. */
+export function tabbable(element: Focusable): boolean {
+  if (element.disabled || element.hidden || element.blocked || !element.rendered) return false;
+  if (element.tabIndex < 0) return false;
+  return element.type !== "hidden";
+}
+
+/**
+ * The index to focus when Tab (or Shift+Tab) is pressed with focus at `current` among `count` tabbable elements, or
+ * null to leave the browser to move focus on its own (it stays inside, in the middle of the list).
+ *
+ * `current` is -1 when focus is outside the dialog altogether (on the page behind it, or on nothing): Tab then goes to
+ * the first element, Shift+Tab to the last. At either end focus wraps round. With nothing tabbable, `count` is 0 and
+ * the answer is -1: keep focus on the dialog itself.
+ */
+export function nextFocus(count: number, current: number, backwards: boolean): number | null {
+  if (count === 0) return -1;
+  if (current === -1) return backwards ? count - 1 : 0;
+  if (backwards && current === 0) return count - 1;
+  if (!backwards && current === count - 1) return 0;
+  return null;
+}

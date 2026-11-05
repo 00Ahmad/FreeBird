@@ -16,7 +16,7 @@ const toBase64 = async (blob: Blob) => {
   return btoa(binary);
 };
 
-/** Dictation (UI-SPEC §12): record, transcribe with the configured speech-to-text provider, insert. Cmd/Ctrl+D. */
+/** Dictation: record, transcribe with the configured speech-to-text provider, insert. Cmd/Ctrl+D. */
 export function VoiceButton({ onTranscript }: { onTranscript(text: string): void }) {
   const [state, setState] = useState<"idle" | "starting" | "recording" | "transcribing">("idle");
   const [error, setError] = useState<string | null>(null);

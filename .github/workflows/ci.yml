@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to a commit, not a tag a maintainer can move. Bump them on purpose: resolve the tag with
+# `git ls-remote --tags https://github.com/<owner>/<repo>` (use the `^{}` line for an annotated tag).
+
 jobs:
   check:
     name: Check (${{ matrix.os }})
@@ -20,9 +23,9 @@ jobs:
       # Types come with the npm package; the binary isn't needed to typecheck, test or bundle.
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: pnpm
@@ -32,3 +35,18 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+
+  # The one check to require in branch protection: it stays red if any matrix leg failed, was cancelled or was
+  # skipped, so the list of required checks doesn't change when the matrix does.
+  ci:
+    name: CI
+    needs: [check]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every check passed
+        env:
+          RESULT: ${{ needs.check.result }}
+        run: |
+          echo "check: $RESULT"
+          test "$RESULT" = "success"

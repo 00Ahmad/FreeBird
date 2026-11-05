@@ -68,6 +68,10 @@ export type ProviderErrorCode =
   | "bad_request"
   /** The model wrote output the runtime could not parse (e.g. a malformed tool call). */
   | "bad_output"
+  /** The model stopped sending anything for too long (a hung runtime or connection), so the turn was ended. */
+  | "stalled"
+  /** The bot works from pictures (a Visual Bot) and this model can't see them. */
+  | "needs_vision"
   | "aborted"
   | "unknown";
 
@@ -86,9 +90,12 @@ export class ProviderError extends Error {
 const BAD_OUTPUT =
   /syntax error|failed to parse|error parsing|unexpected end of json|invalid character|unmarshal/i;
 
+/** The runtime ran out of memory. "oom" as a whole word only: "boom", "room" and "bloom" are not it. */
+const OUT_OF_MEMORY = /memory|\boom\b/i;
+
 /** Code for an error message a runtime reports mid-stream. */
 export function runtimeErrorCode(detail: string): ProviderErrorCode {
-  if (/memory|oom/i.test(detail)) return "oom";
+  if (OUT_OF_MEMORY.test(detail)) return "oom";
   return BAD_OUTPUT.test(detail) ? "bad_output" : "provider_down";
 }
 
@@ -111,7 +118,7 @@ export function httpError(status: number, body: string, providerLabel: string): 
           : status === 408 || status === 504
             ? "timeout"
             : status >= 500
-              ? /memory|oom/i.test(detail)
+              ? OUT_OF_MEMORY.test(detail)
                 ? "oom"
                 : BAD_OUTPUT.test(detail)
                   ? "bad_output"

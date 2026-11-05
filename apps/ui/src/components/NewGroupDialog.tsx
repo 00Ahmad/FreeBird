@@ -9,7 +9,7 @@ import { useCreateGroup } from "../hooks/team";
 import { useUi } from "../state";
 import { Modal } from "./Modal";
 
-/** New group chat: pick 2–6 bots in the "To:" field (UI-SPEC §7). */
+/** New group chat: pick 2–6 bots in the "To:" field. */
 export function NewGroupDialog() {
   const { data: bots } = useBots();
   const create = useCreateGroup();

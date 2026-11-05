@@ -46,7 +46,7 @@ packages/
   vault/          OS keychain
   ui-kit/         Design tokens and base components
 scripts/dev.mjs   Starts everything for development
-docs/             User and developer documentation; docs/design/ for design notes
+docs/             User and developer documentation
 ```
 
 Packages are TypeScript source consumed directly by the workspace (no per-package build step); esbuild bundles the harness and the Electron entry points, and Vite bundles the UI.

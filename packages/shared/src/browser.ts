@@ -16,6 +16,16 @@ export const BrowserSettings = z.object({
   searxngUrl: z.string().url().nullable(),
   /** Name of the secret (Settings → Secrets) holding a Brave Search API key. */
   braveSecret: z.string().min(1).nullable(),
+  /**
+   * "per-bot": each bot has its own browser profile (sign-ins, cookies), and its helpers use it too. "shared": all
+   * bots use one profile. Installs that already had the shared profile keep it until switched.
+   */
+  profiles: z.enum(["per-bot", "shared"]),
+  /**
+   * Leave out what only automated browsers send (the automation flag behind `navigator.webdriver`, "Headless" in
+   * the user agent), so sites see an ordinary Edge or Chrome. CAPTCHAs are still handed to the user.
+   */
+  blendIn: z.boolean(),
 });
 export type BrowserSettings = z.infer<typeof BrowserSettings>;
 
@@ -26,6 +36,8 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = {
   search: "browser",
   searxngUrl: null,
   braveSecret: null,
+  profiles: "per-bot",
+  blendIn: true,
 };
 
 export interface BrowserTab {
@@ -37,6 +49,8 @@ export interface BrowserTab {
 
 export interface BrowserStatus {
   running: boolean;
+  /** Profiles whose browser is open now: a bot's id, a race's or cluster's id, or "shared". */
+  open: string[];
   tabs: BrowserTab[];
   error: string | null;
 }

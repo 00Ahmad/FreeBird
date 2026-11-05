@@ -12,7 +12,9 @@ import { useMessageHistory, useSendMessage, useStopThread } from "../../hooks/th
 import { isMac } from "../../lib/harness";
 import { layerOpen } from "../../lib/layers";
 import { quoteInto } from "../../lib/quote";
+import { firstUnreadId } from "../../lib/unread";
 import { useUi } from "../../state";
+import { useUnread } from "../../unread";
 import { BrowserPanel } from "../browser/BrowserPanel";
 import { ComputerPanel } from "../computer/ComputerPanel";
 import { DetailsPanel } from "../details/DetailsPanel";
@@ -47,6 +49,11 @@ export function ChatView({ thread }: { thread: Thread }) {
   const panel = useUi((state) => state.panel);
   const setPanel = useUi((state) => state.setPanel);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
+  // Where what arrived while the user was away begins, taken before the chat counts as read. The line stays until the
+  // user sends something. (ChatView is made anew for each chat, so this is read once per chat opened.)
+  const [newFromId, setNewFromId] = useState<string | null>(() =>
+    firstUnreadId(useUnread.getState().state, thread.id),
+  );
   const [discussOpen, setDiscussOpen] = useState(false);
   const { data: discussion } = useDiscussion(thread.id, thread.kind === "group");
   const stopDiscussion = useStopDiscussion(thread.id);
@@ -77,6 +84,20 @@ export function ChatView({ thread }: { thread: Thread }) {
   const detailsKey = isMac() ? "⌘⇧I" : "Ctrl+Alt+B";
   const setText = assist.setText;
   const composing = !thread.race && (view === "chat" || thread.kind !== "group");
+
+  // Looking at the chat reads it: now, and again whenever this window comes back to the front.
+  useEffect(() => {
+    const read = () => {
+      if (document.hasFocus() && !document.hidden) useUnread.getState().read(thread.id);
+    };
+    read();
+    window.addEventListener("focus", read);
+    document.addEventListener("visibilitychange", read);
+    return () => {
+      window.removeEventListener("focus", read);
+      document.removeEventListener("visibilitychange", read);
+    };
+  }, [thread.id]);
 
   // Cmd/Ctrl+L: the text selected in the chat goes into the message box as a quote.
   useEffect(() => {
@@ -206,6 +227,7 @@ export function ChatView({ thread }: { thread: Thread }) {
                 hasOlder={hasOlder}
                 loadingOlder={loadingOlder}
                 onLoadOlder={loadOlder}
+                newFromId={newFromId}
               />
             ) : (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
@@ -284,6 +306,7 @@ export function ChatView({ thread }: { thread: Thread }) {
               onSend={async (input) => {
                 await send.mutateAsync({ ...input, ...(replyTo ? { replyToId: replyTo.id } : {}) });
                 setReplyTo(null);
+                setNewFromId(null);
               }}
               onStop={() => stop.mutate()}
             />

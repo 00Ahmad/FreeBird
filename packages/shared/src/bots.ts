@@ -3,7 +3,7 @@ import { z } from "zod";
 import { BotId, ThreadId } from "./ids";
 import { ModelRef } from "./models";
 
-/** Our own avatar shapes (UI-SPEC §3): deliberately not Grok Bot's set. */
+/** Our own avatar shapes: deliberately not Grok Bot's set. */
 export const AVATAR_SHAPES = [
   "circle",
   "squircle",
@@ -33,6 +33,105 @@ export const BotLabel = z.string().trim().max(80);
 /** The bot's standing job description, sent as part of its system prompt. */
 export const BotInstructions = z.string().max(8000);
 
+/** A tool's name, or a prefix ending in `*` for a whole family (`gmail__*` for one connected app's tools). */
+export const ToolPattern = z
+  .string()
+  .trim()
+  .min(1)
+  .max(100)
+  .regex(/^[\w-]+\*?$/, "Letters, digits, _ and -, with * only at the end");
+
+/**
+ * Which tools a bot may use. `exclude` always wins. `allow: null` means every tool; a list means only those, and an
+ * empty list means none. A tool added later (a new connected app) is on unless the bot's list says otherwise.
+ */
+/**
+ * How much a bot may do in a connected app: nothing, only look (tools that read), or everything its tools allow.
+ * A connected app the bot's list doesn't mention is "full", as it was before access could be set.
+ */
+export const AppAccess = z.enum(["off", "read", "full"]);
+export type AppAccess = z.infer<typeof AppAccess>;
+
+export const BotTools = z.object({
+  allow: z.array(ToolPattern).max(300).nullable().default(null),
+  exclude: z.array(ToolPattern).max(300).default([]),
+  /** Access per connected app, by its id. */
+  apps: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]{0,30}$/), AppAccess).default({}),
+});
+export type BotTools = z.infer<typeof BotTools>;
+export const DEFAULT_BOT_TOOLS: BotTools = { allow: null, exclude: [], apps: {} };
+
+/** The bot's access to one connected app. */
+export const appAccess = (tools: BotTools, connectorId: string): AppAccess =>
+  tools.apps[connectorId] ?? "full";
+
+const matchesTool = (pattern: string, name: string) =>
+  pattern.endsWith("*") ? name.startsWith(pattern.slice(0, -1)) : pattern === name;
+
+/** Whether the bot may use this tool. */
+export function toolAllowed(tools: BotTools, name: string): boolean {
+  if (tools.exclude.some((pattern) => matchesTool(pattern, name))) return false;
+  return tools.allow === null || tools.allow.some((pattern) => matchesTool(pattern, name));
+}
+
+/** Whether the bot has any restriction at all. */
+export const restrictsTools = (tools: BotTools) =>
+  tools.allow !== null ||
+  tools.exclude.length > 0 ||
+  Object.values(tools.apps).some((access) => access !== "full");
+
+export type ToolGroup =
+  "files" | "commands" | "web" | "browser" | "computer" | "vault" | "team" | "memory" | "apps" | "chat";
+
+/** In the order the Details panel lists them. */
+export const TOOL_GROUPS: { id: ToolGroup; label: string }[] = [
+  { id: "files", label: "Files" },
+  { id: "commands", label: "Commands" },
+  { id: "web", label: "Web" },
+  { id: "browser", label: "Browser" },
+  { id: "computer", label: "Computer" },
+  { id: "apps", label: "Connected apps" },
+  { id: "vault", label: "Logins and secrets" },
+  { id: "team", label: "Teamwork" },
+  { id: "memory", label: "Memory" },
+  { id: "chat", label: "Chat" },
+];
+
+/** A tool as the Details panel shows it. */
+export interface ToolInfo {
+  name: string;
+  description: string;
+  group: ToolGroup;
+  /** The bot's list lets it use the tool. */
+  enabled: boolean;
+  /** Offered at the moment. False for a tool its list names but that is gone for now (a stopped computer). */
+  available: boolean;
+  /** Whether a switch can change it: it isn't held off by a pattern or an allow list the panel doesn't edit. */
+  editable: boolean;
+  /** Why it is off when no switch here can turn it on ("read-only access to Gmail"); null otherwise. */
+  heldBy: string | null;
+  /** For a connected app's tool: which app, and what the tool does there. */
+  app?: { id: string; name: string; kind: AppToolKind };
+}
+
+/**
+ * The tool lists after switching one tool on or off. Only the exact name in `exclude` changes: an allow list set
+ * through the API is left as it is, so a click in the panel never wipes it.
+ */
+export function setToolEnabled(tools: BotTools, name: string, enabled: boolean): BotTools {
+  const exclude = tools.exclude.filter((existing) => existing !== name);
+  return { ...tools, exclude: enabled ? exclude : [...exclude, name] };
+}
+
+/** The tool lists with one connected app's access changed; "full" is the default, so it is simply left out. */
+export function setAppAccess(tools: BotTools, connectorId: string, access: AppAccess): BotTools {
+  const { [connectorId]: _previous, ...rest } = tools.apps;
+  return { ...tools, apps: access === "full" ? rest : { ...rest, [connectorId]: access } };
+}
+
+/** What a connected app's tool does, as far as can be told: only reads, changes things, or changes them for good. */
+export type AppToolKind = "read" | "write" | "destructive";
+
 export const Bot = z.object({
   id: BotId,
   name: BotName,
@@ -58,6 +157,8 @@ export const Bot = z.object({
   visual: z.boolean(),
   /** The cluster (group discussion) this bot was made for; it lives only there. */
   clusterId: ThreadId.nullable().default(null),
+  /** Which tools it may use (all by default). Fewer tools means a shorter prompt, which small models need. */
+  tools: BotTools.default(DEFAULT_BOT_TOOLS),
   /** The bot's one-to-one thread with the user. */
   threadId: ThreadId,
   createdAt: z.iso.datetime(),
@@ -77,6 +178,7 @@ export const CreateBotInput = z.object({
   instructions: BotInstructions.optional(),
   coordinator: z.boolean().optional(),
   visual: z.boolean().optional(),
+  tools: BotTools.optional(),
 });
 export type CreateBotInput = z.infer<typeof CreateBotInput>;
 
@@ -93,6 +195,7 @@ export const UpdateBotInput = z
     section: z.string().trim().max(40).nullable(),
     notifications: z.boolean(),
     coordinator: z.boolean(),
+    tools: BotTools,
   })
   .partial()
   .refine((value) => Object.keys(value).length > 0, "Nothing to update");

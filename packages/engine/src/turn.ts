@@ -97,6 +97,45 @@ const SELF_CHECK_NUDGE: ChatMessage = {
     "(Before you finish, check your answer against my request. Did you do every part of it? Is every fact and number from a page or tool result you actually saw, with its source? If something is missing or wrong, fix it now with your tools, then give only the corrections or additions. If the answer is complete and correct, reply with just: OK)",
 };
 
+const NO_PROGRESS_NUDGE: ChatMessage = {
+  role: "user",
+  content:
+    "(You've made the same tool call with the same result several times in a row, so it is not getting anywhere. Don't call it again. Reply now with what you found so far, say plainly what didn't work, and suggest a different approach if there is one.)",
+};
+
+/** The same call (same arguments) with the same outcome this many times in a row ends the turn. */
+export const NO_PROGRESS_REPEATS = 3;
+
+/** FNV-1a over a string, sampling long ones (pictures) so a repeat check never costs a pass over megabytes. */
+function fingerprint(text: string): string {
+  const stride = Math.max(1, Math.floor(text.length / 4096));
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += stride) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+  return `${text.length}:${(hash >>> 0).toString(16)}`;
+}
+
+/** Same value, same text: object keys in any order. */
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+/**
+ * What one tool call did, for noticing a bot that keeps doing the same thing. The result counts, not only the call:
+ * scrolling or looking at a page repeats the same arguments on purpose, and what comes back is what tells them apart
+ * (pictures included).
+ */
+export function callSignature(call: ToolCall, outcome: ToolOutcome): string {
+  const pictures = (outcome.images ?? []).map((image) => fingerprint(image.data)).join(",");
+  return [call.name, stable(call.arguments), outcome.status, fingerprint(outcome.result), pictures].join("|");
+}
+
 /** Tool calls a task needs before its answer is worth a self-check. */
 const SELF_CHECK_MIN_CALLS = 3;
 
@@ -146,6 +185,11 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
   let checkStep = 0;
   let finishReason: string | null = null;
   const think = capabilities.includes("thinking") ? options.think : undefined;
+  /** The last tool call's signature and how many calls in a row had it. */
+  let lastSignature = "";
+  let repeats = 0;
+  /** The step on which the bot was found going round in circles. */
+  let stuckAt = 0;
 
   for (let step = 1; step <= maxSteps; step++) {
     if (signal.aborted) throw new ProviderError("aborted", "Stopped.");
@@ -324,8 +368,16 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
         outcome = { status: "error", result: `Tool failed: ${(error as Error).message}` };
       }
       sink.toolEnd(call.id, outcome);
+      const signature = callSignature(call, outcome);
+      repeats = signature === lastSignature ? repeats + 1 : 1;
+      lastSignature = signature;
+      if (repeats >= NO_PROGRESS_REPEATS && !stuckAt) stuckAt = step;
+      // The host says why a call wasn't run (the user said no, or nobody answered in time): those are different
+      // facts for the bot. Only a host that gave no reason gets the usual refusal.
       let content =
-        outcome.status === "denied" ? "The user denied this action. Do not retry it." : outcome.result;
+        outcome.status === "denied"
+          ? outcome.result.trim() || "The user denied this action. Do not retry it."
+          : outcome.result;
       const images = outcome.images ?? [];
       if (images.length > 0 && !vision) {
         content += "\n(A picture came with this result, but this model can't see pictures. Use text tools.)";
@@ -345,11 +397,15 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
       }
     }
     messages.push(...pictures);
+    // Going round in circles ends the turn here, after the whole batch has its results (APIs reject a tool call
+    // that has none). Like running out of steps, a message sent meanwhile waits for a fresh turn.
+    if (stuckAt) break;
     // After the last step only the out-of-steps reply is left; a new message waits for a fresh turn instead.
     if (step < maxSteps) messages.push(...(options.steer?.() ?? []));
   }
 
-  // Out of steps: one last call without tools, so the turn ends with what was found instead of nothing.
+  // Out of steps, or stuck repeating itself: one last call without tools, so the turn ends with what was found
+  // instead of nothing.
   if (!signal.aborted) {
     shrinkOldResults(messages, room - 200);
     try {
@@ -357,7 +413,7 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
       sink.text("\n\n");
       for await (const chunk of provider.chat({
         model,
-        messages: [...messages, OUT_OF_STEPS_NUDGE],
+        messages: [...messages, stuckAt ? NO_PROGRESS_NUDGE : OUT_OF_STEPS_NUDGE],
         think,
         local: options.local,
         signal,
@@ -376,6 +432,13 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
       if (signal.aborted) throw new ProviderError("aborted", "Stopped.");
       // The summary is a courtesy; the note below still explains why the turn ended.
     }
+  }
+  if (stuckAt) {
+    if (options.stepLimitNote !== false)
+      sink.text(
+        `\n\n_Stopped: the same step gave the same result ${NO_PROGRESS_REPEATS} times in a row. Ask me to continue, or tell me what to try differently._`,
+      );
+    return { usage, finishReason: "no_progress", steps: stuckAt, droppedHistory: fitted.dropped };
   }
   if (options.stepLimitNote !== false)
     sink.text(`\n\n_Stopped after ${maxSteps} steps. Ask me to continue if there's more to do._`);

@@ -1,14 +1,14 @@
-import { AlertTriangle, Brain, ChevronRight, Gavel, Settings2 } from "lucide-react";
+import { Brain, ChevronRight, Gavel } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { messageText, type Bot, type Message, type MessagePart } from "@mrog/shared";
-import { BotAvatar, Button, cn } from "@mrog/ui-kit";
+import { BotAvatar, cn } from "@mrog/ui-kit";
 
-import { useUi } from "../../state";
 import { Markdown } from "./Markdown";
 import { PlanCard } from "./PlanCard";
 import { ToolCard } from "./ToolCard";
 import { QuestionCard } from "./QuestionCard";
+import { ErrorNotice, SlowReply } from "./ReplyTrouble";
 import { SecretCard } from "./SecretCard";
 
 interface MessageItemProps {
@@ -18,9 +18,11 @@ interface MessageItemProps {
   grouped: boolean;
   /** Extra controls (reply, reactions) added by later phases. */
   actions?: ReactNode;
+  /** The newest reply from this bot in its chat: the only one that can be tried again. */
+  latest?: boolean;
 }
 
-export function MessageItem({ message, bot, grouped, actions }: MessageItemProps) {
+export function MessageItem({ message, bot, grouped, actions, latest = false }: MessageItemProps) {
   // App notes (a routine starting) sit centered between messages.
   if (message.role === "system") {
     const [title, ...rest] = messageText(message).split("\n");
@@ -70,9 +72,17 @@ export function MessageItem({ message, bot, grouped, actions }: MessageItemProps
         )}
         <div className="flex flex-col gap-1.5 text-[14.5px] leading-relaxed">
           {message.parts.map((part, index) => (
-            <BotPart key={index} part={part} message={message} last={index === message.parts.length - 1} />
+            <BotPart
+              key={index}
+              part={part}
+              message={message}
+              bot={bot}
+              latest={latest}
+              last={index === message.parts.length - 1}
+            />
           ))}
           {streaming && empty && <TypingDots />}
+          {streaming && empty && <SlowReply message={message} bot={bot} />}
           {message.status === "stopped" && <span className="text-xs text-ink-3">Stopped</span>}
         </div>
         {actions}
@@ -99,7 +109,19 @@ function UserImage({ mediaType, data }: { mediaType: string; data: string }) {
   );
 }
 
-function BotPart({ part, message, last }: { part: MessagePart; message: Message; last: boolean }) {
+function BotPart({
+  part,
+  message,
+  bot,
+  latest,
+  last,
+}: {
+  part: MessagePart;
+  message: Message;
+  bot: Bot | undefined;
+  latest: boolean;
+  last: boolean;
+}) {
   const streaming = message.status === "streaming" && last;
   switch (part.type) {
     case "text":
@@ -122,7 +144,7 @@ function BotPart({ part, message, last }: { part: MessagePart; message: Message;
     case "secret":
       return <SecretCard part={part} live={message.status === "streaming"} />;
     case "error":
-      return <ErrorNotice code={part.code} message={part.message} />;
+      return <ErrorNotice part={part} message={message} bot={bot} latest={latest} />;
     default:
       return null;
   }
@@ -145,29 +167,6 @@ function Reasoning({ text, active }: { text: string; active: boolean }) {
       {open && (
         <div className="mt-1 border-l-2 border-border pl-3 whitespace-pre-wrap select-text">{text}</div>
       )}
-    </div>
-  );
-}
-
-function ErrorNotice({ code, message }: { code: string; message: string }) {
-  const openSettings = useUi((state) => state.openSettings);
-  const fixable = code === "model_missing" || code === "provider_down" || code === "invalid_key";
-  return (
-    <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 px-3 py-2.5 text-[13px]">
-      <AlertTriangle size={15} className="mt-0.5 shrink-0 text-danger" />
-      <div className="min-w-0 flex-1">
-        <p className="text-ink select-text">{message}</p>
-        {fixable && (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="mt-1.5 -ml-2"
-            onClick={() => openSettings(code === "invalid_key" ? "providers" : "model")}
-          >
-            <Settings2 size={13} /> Open settings
-          </Button>
-        )}
-      </div>
     </div>
   );
 }

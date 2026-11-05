@@ -54,7 +54,7 @@ export function App() {
   );
 }
 
-/** Keyboard shortcuts from UI-SPEC §15; dictation (Mod+D) and Add selection (Mod+L) live in the chat. */
+/** Keyboard shortcuts; dictation (Mod+D) and Add selection (Mod+L) live in the chat. */
 function useShortcuts(query: string) {
   const { data: bots } = useBots();
   const { data: threads } = useThreads();

@@ -14,9 +14,3 @@
 - **[Development](development.md)**: setup, commands, layout, conventions, tests, evals, packaging.
 - **[Architecture](architecture.md)**: how the shell, interface, harness and engine fit together.
 - **[Contributing](../CONTRIBUTING.md)** and the **[roadmap](roadmap.md)**.
-
-## Design notes
-
-- **[Plan](design/PLAN.md)**: goals, research, tech choices and phases.
-- **[UI spec](design/UI-SPEC.md)**: the interface, section by section.
-- **[Code audit, November 2026](design/audit-2026-11.md)**: what an audit found and how it was fixed.

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
-import { compareBots, type Bot, type CreateBotInput, type UpdateBotInput } from "@mrog/shared";
+import { compareBots, type Bot, type CreateBotInput, type ToolInfo, type UpdateBotInput } from "@mrog/shared";
 
 import { api } from "../lib/api";
 
@@ -21,6 +21,17 @@ export function useBots() {
   return useQuery({
     queryKey: BOTS_KEY,
     queryFn: async () => (await api<{ bots: Bot[] }>("/bots")).bots,
+  });
+}
+
+export const botToolsKey = (botId: string) => ["bot-tools", botId] as const;
+
+/** The tools a bot has, on or off, for the Details panel. Looked at again each time the panel opens. */
+export function useBotTools(botId: string) {
+  return useQuery({
+    queryKey: botToolsKey(botId),
+    queryFn: async () => (await api<{ tools: ToolInfo[] }>(`/bots/${botId}/tools`)).tools,
+    refetchOnMount: "always",
   });
 }
 

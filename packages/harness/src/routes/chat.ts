@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { MessageId, SendMessageInput, ThreadId } from "@mrog/shared";
+import { BotId, MessageId, repeatsAction, SendMessageInput, ThreadId } from "@mrog/shared";
 
 import { fail, parse } from "../http";
 import type { Services } from "../services";
@@ -39,6 +39,42 @@ export function registerChatRoutes(app: FastifyInstance, { store, turns, bus, di
     return reply.code(201).send({ message });
   });
 
+  /**
+   * "Try again" on a reply that failed, stalled or never got going: the bot answers the user's message afresh,
+   * without a new message from the user. The rules live here, not only in the UI: another window, or a stale
+   * button, can post this too.
+   */
+  app.post<{ Params: { id: string } }>("/api/threads/:id/retry", async (request, reply) => {
+    const id = parse(ThreadId, request.params.id, reply);
+    if (!id) return reply;
+    const body = parse(z.object({ botId: BotId, messageId: MessageId }), request.body, reply);
+    if (!body) return reply;
+    const thread = store.threads.get(id);
+    if (!thread) return fail(reply, 404, "not_found", "No thread has this id.");
+    const bot = store.bots.get(body.botId);
+    if (!bot || !thread.memberIds.includes(bot.id))
+      return fail(reply, 400, "not_a_member", "That bot isn't in this chat.");
+    const target = store.messages.get(body.messageId);
+    if (!target || target.threadId !== id || target.role !== "bot" || target.botId !== bot.id)
+      return fail(reply, 404, "not_found", "That isn't a reply from this bot in this chat.");
+    // Only the newest reply: an older one was followed by more conversation, which a retry would answer out of order.
+    const newest = store.messages
+      .list(id, { limit: 100 })
+      .findLast((message) => message.role === "bot" && message.botId === bot.id);
+    if (newest?.id !== target.id)
+      return fail(reply, 409, "stale", "That reply is no longer the latest one from this bot.");
+    if (target.status === "done")
+      return fail(reply, 409, "not_retryable", "That reply finished; there is nothing to try again.");
+    if (repeatsAction(target))
+      return fail(
+        reply,
+        409,
+        "may_repeat",
+        "It may already have done something. Check, then ask again yourself so it isn't done twice.",
+      );
+    return reply.code(202).send(turns.retry(thread, bot, target.id));
+  });
+
   /** "Clear chat": a fresh start for the conversation. Memory, skills and files are kept. */
   app.delete<{ Params: { id: string } }>("/api/threads/:id/messages", async (request, reply) => {
     const id = parse(ThreadId, request.params.id, reply);
@@ -48,6 +84,8 @@ export function registerChatRoutes(app: FastifyInstance, { store, turns, bus, di
     turns.stop(id);
     // Cached summaries of the old conversation go too.
     const removed = store.messages.clear(id);
+    // The event log deletes this chat's log on exactly this event (keys include "messages" and a thread id), because
+    // the log is a copy of the messages. Publish it for nothing else, or a chat's log is wiped.
     bus.publish({ type: "data.changed", keys: ["messages"], threadId: id });
     return { removed };
   });

@@ -2,14 +2,20 @@ import { describe, expect, it } from "vitest";
 
 import {
   BotId,
+  BotTools,
   compareBots,
   CreateBotInput,
+  DEFAULT_BOT_TOOLS,
   HarnessEvent,
   MAX_IMAGE_BYTES,
   newId,
   nextRun,
+  repeatsAction,
+  restrictsTools,
   SecretName,
   SendMessageInput,
+  setToolEnabled,
+  toolAllowed,
   UpdateBotInput,
   type Bot,
 } from ".";
@@ -31,10 +37,94 @@ const bot = (over: Partial<Bot>): Bot => ({
   temporary: false,
   visual: false,
   clusterId: null,
+  tools: DEFAULT_BOT_TOOLS,
   threadId: newId("thr"),
   createdAt: "2026-10-31T00:00:00.000Z",
   updatedAt: "2026-10-31T00:00:00.000Z",
   ...over,
+});
+
+describe("bot tool lists", () => {
+  const tools = (over: Partial<BotTools>): BotTools => ({ ...DEFAULT_BOT_TOOLS, ...over });
+
+  it("allows every tool by default, including ones added later", () => {
+    expect(toolAllowed(DEFAULT_BOT_TOOLS, "run_command")).toBe(true);
+    expect(toolAllowed(DEFAULT_BOT_TOOLS, "some_new__tool")).toBe(true);
+    expect(restrictsTools(DEFAULT_BOT_TOOLS)).toBe(false);
+  });
+
+  it("turns off what is excluded, by name or by family", () => {
+    const list = tools({ exclude: ["run_command", "gmail__*"] });
+    expect(toolAllowed(list, "run_command")).toBe(false);
+    expect(toolAllowed(list, "read_file")).toBe(true);
+    expect(toolAllowed(list, "gmail__send")).toBe(false);
+    expect(toolAllowed(list, "gmail__list")).toBe(false);
+    expect(toolAllowed(list, "slack__send")).toBe(true);
+    // A name is not a prefix unless it says so.
+    expect(toolAllowed(tools({ exclude: ["web"] }), "web_search")).toBe(true);
+    expect(restrictsTools(list)).toBe(true);
+  });
+
+  it("with an allow list, only those; an empty one means no tools at all", () => {
+    const list = tools({ allow: ["read_file", "browser_*"] });
+    expect(toolAllowed(list, "read_file")).toBe(true);
+    expect(toolAllowed(list, "browser_open")).toBe(true);
+    expect(toolAllowed(list, "run_command")).toBe(false);
+    expect(toolAllowed(tools({ allow: [] }), "read_file")).toBe(false);
+    expect(restrictsTools(tools({ allow: [] }))).toBe(true);
+  });
+
+  it("lets exclude win over allow", () => {
+    const list = tools({ allow: ["run_command", "read_file"], exclude: ["run_command"] });
+    expect(toolAllowed(list, "run_command")).toBe(false);
+    expect(toolAllowed(list, "read_file")).toBe(true);
+    expect(toolAllowed(tools({ allow: ["gmail__*"], exclude: ["gmail__delete"] }), "gmail__delete")).toBe(
+      false,
+    );
+  });
+
+  it("only accepts names a tool can have, and a * only at the end", () => {
+    expect(BotTools.safeParse({ allow: null, exclude: ["run_command", "gmail__*"] }).success).toBe(true);
+    for (const bad of ["", " ", "a b", "*", "*x", "a*b", "../x", "x".repeat(101)])
+      expect(BotTools.safeParse({ allow: null, exclude: [bad] }).success, JSON.stringify(bad)).toBe(false);
+    expect(BotTools.safeParse({ exclude: Array.from({ length: 301 }, (_, i) => `t${i}`) }).success).toBe(
+      false,
+    );
+  });
+
+  it("switching a tool on or off in the panel changes only that name, and never wipes an allow list", () => {
+    const withAllow = tools({ allow: ["read_file", "browser_*"], exclude: ["gmail__*"] });
+    const off = setToolEnabled(withAllow, "read_file", false);
+    expect(off).toEqual({ allow: ["read_file", "browser_*"], exclude: ["gmail__*", "read_file"], apps: {} });
+    expect(toolAllowed(off, "read_file")).toBe(false);
+    // On again: the name leaves the list, the allow list and the pattern are as they were.
+    expect(setToolEnabled(off, "read_file", true)).toEqual(withAllow);
+    // Twice is the same as once.
+    expect(setToolEnabled(off, "read_file", false)).toEqual(off);
+    expect(setToolEnabled(DEFAULT_BOT_TOOLS, "run_command", true)).toEqual(DEFAULT_BOT_TOOLS);
+    // A new list each time: the bot's own is not changed in place.
+    const original = tools({ exclude: ["a"] });
+    setToolEnabled(original, "b", false);
+    expect(original.exclude).toEqual(["a"]);
+  });
+
+  it("fills in what an older bot or a partial update leaves out", () => {
+    expect(BotTools.parse({})).toEqual(DEFAULT_BOT_TOOLS);
+    expect(BotTools.parse({ exclude: ["x"] })).toEqual({ allow: null, exclude: ["x"], apps: {} });
+    expect(UpdateBotInput.safeParse({ tools: { exclude: ["run_command"] } }).success).toBe(true);
+  });
+});
+
+describe("replies that must not be repeated", () => {
+  const part = (over: object) =>
+    ({ type: "tool", callId: "c", name: "x", args: {}, status: "done", ...over }) as never;
+  it("flags a reply with a call that acted, or one cut off by a restart, and no other", () => {
+    expect(repeatsAction({ parts: [part({ outward: true })] })).toBe(true);
+    expect(repeatsAction({ parts: [{ type: "error", code: "interrupted", message: "x" }] })).toBe(true);
+    expect(repeatsAction({ parts: [part({ outward: false }), part({})] })).toBe(false);
+    expect(repeatsAction({ parts: [{ type: "error", code: "stalled", message: "x" }] })).toBe(false);
+    expect(repeatsAction({ parts: [] })).toBe(false);
+  });
 });
 
 describe("ids", () => {

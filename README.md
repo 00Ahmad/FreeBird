@@ -61,11 +61,12 @@ Your primary bot is a coordinator. When a job splits into independent parts (com
 ### And everything else you'd expect
 
 - **Real tools with approvals:** files in each bot's own folder, terminal commands, web pages, a real browser (Edge/Chrome) you can watch and take over, web search, and its own Docker desktop computer.
-- **Visual Bots** that browse by looking at screenshots and clicking, like a person.
+- **Visual Bots** that browse by looking at screenshots and clicking, like a person. Each bot keeps its own browser sign-ins, and after you solve a site's check it carries on by itself.
 - **Group chats** of 2–6 bots with @mentions; **bot-to-bot messages** in readable threads.
 - **Routines:** weekly schedules, intervals, one-time runs, webhooks, and "Teach a task".
-- **Connect apps** through any MCP server, with per-tool toggles.
-- **Vault** for logins, cards and contact info in your OS keychain; passwords never reach the model.
+- **Connect apps** through any MCP server, with per-tool toggles, one-click sign-in (OAuth) and read-only access per bot.
+- **Vault** for logins, cards and contact info in your OS keychain; passwords never reach the model, and saved secrets are hidden from tool output and logs.
+- **Choose each bot's tools**, and answer its questions with one tap.
 - **Memory, skills and templates:** see and edit what each bot remembers, save `/skills`, share a bot as a template.
 - **Voice:** dictation and read-aloud. **Library:** keep the replies worth keeping.
 - **Command palette** (Ctrl+K), keyboard shortcuts, light and dark themes.
@@ -83,7 +84,7 @@ pnpm install
 pnpm dev
 ```
 
-The app opens, finds Ollama (and starts it if needed), lets you pick or download a model, and creates your first bot. Pick a **tool-capable model of 4B or more**: `qwen3.5:9b` and `nemotron-3-nano:4b` are tested. 1B models are unreliable with tools.
+The app opens, finds Ollama (and starts it if needed), lets you pick or download a model, and creates your first bot. Pick a **tool-capable model of 4B or more**: `qwen3.5:9b` and `nemotron-3-nano:4b` are tested. 1B models are unreliable with tools. Visual Bots need a model that can see pictures, such as `qwen3.5:9b`.
 
 Prefer a cloud model? Open **Settings → Models & Providers**, add a key and pick a model. Full walkthrough: [Getting started](docs/getting-started.md).
 

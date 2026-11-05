@@ -63,6 +63,14 @@ interface UiState {
   history: History;
   /** An action that failed with nowhere else to say so (creating a bot from a shortcut, say); the sidebar shows it. */
   notice: string | null;
+  /**
+   * A request to open a bot's model menu from a reply that is stuck or failed. A model is resolved when a reply
+   * starts, so picking another one does nothing to a reply already under way: when `retryMessageId` is set, the
+   * pick also tries that reply again.
+   */
+  modelSwitch: { botId: string; threadId: string; retryMessageId: string | null } | null;
+  askModelSwitch(request: NonNullable<UiState["modelSwitch"]>): void;
+  clearModelSwitch(): void;
   select(threadId: string | null): void;
   /** Back / forward through the chats opened before; `exists` skips ones deleted since. */
   go(direction: "back" | "forward", exists: (threadId: string) => boolean): void;
@@ -101,6 +109,9 @@ export const useUi = create<UiState>((set) => ({
   pulls: {},
   history: { back: [], forward: [] },
   notice: null,
+  modelSwitch: null,
+  askModelSwitch: (modelSwitch) => set({ modelSwitch }),
+  clearModelSwitch: () => set({ modelSwitch: null }),
   select: (selectedThreadId) =>
     set((state) => ({
       selectedThreadId,

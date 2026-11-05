@@ -8,7 +8,7 @@ import { api } from "../../lib/api";
 
 type SecretPart = Extract<MessagePart, { type: "secret" }>;
 
-/** Secure secret card (UI-SPEC §6): the value goes to the keychain and never into the chat or the model. */
+/** Secure secret card: the value goes to the keychain and never into the chat or the model. */
 export function SecretCard({ part, live }: { part: SecretPart; live: boolean }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);

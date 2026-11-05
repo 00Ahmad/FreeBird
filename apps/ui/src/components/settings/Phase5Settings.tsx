@@ -32,6 +32,7 @@ const STATE_LABEL: Record<ConnectorView["state"], string> = {
   connecting: "Connecting…",
   connected: "Connected",
   error: "Disconnected",
+  auth: "Needs you to sign in",
 };
 
 export function AppsSettings() {
@@ -59,6 +60,42 @@ export function AppsSettings() {
           </div>
         )}
       </Section>
+    </div>
+  );
+}
+
+/**
+ * An app that wants the user to sign in. The page opens in the system browser only when the button is pressed; the
+ * address is also shown as a link, for a browser that blocks the new window.
+ */
+function SignInRow({ connector }: { connector: ConnectorView }) {
+  const { signIn } = useConnectorActions();
+  const [url, setUrl] = useState<string | null>(null);
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+      <span className="text-ink-2">{connector.name} asks you to sign in before bots can use it.</span>
+      <Button
+        size="sm"
+        variant="primary"
+        disabled={signIn.isPending}
+        onClick={() =>
+          signIn.mutate(connector.id, {
+            onSuccess: (outcome) => {
+              if (!("url" in outcome)) return;
+              setUrl(outcome.url);
+              window.open(outcome.url, "_blank", "noopener");
+            },
+          })
+        }
+      >
+        {signIn.isPending ? "Opening…" : "Sign in"}
+      </Button>
+      {url && (
+        <a href={url} target="_blank" rel="noopener noreferrer" className="text-accent underline">
+          Open the sign-in page
+        </a>
+      )}
+      {signIn.isError && <span className="text-danger">{signIn.error.message}</span>}
     </div>
   );
 }
@@ -151,7 +188,11 @@ function ConnectorRow({ connector }: { connector: ConnectorView }) {
           <Trash2 size={14} />
         </IconButton>
       </div>
-      {connector.error && <p className="mt-1 text-xs text-danger">{connector.error}</p>}
+      {connector.state === "auth" ? (
+        <SignInRow connector={connector} />
+      ) : (
+        connector.error && <p className="mt-1 text-xs text-danger">{connector.error}</p>
+      )}
       {open && (
         <ul className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
           {connector.tools.map((tool) => (

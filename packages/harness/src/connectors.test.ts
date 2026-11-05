@@ -61,7 +61,11 @@ describe("connected apps (MCP)", () => {
       { name: "echo", enabled: true },
       { name: "fail", enabled: false },
     ]);
-    expect(h.services.connectors.toolSpecs().map((spec) => spec.name)).toEqual(["echo_app__echo"]);
+    // query_result comes with any app's tools, to read results too big to show whole.
+    expect(h.services.connectors.toolSpecs().map((spec) => spec.name)).toEqual([
+      "echo_app__echo",
+      "query_result",
+    ]);
   }, 20_000);
 
   it("lets a bot call an app tool behind an approval card, and runs it", async () => {

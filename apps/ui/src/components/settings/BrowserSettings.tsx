@@ -34,7 +34,7 @@ export function BrowserSettingsPage() {
     <div className="flex flex-col gap-6">
       <Section
         title="Web browser for bots"
-        description="Bots use a real browser on this computer, like you would: search, open sites, use their search boxes, click through. Each bot gets its own tab. Bots sign in with their own browser profile, not yours."
+        description="Bots use a real browser on this computer, like you would: search, open sites, use their search boxes, click through. Each bot gets its own tab. Bots sign in with their own browser profiles, not yours."
       >
         <label className="flex items-center gap-2 text-[13px]">
           <input
@@ -47,6 +47,22 @@ export function BrowserSettingsPage() {
         <label className="flex items-center gap-2 text-[13px]">
           <input type="checkbox" checked={settings.show} onChange={(e) => save({ show: e.target.checked })} />
           Show the browser window, so you can watch and take over
+        </label>
+        <label className="flex items-start gap-2 text-[13px]">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={settings.blendIn}
+            onChange={(e) => save({ blendIn: e.target.checked })}
+          />
+          <span>
+            Look like an ordinary browser to websites
+            <span className="block text-[12px] text-ink-3">
+              Leaves out the signs that only automated browsers send, so fewer sites stop bots with checks. It
+              doesn't solve checks or pretend to be someone else: those still come to you. Changing it
+              restarts the browser.
+            </span>
+          </span>
         </label>
         <p className="text-[12px] text-ink-3">
           When a site asks for a CAPTCHA, a sign-in or a payment, the bot stops and asks you to do it in the
@@ -67,24 +83,53 @@ export function BrowserSettingsPage() {
             <div className="flex h-8 items-center gap-2">
               {status.running ? (
                 <Button size="sm" variant="subtle" onClick={() => actions.close.mutate()}>
-                  Close browser
+                  {status.open.length > 1 ? "Close all" : "Close browser"}
                 </Button>
               ) : (
-                <Button size="sm" variant="subtle" onClick={() => actions.open.mutate()}>
-                  Open browser
-                </Button>
+                settings.profiles === "shared" && (
+                  <Button size="sm" variant="subtle" onClick={() => actions.open.mutate(undefined)}>
+                    Open browser
+                  </Button>
+                )
               )}
               <span className="text-[12px] text-ink-3">
-                {status.running ? "Running" : "Starts when a bot needs it"}
+                {status.running
+                  ? settings.profiles === "per-bot"
+                    ? `${status.open.length} running`
+                    : "Running"
+                  : "Starts when a bot needs it"}
               </span>
             </div>
           </Field>
         </div>
+        <Field
+          label="Sign-ins"
+          hint={
+            settings.profiles === "per-bot"
+              ? "Each bot opens its own browser, so a site you sign in to for one bot isn't open to the others. Its helpers use it too. Sign in for a bot from the Browser panel in its chat."
+              : "All bots use one browser, and every bot can use every site you signed in to in it."
+          }
+        >
+          <select
+            className="select"
+            value={settings.profiles}
+            onChange={(e) => save({ profiles: e.target.value as BrowserSettings["profiles"] })}
+          >
+            <option value="per-bot">Each bot has its own</option>
+            <option value="shared">All bots share one</option>
+          </select>
+        </Field>
+        <p className="text-[12px] text-ink-3">
+          Switching closes the browser. Sign-ins aren't moved: you sign in again where bots now need them. A
+          deleted bot's own sign-ins are deleted with it.
+        </p>
         {status.error && <p className="text-[12.5px] text-danger">{status.error}</p>}
         {actions.open.error && <p className="text-[12.5px] text-danger">{actions.open.error.message}</p>}
-        <p className="text-[12px] text-ink-3">
-          Open the browser yourself to sign in to sites the bots should use; the sign-ins are kept for them.
-        </p>
+        {settings.profiles === "shared" && (
+          <p className="text-[12px] text-ink-3">
+            Open the browser yourself to sign in to sites the bots should use; the sign-ins are kept for them.
+          </p>
+        )}
         {status.tabs.length > 0 && (
           <ul className="flex flex-col gap-1 text-[12.5px]">
             {status.tabs.map((tab) => (

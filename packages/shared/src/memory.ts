@@ -17,7 +17,7 @@ export const MemoryInput = z.object({ text: z.string().trim().min(1).max(2000) }
 /** Import from another assistant: one note per non-empty line (or paragraph). */
 export const ImportMemoryInput = z.object({ text: z.string().trim().min(1).max(100_000) });
 
-/** A saved prompt invoked with "/name" in the composer (UI-SPEC §5). */
+/** A saved prompt invoked with "/name" in the composer. */
 export const Skill = z.object({
   id: z.string(),
   /** null = available to every bot. */

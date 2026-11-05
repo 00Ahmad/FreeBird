@@ -12,7 +12,7 @@ export const PermissionRule = z.object({
 export type PermissionRule = z.infer<typeof PermissionRule>;
 
 export const Permissions = z.object({
-  /** "Execution on this computer" (UI-SPEC §11): commands always ask, always run, or never run. */
+  /** "Execution on this computer": commands always ask, always run, or never run. */
   localExecution: z.enum(["ask", "always", "never"]),
   rules: z.array(PermissionRule),
 });

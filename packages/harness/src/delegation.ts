@@ -422,14 +422,26 @@ export function installDelegation(services: Services) {
         ],
       };
     }
-    if (isCoordinator(bot) && bot.parentId === null && thread.kind === "group") {
+    // These describe tools the bot has to have: a bot whose list turns them off must not be told it can use them.
+    if (
+      isCoordinator(bot) &&
+      bot.parentId === null &&
+      thread.kind === "group" &&
+      agent.allows(bot, "delegate")
+    ) {
       return {
         extra: [
           "You coordinate a team of bots in this app. In a group chat you can't create helpers, but you can give teammates tasks with delegate (they work at the same time) and combine their answers into your reply. Do that on your own, without being asked, when a job splits into independent parts that suit different teammates; answer quick questions yourself. Your reply must contain the actual results, not just a description of what they did.",
         ],
       };
     }
-    if (isCoordinator(bot) && bot.parentId === null) {
+    if (
+      isCoordinator(bot) &&
+      bot.parentId === null &&
+      thread.kind !== "group" &&
+      agent.allows(bot, "spawn_bot") &&
+      agent.allows(bot, "delegate")
+    ) {
       return {
         extra: [
           [

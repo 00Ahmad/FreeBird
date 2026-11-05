@@ -135,6 +135,112 @@ describe("runTurn", () => {
     ]);
   });
 
+  describe("no-progress guard", () => {
+    const call = (id: string, args: Record<string, unknown> = {}): StreamChunk[] => [
+      { type: "tool_call", call: { id, name: "echo", arguments: args } },
+      done(),
+    ];
+
+    it("ends the turn when the same call gives the same result three times in a row", async () => {
+      const provider = scripted([
+        call("a"),
+        call("b"),
+        call("c"),
+        [{ type: "text", text: "It keeps returning the same thing." }, done()],
+      ]);
+      const { log, sink } = recorder();
+      const result = await runTurn({ ...base(provider, sink), tools: echoTools, maxSteps: 12 });
+      expect(result.finishReason).toBe("no_progress");
+      expect(result.steps).toBe(3);
+      // Three tool steps, then one summary call without tools that says why.
+      expect(provider.requests).toHaveLength(4);
+      expect(provider.requests[3]?.tools).toBeUndefined();
+      expect(provider.requests[3]?.messages.at(-1)?.content).toContain("same tool call with the same result");
+      expect(log).toContain("text:It keeps returning the same thing.");
+      expect(log.at(-1)).toContain("Stopped: the same step gave the same result 3 times");
+    });
+
+    it("does not count calls whose results differ (scrolling, polling)", async () => {
+      let n = 0;
+      const tools: ToolHost = {
+        ...echoTools,
+        execute: async () => ({ status: "done", result: `page ${n++}` }),
+      };
+      const provider = scripted([
+        call("a"),
+        call("b"),
+        call("c"),
+        call("d"),
+        [{ type: "text", text: "ok" }, done()],
+      ]);
+      const { sink } = recorder();
+      const result = await runTurn({ ...base(provider, sink), tools, maxSteps: 12 });
+      expect(result.finishReason).not.toBe("no_progress");
+      expect(result.steps).toBe(5);
+    });
+
+    it("does not count a look at a page that changed only in its picture", async () => {
+      let n = 0;
+      const tools: ToolHost = {
+        ...echoTools,
+        execute: async () => ({
+          status: "done",
+          result: "the same text",
+          images: [{ mediaType: "image/png", data: `frame-${n++}-${"x".repeat(50)}` }],
+        }),
+      };
+      const provider = scripted([call("a"), call("b"), call("c"), [{ type: "text", text: "ok" }, done()]]);
+      const { sink } = recorder();
+      const result = await runTurn({
+        ...base(provider, sink),
+        capabilities: ["completion", "tools", "vision"],
+        tools,
+        maxSteps: 12,
+      });
+      expect(result.finishReason).not.toBe("no_progress");
+    });
+
+    it("treats the same arguments in another key order as the same call, and a repeated error as no progress", async () => {
+      const tools: ToolHost = {
+        ...echoTools,
+        execute: async () => ({ status: "error", result: "Page not found" }),
+      };
+      const provider = scripted([
+        call("a", { url: "x", n: 1 }),
+        call("b", { n: 1, url: "x" }),
+        call("c", { url: "x", n: 1 }),
+        [{ type: "text", text: "Can't open it." }, done()],
+      ]);
+      const { sink } = recorder();
+      const result = await runTurn({ ...base(provider, sink), tools, maxSteps: 12 });
+      expect(result.finishReason).toBe("no_progress");
+    });
+
+    it("lets a batch finish, so every call still has its result, before ending", async () => {
+      const batch: StreamChunk[] = [
+        { type: "tool_call", call: { id: "p1", name: "echo", arguments: {} } },
+        { type: "tool_call", call: { id: "p2", name: "echo", arguments: {} } },
+        done(),
+      ];
+      const provider = scripted([batch, call("c"), [{ type: "text", text: "stuck" }, done()]]);
+      const { sink } = recorder();
+      const result = await runTurn({ ...base(provider, sink), tools: echoTools, maxSteps: 12 });
+      // p1, p2 (step 1), then c (step 2) is the third identical call.
+      expect(result.finishReason).toBe("no_progress");
+      const lastRequest = provider.requests.at(-1)!;
+      const calls = lastRequest.messages.flatMap((m) => ("toolCalls" in m ? (m.toolCalls ?? []) : []));
+      const results = lastRequest.messages.filter((m) => m.role === "tool");
+      expect(results).toHaveLength(calls.length);
+    });
+
+    it("is quiet about it when the step-limit note is switched off", async () => {
+      const provider = scripted([call("a"), call("b"), call("c"), [{ type: "text", text: "done" }, done()]]);
+      const { log, sink } = recorder();
+      await runTurn({ ...base(provider, sink), tools: echoTools, stepLimitNote: false });
+      expect(log.join("")).not.toContain("Stopped:");
+    });
+  });
+
   it("stops at the step limit", async () => {
     const loop = () =>
       [{ type: "tool_call", call: { id: "c", name: "echo", arguments: {} } }, done()] as StreamChunk[];
@@ -415,8 +521,13 @@ describe("room in long turns", () => {
 });
 
 describe("self-check", () => {
+  // Distinct arguments each time: three identical calls in a row would trip the no-progress guard instead.
+  let calls = 0;
   const callEcho = () =>
-    [{ type: "tool_call", call: { id: "c", name: "echo", arguments: {} } }, done()] as StreamChunk[];
+    [
+      { type: "tool_call", call: { id: "c", name: "echo", arguments: { n: ++calls } } },
+      done(),
+    ] as StreamChunk[];
   const say = (text: string) => [{ type: "text", text }, done()] as StreamChunk[];
 
   it("checks a tool-heavy answer once and shows nothing when it stands", async () => {

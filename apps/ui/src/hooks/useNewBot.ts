@@ -9,7 +9,7 @@ const failed = (error: unknown) =>
     .getState()
     .notify(`Couldn't create the bot: ${error instanceof Error ? error.message : String(error)}`);
 
-/** Creates a bot, opens its chat, and starts renaming it (UI-SPEC §3: create, then name it). */
+/** Creates a bot, opens its chat, and starts renaming it (create, then name it). */
 export function useNewBot() {
   const { data: bots } = useBots();
   const first = (bots?.length ?? 0) === 0;

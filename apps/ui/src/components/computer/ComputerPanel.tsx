@@ -6,7 +6,7 @@ import { Button, IconButton } from "@mrog/ui-kit";
 import { useBotComputer, useComputerAction, useComputerStatus } from "../../hooks/phase5";
 import { useUi } from "../../state";
 
-/** The bot's own computer in the right panel: live desktop, take over by clicking into it (UI-SPEC §8). */
+/** The bot's own computer in the right panel: live desktop, take over by clicking into it. */
 export function ComputerPanel({ bot }: { bot: Bot }) {
   const { data: status } = useComputerStatus();
   const { data: computer } = useBotComputer(bot.id);

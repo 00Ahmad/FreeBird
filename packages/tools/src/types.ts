@@ -2,6 +2,17 @@ import { z } from "zod";
 
 import type { JsonSchema } from "@mrog/providers";
 
+/** Choices offered with a question. */
+export interface AskChoices {
+  options?: string[];
+  multiple?: boolean;
+  /**
+   * Settles the question by itself: when this resolves first (what was asked for happened, like a solved human
+   * check), the card is answered with its text and the bot goes on, without the user having to reply.
+   */
+  until?: Promise<string>;
+}
+
 export interface ToolContext {
   /** The bot's own folder; file tools work here without asking. */
   workspace: string;
@@ -9,13 +20,16 @@ export interface ToolContext {
   botName: string;
   threadId: string;
   signal: AbortSignal;
-  /** Ask the user a question in the chat and wait for the answer. */
-  ask(question: string): Promise<string>;
+  /**
+   * Ask the user a question in the chat and wait for the answer. With `options` they can tap a choice (or several,
+   * with `multiple`) instead of typing; a typed answer is always allowed too.
+   */
+  ask(question: string, options?: AskChoices): Promise<string>;
   /** Extra environment for commands (secrets the user granted). */
   env?: Record<string, string>;
 }
 
-/** Warning badges shown on approval cards (UI-SPEC §6). */
+/** Warning badges shown on approval cards. */
 export const BADGES = {
   irreversible: "This can't be undone",
   acts: "This may buy, send or change something on the site",
@@ -23,6 +37,8 @@ export const BADGES = {
   shares: "This shares your data outside this chat",
   outside: "Outside the bot's folder",
   network: "Reaches your local network",
+  /** The command receives secrets the user granted; the card names which. */
+  secrets: "Gives the command your saved secrets",
 } as const;
 
 export interface Risk {
@@ -33,6 +49,12 @@ export interface Risk {
   badges: string[];
   /** One line the card shows, e.g. the command or the file path. */
   summary: string;
+  /**
+   * Whether running it changes something outside the chat and the bot's own folder (sends, buys, runs a command,
+   * calls a connected app). Marked on the message before it runs, so a crash mid-call is never retried blindly.
+   * Defaults to whether it needed approval; set it for a call that is safe to run unasked but still acts.
+   */
+  outward?: boolean;
 }
 
 export interface ToolSpec<A = any> {

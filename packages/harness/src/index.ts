@@ -5,6 +5,7 @@ import { KeyringBackend, MemoryBackend, moveSecrets, Vault, type NameIndex } fro
 
 import { EventBus } from "./bus";
 import type { HarnessConfig } from "./config";
+import { EventLog } from "./eventlog";
 import { buildServer } from "./server";
 import { createServices } from "./services";
 
@@ -33,8 +34,10 @@ export interface RunningHarness {
 /** Opens storage and the vault, wires services, then listens. */
 export async function startHarness(config: HarnessConfig): Promise<RunningHarness> {
   const store = openStore(join(config.dataDir, "app.db"));
-  const stale = store.messages.stopStreaming();
-  if (stale) console.log(`[harness] marked ${stale} interrupted message(s) as stopped`);
+  const { stopped, failed } = store.messages.recoverInterrupted();
+  if (stopped) console.log(`[harness] marked ${stopped} interrupted message(s) as stopped`);
+  if (failed)
+    console.log(`[harness] ended ${failed} message(s) that were mid-action when the app closed, as errors`);
   const backend = config.vault === "memory" ? new MemoryBackend() : new KeyringBackend(config.keyringService);
   const names = settingsNameIndex(store.settings);
   // Secrets saved before the app was renamed (OpenMrogBog → FreeBird) move to the new keychain name.
@@ -50,10 +53,24 @@ export async function startHarness(config: HarnessConfig): Promise<RunningHarnes
   const vault = new Vault(backend, names);
   const bus = new EventBus();
   const services = createServices({ config, store, vault, bus });
+  if (config.eventLog) {
+    const log = new EventLog(bus, {
+      dir: join(config.dataDir, "logs"),
+      token: config.token,
+      scrub: (line) => services.scrubber.scrub(line),
+      threadIds: () => store.threads.list().map((thread) => thread.id),
+    });
+    log.start();
+    // Last to go: whatever the other services publish while closing is still recorded.
+    services.disposers.unshift(() => log.close());
+  }
   const app = await buildServer(services);
   const url = await app.listen({ host: config.host, port: config.port });
+  // Connected apps' sign-ins come back here (the port is new each time the packaged app starts).
+  services.connectors.setCallbackBase(url);
   services.routines.start();
   void services.connectors.connectAll();
+  void services.browser.sweepProfiles();
   services.disposers.push(() => services.routines.stop());
   // Start Ollama if asked, then load the shared model in the background so the first message is fast.
   void (async () => {

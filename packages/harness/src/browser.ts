@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -21,6 +23,7 @@ import {
   NOT_FOUND_NOTE,
   resolvesPrivately,
   safe,
+  type ToolContext,
   type ToolResult,
   type ToolSpec,
 } from "@mrog/tools";
@@ -54,6 +57,27 @@ const CHANGE_NOTICE_MS = 1000;
 const SEARCH_TIMEOUT_MS = 15_000;
 /** How long a host's "is it on the local network" lookup is reused by the tab guard. */
 const LOOKUP_CACHE_MS = 15_000;
+/** How often a tab handed to the user for a human check is looked at, to notice it was solved. */
+const CHECK_POLL_MS = 1500;
+/** The answer a handoff's card gets when the check was solved and the bot went on by itself. */
+const SOLVED = "✓ Solved. Carrying on.";
+/** The one profile every bot uses when profiles are shared (its folder is the original `browser`). */
+export const SHARED_PROFILE = "shared";
+/** Where each bot's own profile lives, one folder per bot, under the data folder. */
+export const PROFILES_DIR = "browser-profiles";
+/** At most this many bots' browsers run at once; the one used longest ago (and idle) closes to make room. */
+export const MAX_OPEN_PROFILES = 3;
+const PROFILE_KEY = /^[A-Za-z0-9_-]{1,80}$/;
+
+/** One browser profile, running or starting. */
+interface Profile {
+  context: BrowserContext | null;
+  launching: Promise<BrowserContext> | null;
+  usedAt: number;
+}
+
+/** Thrown when every running browser is busy: shown as is, not as "the browser didn't start". */
+class NoRoomError extends Error {}
 
 export interface PageElement {
   ref: number;
@@ -121,10 +145,25 @@ export interface PageSnapshot {
   status?: number;
 }
 
-/** In-page function: does the page show a CAPTCHA or human check? */
-const HUMAN_CHECK_TEST = `((text) => Boolean(document.querySelector(
-    'iframe[src*="captcha" i], iframe[src*="challenges.cloudflare.com"], iframe[title*="challenge" i], #nc_1_wrapper, .nc-container, #px-captcha, [id*="captcha" i], [class*="g-recaptcha"], [class*="h-captcha"]'
-  )) || /verify (that )?you are (a )?human|are you a robot|unusual traffic|slide to (verify|complete)|press (and|&) hold|security check|bots use duckduckgo too/i.test(text.slice(0, 4000)))`;
+/**
+ * In-page function: does the page show a CAPTCHA or human check? Only a check the user would see counts: many
+ * ordinary pages (sign-in forms, shops, contact pages) carry an invisible reCAPTCHA or hidden captcha fields, and
+ * counting those would stop the bot clicking anything there. Words like "security check" count only on a page that
+ * has little else on it, as challenge pages do, not in an article that mentions them.
+ */
+const HUMAN_CHECK_TEST = `((text) => {
+  const shown = (el) => {
+    const box = el.getBoundingClientRect();
+    if (box.width < 40 || box.height < 30) return false;
+    const style = getComputedStyle(el);
+    return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0.05;
+  };
+  const widget = [...document.querySelectorAll(
+    'iframe[src*="captcha" i], iframe[src*="challenges.cloudflare.com"], iframe[title*="challenge" i], #nc_1_wrapper, .nc-container, #px-captcha, [id*="captcha" i], [class*="g-recaptcha"], [class*="h-captcha"], .cf-turnstile'
+  )].some((el) => !/size=invisible/i.test(el.getAttribute("src") || "") && !/grecaptcha-badge/.test(String(el.className)) && shown(el));
+  const says = /verify (that )?you are (a )?human|are you a robot|unusual traffic|slide to (verify|complete)|press (and|&) hold|security check|bots use duckduckgo too/i.test(text.slice(0, 4000));
+  return widget || (says && text.length < 3000);
+})`;
 
 /**
  * In-page function: is this a search box? Decided only by what the page says the box is (its type, role or name),
@@ -150,7 +189,10 @@ const CONTROLS =
 const DESCRIBE_CONTROL = `((el) => {
   const secret = (el.getAttribute("type") || "").toLowerCase() === "password" ||
     /^cc-/.test((el.getAttribute("autocomplete") || "").toLowerCase());
-  const text = (el.getAttribute("aria-label") || el.innerText || (secret ? "" : el.value) || el.getAttribute("placeholder") ||
+  // A checkbox's or radio's value is usually just "on": its name is the label next to it ("I agree to the terms").
+  const tick = /^(checkbox|radio)$/i.test(el.getAttribute("type") || "");
+  const labelled = el.labels && el.labels.length ? [...el.labels].map((label) => label.innerText).join(" ") : "";
+  const text = (el.getAttribute("aria-label") || el.innerText || labelled || (secret || tick ? "" : el.value) || el.getAttribute("placeholder") ||
     el.getAttribute("title") || el.querySelector("img[alt]")?.getAttribute("alt") || el.querySelector("svg title")?.textContent || "")
     .replace(/\\s+/g, " ").trim();
   const element = el.tagName.toLowerCase();
@@ -205,8 +247,11 @@ const SNAPSHOT_SCRIPT = `(() => {
   const secret = (el) =>
     (el.getAttribute("type") || "").toLowerCase() === "password" ||
     /^cc-/.test((el.getAttribute("autocomplete") || "").toLowerCase());
+  // A checkbox's or radio's value is usually just "on": its name is the label next to it.
+  const tick = (el) => /^(checkbox|radio)$/i.test(el.getAttribute("type") || "");
+  const labelled = (el) => el.labels && el.labels.length ? [...el.labels].map((l) => l.innerText).join(" ") : "";
   const label = (el) => (
-    el.getAttribute("aria-label") || el.innerText || (secret(el) ? "" : el.value) || el.getAttribute("placeholder") ||
+    el.getAttribute("aria-label") || el.innerText || labelled(el) || (secret(el) || tick(el) ? "" : el.value) || el.getAttribute("placeholder") ||
     el.getAttribute("title") || el.getAttribute("alt") || el.querySelector?.("img[alt]")?.getAttribute("alt") || el.getAttribute("name") || ""
   ).replace(/\\s+/g, " ").trim().slice(0, 90);
   const kind = (el) => {
@@ -288,6 +333,31 @@ const FOCUSED_SCRIPT = `(() => {
   if (!el || el === el.ownerDocument.body || el === el.ownerDocument.documentElement) return null;
   const control = ${DESCRIBE_CONTROL}(el);
   return { ref: 0, ...control, kind: el.matches(${JSON.stringify(CONTROLS)}) ? control.kind : "other" };
+})()`;
+
+/**
+ * A box for a password or a card number: by its type, or by what the site says it holds (a password shown as plain
+ * text by a "show password" switch is still one).
+ */
+const isSecretField = (type: string, autocomplete: string) =>
+  type === "password" ||
+  autocomplete.startsWith("cc-") ||
+  /(?:^|\s)(?:current|new)-password\b/.test(autocomplete);
+
+/**
+ * In-page function: what a click at (x, y) would really land on (whatever is on top there), and whether that is box
+ * `ref` itself, something inside it, or a label for it. A cross-origin frame (a video, an embedded form) is no
+ * control the page can describe.
+ */
+const landingScript = (x: number, y: number, ref: number | null) => `(() => {
+  const describe = ${DESCRIBE_CONTROL};
+  const hit = document.elementFromPoint(${x}, ${y});
+  if (!hit) return { reaches: false, control: null };
+  const target = ${ref === null ? "null" : `document.querySelector('[data-mrog-ref="${ref}"]')`};
+  const label = hit.closest("label");
+  const reaches = Boolean(target) && (target === hit || target.contains(hit) || Boolean(label && (label.control === target || label.contains(target))));
+  const control = hit.closest(${JSON.stringify(CONTROLS)}) || (label && label.control) || null;
+  return { reaches, control: control ? { ref: 0, ...describe(control) } : null };
 })()`;
 
 /** Waits (up to 2 seconds) until the pictures on screen have loaded. */
@@ -413,11 +483,19 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 /**
  * The bots' web browser: a real Edge or Chrome on this computer, driven like a person would use it. Each bot gets
  * its own tab, the window can be shown so you can watch and take over, and sign-ins persist in the bots' own
- * profile (not yours). It never hides that it's automated; human checks are handed to you.
+ * profile (not yours): by default one profile per bot (its helpers use it too), so a site signed in for one bot
+ * isn't open to the others. With "blend in" on (the default) it leaves out what only automated browsers send, so
+ * sites see the ordinary browser; it never solves human checks or fakes who is browsing: those are handed to you.
  */
 export class BrowserManager {
-  private context: BrowserContext | null = null;
-  private launching: Promise<BrowserContext> | null = null;
+  /** Running (or starting) browsers by profile: a bot's id, or SHARED_PROFILE. */
+  private readonly profiles = new Map<string, Profile>();
+  /** Which profile each bot's tab is in. */
+  private readonly tabProfile = new Map<string, string>();
+  /** Live views of each bot's tab open in the app: a watched browser isn't closed to make room. */
+  private readonly viewers = new Map<string, number>();
+  /** Whether this install had the shared profile before per-bot profiles existed (checked once). */
+  private hadSharedProfile: boolean | undefined;
   private readonly pages = new Map<string, Page>();
   /** The elements each bot last saw, so a click's approval card can say what will be clicked. */
   private readonly seen = new Map<string, Map<number, PageElement>>();
@@ -463,20 +541,44 @@ export class BrowserManager {
         headless: !settings.show,
         viewport: { width: 1280, height: 860 },
         acceptDownloads: false,
+        // Without the automation switch the browser doesn't set navigator.webdriver or show the "controlled by
+        // automated software" bar: sites see the ordinary browser it is.
+        ...(settings.blendIn
+          ? {
+              ignoreDefaultArgs: ["--enable-automation"],
+              args: ["--disable-blink-features=AutomationControlled"],
+            }
+          : {}),
       }),
   ) {}
 
   settings(): BrowserSettings {
     const saved = this.services.store.settings.get<Partial<BrowserSettings>>(SETTINGS_KEY);
-    const parsed = BrowserSettings.safeParse({ ...DEFAULT_BROWSER_SETTINGS, ...saved });
-    return parsed.success ? parsed.data : DEFAULT_BROWSER_SETTINGS;
+    // An install whose bots already signed in to sites in the shared profile keeps it until the user switches.
+    this.hadSharedProfile ??= existsSync(join(this.services.config.dataDir, "browser"));
+    const defaults: BrowserSettings = {
+      ...DEFAULT_BROWSER_SETTINGS,
+      profiles: this.hadSharedProfile ? "shared" : "per-bot",
+    };
+    const parsed = BrowserSettings.safeParse({
+      ...defaults,
+      ...saved,
+      profiles: saved?.profiles ?? defaults.profiles,
+    });
+    return parsed.success ? parsed.data : defaults;
   }
 
   async saveSettings(next: BrowserSettings): Promise<BrowserSettings> {
     const before = this.settings();
     this.services.store.settings.set(SETTINGS_KEY, next);
-    // A different window mode or browser takes effect on the next launch.
-    if (before.show !== next.show || before.channel !== next.channel) await this.close();
+    // A different window mode, browser or profile layout takes effect on the next launch.
+    if (
+      before.show !== next.show ||
+      before.channel !== next.channel ||
+      before.profiles !== next.profiles ||
+      before.blendIn !== next.blendIn
+    )
+      await this.close();
     this.changed();
     return next;
   }
@@ -503,37 +605,110 @@ export class BrowserManager {
         title: await page.title().catch(() => ""),
       });
     }
-    return { running: this.context !== null, tabs, error: this.lastError };
+    const open = [...this.profiles].flatMap(([key, profile]) => (profile.context ? [key] : []));
+    return { running: open.length > 0, open, tabs, error: this.lastError };
   }
 
-  private async ensureContext(): Promise<BrowserContext> {
-    if (this.context) return this.context;
-    if (this.launching) return this.launching;
+  /**
+   * Whose profile a bot's tab opens in: its own, or (for a helper) the profile of the bot that made it, so a
+   * helper works signed in where its maker is. The bots of one race or cluster, made together for one job, share
+   * the cluster's profile (so five racers are one browser, not five). Everyone's is the same when profiles are
+   * shared.
+   */
+  profileKey(botId: string): string {
+    if (this.settings().profiles === "shared") return SHARED_PROFILE;
+    let bot = this.services.store.bots.get(botId);
+    for (let depth = 0; bot?.parentId && depth < 10; depth++) {
+      const parent = this.services.store.bots.get(bot.parentId);
+      if (!parent) break;
+      bot = parent;
+    }
+    return bot?.clusterId ?? bot?.id ?? botId;
+  }
+
+  botExists(botId: string): boolean {
+    return Boolean(this.services.store.bots.get(botId)) && !this.gone.has(botId);
+  }
+
+  /** A profile's folder: the original `browser` for the shared one, `browser-profiles/<bot>` for a bot's own. */
+  profileDir(key: string): string {
+    if (key === SHARED_PROFILE) return join(this.services.config.dataDir, "browser");
+    if (!PROFILE_KEY.test(key)) throw new Error("That isn't a bot's browser profile.");
+    return join(this.services.config.dataDir, PROFILES_DIR, key);
+  }
+
+  /**
+   * Whether a profile's browser is still wanted: used in the last couple of minutes (a bot between two tool calls
+   * is waiting on its model, not done; the user may be signing in in the window), or a tab in it is mid-action,
+   * waiting on the user, or watched in the app.
+   */
+  private inUse(key: string): boolean {
+    const profile = this.profiles.get(key);
+    if (profile && Date.now() - profile.usedAt < TAB_LEASE_MS) return true;
+    for (const [botId, tabKey] of this.tabProfile) {
+      if (tabKey !== key) continue;
+      if (this.users.get(botId)?.busy || this.queues.has(botId) || (this.viewers.get(botId) ?? 0) > 0)
+        return true;
+    }
+    return false;
+  }
+
+  /** Before another bot's browser starts: closes the idle ones used longest ago, so at most a few run at once. */
+  private async makeRoom(key: string) {
+    const others = [...this.profiles].filter(([other]) => other !== key);
+    const excess = others.length - MAX_OPEN_PROFILES + 1;
+    if (excess <= 0) return;
+    const idle = others
+      .filter(([other, profile]) => profile.context && !this.inUse(other))
+      .toSorted((a, b) => a[1].usedAt - b[1].usedAt);
+    if (idle.length < excess) {
+      throw new NoRoomError(
+        `${MAX_OPEN_PROFILES} bots are using their own browsers right now, the most that run at once. Try again when one of them is done.`,
+      );
+    }
+    for (const [other] of idle.slice(0, excess)) await this.closeProfile(other);
+  }
+
+  private ensureContext(key: string): Promise<BrowserContext> {
+    const running = this.profiles.get(key);
+    if (running) {
+      running.usedAt = Date.now();
+      if (running.context) return Promise.resolve(running.context);
+      if (running.launching) return running.launching;
+    }
     const settings = this.settings();
     const generation = this.generation;
-    this.launching = this.launch(settings, join(this.services.config.dataDir, "browser"))
-      .then(async (context) => {
-        if (generation !== this.generation) {
-          // close() was called while the browser was starting.
-          await context.close().catch(() => {});
-          throw new Error("The browser was closed.");
-        }
-        this.context = context;
-        this.lastError = null;
-        context.on("close", () => {
-          // A late close event from an earlier browser mustn't wipe out the one running now.
-          if (this.context !== context) return;
-          this.context = null;
-          this.forgetPages();
-          this.changed();
-        });
-        // Every tab, including popups, is kept off the local network unless the user approved the address.
-        for (const page of context.pages()) void this.watchTab(context, page);
-        context.on("page", (page) => void this.watchTab(context, page));
+    // Taken before anything is awaited, so two tabs asking at once start one browser, not two.
+    const profile: Profile = { context: null, launching: null, usedAt: Date.now() };
+    this.profiles.set(key, profile);
+    const current = () => generation === this.generation && this.profiles.get(key) === profile;
+    profile.launching = (async () => {
+      await this.makeRoom(key);
+      const context = await this.launch(settings, this.profileDir(key));
+      if (!current()) {
+        // The browser (or this profile) was closed while it was starting.
+        await context.close().catch(() => {});
+        throw new Error("The browser was closed.");
+      }
+      profile.context = context;
+      this.lastError = null;
+      context.on("close", () => {
+        // A late close event from an earlier browser mustn't wipe out the one running now.
+        if (profile.context !== context) return;
+        profile.context = null;
+        if (this.profiles.get(key) === profile) this.profiles.delete(key);
+        this.forgetPages(key);
         this.changed();
-        return context;
-      })
+      });
+      // Every tab, including popups, is kept off the local network unless the user approved the address.
+      for (const page of context.pages()) void this.watchTab(context, page);
+      context.on("page", (page) => void this.watchTab(context, page));
+      this.changed();
+      return context;
+    })()
       .catch((error: Error) => {
+        if (this.profiles.get(key) === profile && !profile.context) this.profiles.delete(key);
+        if (error instanceof NoRoomError) throw error;
         const name = settings.channel === "msedge" ? "Microsoft Edge" : "Google Chrome";
         this.lastError = /executable doesn't exist|not found|distribution/i.test(error.message)
           ? `${name} isn't installed. Install it, or pick the other browser in Settings → Browser.`
@@ -542,48 +717,102 @@ export class BrowserManager {
         throw new Error(this.lastError, { cause: error });
       })
       .finally(() => {
-        this.launching = null;
+        profile.launching = null;
       });
-    return this.launching;
+    return profile.launching;
   }
 
-  /** Opens the window without a task, e.g. so you can sign in to sites for the bots. */
-  async open(): Promise<void> {
-    const context = await this.ensureContext();
+  /**
+   * Opens the window without a task, so you can sign in to sites for the bots: a bot's own tab when `botId` is
+   * given (its profile, and the Browser panel shows it), else the shared profile's window.
+   */
+  async open(botId?: string): Promise<void> {
+    if (botId) {
+      const page = await this.page(botId);
+      await page.bringToFront().catch(() => {});
+      return;
+    }
+    if (this.settings().profiles === "per-bot")
+      throw new Error("Each bot has its own browser. Open it from the Browser panel in the bot's chat.");
+    const context = await this.ensureContext(SHARED_PROFILE);
     if (context.pages().length === 0) await context.newPage();
   }
 
-  private forgetPages() {
-    this.pages.clear();
-    this.seen.clear();
-    this.snapshots.clear();
-    this.humanCheck.clear();
-    this.users.clear();
-  }
-
-  async close(): Promise<void> {
-    this.generation += 1;
-    const context = this.context;
-    this.context = null;
-    this.forgetPages();
-    await context?.close().catch(() => {});
-    this.changed();
-  }
-
-  async closeTab(botId: string): Promise<void> {
-    const page = this.pages.get(botId);
+  /** Forgets a bot's tab (not closing it): its numbers, page reading and which chat has it. */
+  private dropTab(botId: string) {
     this.pages.delete(botId);
     this.seen.delete(botId);
     this.snapshots.delete(botId);
     this.humanCheck.delete(botId);
     this.users.delete(botId);
+    this.tabProfile.delete(botId);
+  }
+
+  /** Forgets the tabs in one profile, or in all of them. */
+  private forgetPages(key?: string) {
+    // Deleting from a Map while going through it is safe: entries already passed or removed aren't visited again.
+    for (const [botId, profile] of this.tabProfile)
+      if (key === undefined || profile === key) this.dropTab(botId);
+    if (key === undefined) for (const botId of this.pages.keys()) this.dropTab(botId);
+  }
+
+  /** Closes one profile's browser (its tabs go with it). */
+  private async closeProfile(key: string) {
+    const profile = this.profiles.get(key);
+    this.profiles.delete(key);
+    this.forgetPages(key);
+    await profile?.context?.close().catch(() => {});
+    this.changed();
+  }
+
+  async close(): Promise<void> {
+    this.generation += 1;
+    const contexts = [...this.profiles.values()].flatMap((profile) =>
+      profile.context ? [profile.context] : [],
+    );
+    this.profiles.clear();
+    this.forgetPages();
+    await Promise.all(contexts.map((context) => context.close().catch(() => {})));
+    this.changed();
+  }
+
+  async closeTab(botId: string): Promise<void> {
+    const page = this.pages.get(botId);
+    this.dropTab(botId);
     await page?.close().catch(() => {});
   }
 
-  /** A deleted bot: closes its tab, and an action of its still running can't open a new one. */
+  /**
+   * A deleted bot: closes its tab, and an action of its still running can't open a new one. Its own profile
+   * (sites it was signed in to, cookies) is closed and deleted from disk.
+   */
   async forget(botId: string): Promise<void> {
     this.gone.add(botId);
     await this.closeTab(botId);
+    await this.forgetProfile(botId);
+  }
+
+  /**
+   * At start: deletes profile folders whose bot or race/cluster no longer exists (a deletion the browser held up
+   * for longer than the retries, or one made while the app was closing).
+   */
+  async sweepProfiles(): Promise<void> {
+    const root = join(this.services.config.dataDir, PROFILES_DIR);
+    const folders = await readdir(root).catch(() => [] as string[]);
+    const bots = new Set(this.services.store.bots.list().map((bot) => bot.id));
+    const threads = new Set(this.services.store.threads.list().map((thread) => thread.id));
+    for (const key of folders) if (!bots.has(key) && !threads.has(key)) await this.forgetProfile(key);
+  }
+
+  /** A bot's (or a deleted race's or cluster's) own profile: closed, and its folder deleted from disk. */
+  async forgetProfile(key: string): Promise<void> {
+    if (!PROFILE_KEY.test(key) || key === SHARED_PROFILE) return;
+    if (this.profiles.has(key)) await this.closeProfile(key);
+    const dir = join(this.services.config.dataDir, PROFILES_DIR, key);
+    // The browser lets go of its files a moment after it closes (Windows keeps them locked until then).
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }).catch((error: Error) =>
+      console.warn(`[browser] couldn't delete ${dir}: ${error.message}`),
+    );
   }
 
   /**
@@ -622,6 +851,19 @@ export class BrowserManager {
           requestStage: "Request" as const,
         })),
       });
+      // A hidden window calls itself "HeadlessChrome"; blending in, the tab sends the browser's ordinary name.
+      const settings = this.settings();
+      if (settings.blendIn && !settings.show) {
+        try {
+          const { userAgent } = (await cdp.send("Browser.getVersion")) as { userAgent: string };
+          if (/Headless/.test(userAgent))
+            await cdp.send("Network.setUserAgentOverride", {
+              userAgent: userAgent.replace(/Headless(?=Chrome)/, ""),
+            });
+        } catch {
+          // Then it keeps its own name; everything else about the tab works the same.
+        }
+      }
       // Heard as soon as a click asks for a new tab, well before that tab exists.
       cdp.on("Page.windowOpen", () => this.windowOpens.set(page, (this.windowOpens.get(page) ?? 0) + 1));
       await cdp.send("Page.enable");
@@ -660,8 +902,14 @@ export class BrowserManager {
   private async page(botId: string): Promise<Page> {
     if (this.gone.has(botId)) throw new Error("This bot was deleted.");
     const existing = this.pages.get(botId);
-    if (existing && !existing.isClosed()) return existing;
-    const context = await this.ensureContext();
+    if (existing && !existing.isClosed()) {
+      const profile = this.profiles.get(this.tabProfile.get(botId) ?? "");
+      if (profile) profile.usedAt = Date.now();
+      return existing;
+    }
+    const key = this.profileKey(botId);
+    const context = await this.ensureContext(key);
+    if (this.gone.has(botId)) throw new Error("This bot was deleted.");
     const taken = new Set(this.pages.values());
     const blank = context.pages().find((page) => !taken.has(page) && page.url() === "about:blank");
     const page = blank ?? (await context.newPage());
@@ -669,8 +917,11 @@ export class BrowserManager {
     await this.watchTab(context, page);
     page.setDefaultTimeout(ACTION_TIMEOUT);
     this.pages.set(botId, page);
+    this.tabProfile.set(botId, key);
     page.on("close", () => {
-      if (this.pages.get(botId) === page) this.pages.delete(botId);
+      if (this.pages.get(botId) !== page) return;
+      this.pages.delete(botId);
+      this.tabProfile.delete(botId);
     });
     this.changed();
     return page;
@@ -794,7 +1045,7 @@ export class BrowserManager {
     const { page, locator } = await this.element(botId, ref);
     const type = ((await locator.getAttribute("type")) ?? "").toLowerCase();
     const autocomplete = ((await locator.getAttribute("autocomplete")) ?? "").toLowerCase();
-    if (type === "password" || autocomplete.startsWith("cc-")) {
+    if (isSecretField(type, autocomplete)) {
       throw new Error(
         "Bots don't type passwords or card numbers. Ask the user to fill this in with browser_handoff.",
       );
@@ -927,7 +1178,12 @@ export class BrowserManager {
 
   /** How to use the web like a person, for bots that have the browser. */
   prompt(bot: Bot): string[] {
-    if (!this.settings().enabled) return [];
+    if (!this.settings().enabled)
+      return bot.visual
+        ? [
+            `${bot.name} is a Visual Bot, which uses the web by looking at its browser, but the browser is switched off (Settings → Browser & search). Say so if you're asked to use the web.`,
+          ]
+        : [];
     if (bot.visual) return visualPrompt(bot);
     return [
       [
@@ -1046,12 +1302,11 @@ export class BrowserManager {
         args: z.object({ reason: z.string().trim().min(1).max(500).describe("What the user should do") }),
         risk: () => safe("Ask the user to take over the browser"),
         run: async (args, ctx) => {
-          const where = this.settings().show
-            ? `in the browser window (${bot.name}'s tab) or in the Browser panel of this chat`
-            : "in the Browser panel of this chat";
-          if (this.settings().show) await this.focus(id);
-          const answer = await ctx.ask(`${args.reason}\n\nDo it ${where}, then reply here, e.g. “done”.`);
-          return `The user replied: ${answer}\n\n${read(await this.snapshot(id))}`;
+          const { solved, answer } = await this.handOff(id, bot.name, args.reason, ctx);
+          const said = solved
+            ? "The user solved the check; it's gone from the page."
+            : `The user replied: ${answer}`;
+          return `${said}\n\n${read(await this.snapshot(id))}`;
         },
       }),
       ...(sites.length > 0
@@ -1153,6 +1408,58 @@ export class BrowserManager {
       .catch(() => {});
   }
 
+  /**
+   * Hands the tab to the user and waits. When the page shows a human check, solving it is all the user has to do:
+   * the tab is watched, and once the check has been gone for a few seconds the bot carries on by itself (the card
+   * says so). Anything else (a sign-in, a payment) waits for the user's reply, since only they know when it's done.
+   */
+  async handOff(
+    botId: string,
+    botName: string,
+    reason: string,
+    ctx: ToolContext,
+  ): Promise<{ solved: boolean; answer: string }> {
+    const shown = this.settings().show;
+    if (shown) await this.focus(botId);
+    const page = this.pages.get(botId);
+    const check =
+      page && !page.isClosed() ? Boolean(await page.evaluate(HUMAN_CHECK_SCRIPT).catch(() => false)) : false;
+    const where = shown
+      ? `in the browser window (${botName}'s tab) or in the Browser panel of this chat`
+      : "in the Browser panel of this chat";
+    if (!check) {
+      const answer = await ctx.ask(`${reason}\n\nDo it ${where}, then reply here, e.g. “done”.`);
+      return { solved: false, answer };
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const solved = new Promise<string>((resolve) => {
+      let clear = 0;
+      timer = setInterval(() => {
+        const current = this.pages.get(botId);
+        if (!current || current.isClosed()) return;
+        void current
+          .evaluate(HUMAN_CHECK_SCRIPT)
+          .catch(() => true)
+          .then((shows) => {
+            clear = shows ? 0 : clear + 1;
+            // Twice in a row: a page reloading after the check mustn't count as solved half-way.
+            if (clear >= 2) resolve(SOLVED);
+          });
+      }, CHECK_POLL_MS);
+    });
+    try {
+      const answer = await ctx.ask(
+        `${reason}\n\nSolve it ${where}. ${botName} carries on by itself once it's gone.`,
+        {
+          until: solved,
+        },
+      );
+      return { solved: answer === SOLVED, answer };
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
   /** The host of the page in a bot's tab, if it has one open. */
   private hostOf(botId: string): string | null {
     const page = this.pages.get(botId);
@@ -1216,7 +1523,7 @@ export class BrowserManager {
     const page = await this.page(botId);
     if (page.url() === "about:blank") {
       return {
-        text: "The browser shows an empty tab. Use screen_go_to to open google.com (or another site you know).",
+        text: "The browser shows an empty tab. Use screen_go_to to open bing.com (or another site you know).",
         images: [],
       };
     }
@@ -1308,9 +1615,33 @@ export class BrowserManager {
       throw new Error(`Box ${ref} isn't on the screen any more. Call screen_look for a fresh picture.`);
     const x = box.x + box.width / 2;
     const y = box.y + box.height / 2;
+    await this.checkLanding(page, x, y, ref, `Box ${ref}`);
     await this.showClick(page, x, y);
     await this.clickPoint(page, x, y);
     return this.look(botId);
+  }
+
+  /**
+   * A Visual Bot clicks a spot, and whatever is on top there takes the click: a cookie banner, a popup or a
+   * see-through layer over the box it chose (`ref`, when it chose one). Its approval was judged by that box, so a
+   * click that would land on a control that asks first (Subscribe, Accept all) is refused, naming it. Something
+   * harmless (Close, a plain link, a layer that is no control) may take it; the next look shows what happened.
+   */
+  private async checkLanding(page: Page, x: number, y: number, ref: number | null, what: string) {
+    const landing = (await page
+      .evaluate(landingScript(Math.round(x), Math.round(y), ref))
+      .catch(() => null)) as {
+      reaches: boolean;
+      control: PageElement | null;
+    } | null;
+    if (!landing?.control || landing.reaches) return;
+    // Only a control on top that would itself ask is refused. Layers that aren't controls are common on big sites
+    // (YouTube's hover preview over a thumbnail, a video frame) and refusing those broke ordinary clicks.
+    if (clickRisk(landing.control, "").level === "safe") return;
+    const there = landing.control.label ? `“${landing.control.label}”` : "a control with no name";
+    throw new Error(
+      `${what} is covered by ${there}, so the click would land there instead. Look again (screen_look) and deal with what covers it first.`,
+    );
   }
 
   /** Clicks a spot in the screenshot (pixels, as in the picture), for things without a box. */
@@ -1320,6 +1651,13 @@ export class BrowserManager {
     if (x < 0 || y < 0 || x > size.width || y > size.height) {
       throw new Error(`The picture is ${size.width}×${size.height} pixels; ${x},${y} is outside it.`);
     }
+    await this.checkLanding(
+      page,
+      x,
+      y,
+      this.markAt(botId, x, y)?.ref ?? null,
+      `The spot ${Math.round(x)}, ${Math.round(y)}`,
+    );
     await this.showClick(page, x, y);
     await this.clickPoint(page, x, y);
     return this.look(botId);
@@ -1340,7 +1678,7 @@ export class BrowserManager {
         "Nothing to type into is selected. Click the text box first (screen_click), then type.",
       );
     }
-    if (focused.type === "password" || focused.autocomplete.startsWith("cc-")) {
+    if (isSecretField(focused.type, focused.autocomplete)) {
       throw new Error(
         "Bots don't type passwords or card numbers. Use browser_sign_in or ask the user with browser_handoff.",
       );
@@ -1398,7 +1736,20 @@ export class BrowserManager {
   ): Promise<void> {
     const page = this.pages.get(botId);
     if (!page || page.isClosed()) throw new Error("This bot has no browser tab open.");
-    const cdp = await page.context().newCDPSession(page);
+    // A browser being watched isn't closed to make room for another bot's.
+    this.viewers.set(botId, (this.viewers.get(botId) ?? 0) + 1);
+    const unwatch = () => {
+      const left = (this.viewers.get(botId) ?? 1) - 1;
+      if (left > 0) this.viewers.set(botId, left);
+      else this.viewers.delete(botId);
+    };
+    let cdp: Awaited<ReturnType<BrowserContext["newCDPSession"]>>;
+    try {
+      cdp = await page.context().newCDPSession(page);
+    } catch (error) {
+      unwatch();
+      throw error;
+    }
     let ended!: () => void;
     const end = new Promise<void>((resolve) => (ended = resolve));
     try {
@@ -1420,6 +1771,7 @@ export class BrowserManager {
       await cdp.send("Page.startScreencast", { format: "jpeg", quality: 55, maxWidth: 1280, maxHeight: 860 });
       await end;
     } finally {
+      unwatch();
       signal.removeEventListener("abort", ended);
       page.off("close", ended);
       await cdp.send("Page.stopScreencast").catch(() => {});
@@ -1450,6 +1802,15 @@ export class BrowserManager {
     if (key) await page.keyboard.press(key);
   }
 
+  /** The user opens an address in a bot's tab from the panel (to sign in for it, say): theirs to open, local too. */
+  async userGo(botId: string, url: string): Promise<void> {
+    const page = this.pages.get(botId);
+    if (!page || page.isClosed()) throw new Error("This bot has no browser tab open.");
+    if (!isWebUrl(url)) throw new Error("Only http and https pages can be opened.");
+    await this.navigate(page, url, true);
+    this.changed();
+  }
+
   async userScroll(botId: string, dy: number): Promise<void> {
     const page = this.pages.get(botId);
     if (!page || page.isClosed()) throw new Error("This bot has no browser tab open.");
@@ -1466,9 +1827,13 @@ export function registerBrowserRoutes(app: FastifyInstance, browser: BrowserMana
     return { settings: await browser.saveSettings(body) };
   });
 
-  app.post("/api/browser/open", async (_request, reply) => {
+  app.post("/api/browser/open", async (request, reply) => {
+    const body = parse(z.object({ botId: z.string().min(1).max(80).optional() }), request.body ?? {}, reply);
+    if (!body) return reply;
+    if (body.botId && !browser.botExists(body.botId))
+      return fail(reply, 404, "not_found", "There's no such bot.");
     try {
-      await browser.open();
+      await browser.open(body.botId);
     } catch (error) {
       return fail(reply, 502, "browser_failed", (error as Error).message);
     }
@@ -1552,6 +1917,12 @@ export function registerBrowserRoutes(app: FastifyInstance, browser: BrowserMana
     );
     if (!body) return reply;
     return act(reply, () => browser.userType(request.params.botId, body.text, body.key));
+  });
+
+  app.post<{ Params: { botId: string } }>("/api/browser/tabs/:botId/go", async (request, reply) => {
+    const body = parse(z.object({ url: z.url().max(4000) }), request.body, reply);
+    if (!body) return reply;
+    return act(reply, () => browser.userGo(request.params.botId, body.url));
   });
 
   app.post<{ Params: { botId: string } }>("/api/browser/tabs/:botId/scroll", async (request, reply) => {

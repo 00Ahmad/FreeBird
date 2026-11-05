@@ -289,11 +289,57 @@ export class MessageRepo {
     });
   }
 
-  /** Messages left "streaming" by a crash or restart are marked stopped. */
-  stopStreaming(): number {
-    return Number(
-      this.db.prepare("UPDATE messages SET status = 'stopped' WHERE status = 'streaming'").run().changes,
-    );
+  /**
+   * Messages left "streaming" by a crash or restart. They are closed the way a live Stop would close them: calls
+   * that were running or waiting for approval are marked as not finished, and cards nobody can answer any more are
+   * expired (otherwise they would keep live buttons that lead nowhere).
+   *
+   * A message that was in the middle of a call that changes things outside the chat (a command, a send, a
+   * connected app) is ended as an error that says so, instead of "stopped": it may have happened, and asking again
+   * without looking would do it twice.
+   */
+  recoverInterrupted(): { stopped: number; failed: number } {
+    return transaction(this.db, () => {
+      const rows = this.db.prepare("SELECT id, parts FROM messages WHERE status = 'streaming'").all();
+      const save = this.db.prepare("UPDATE messages SET parts = ?, status = ? WHERE id = ?");
+      let stopped = 0;
+      let failed = 0;
+      for (const row of rows) {
+        const raw = json(row.parts);
+        const parts = (Array.isArray(raw) ? raw : []) as Record<string, unknown>[];
+        const attempted = new Set<string>();
+        for (const part of parts) {
+          if (!part || typeof part !== "object") continue;
+          if (part.type === "tool" && (part.status === "running" || part.status === "pending_approval")) {
+            const running = part.status === "running";
+            if (running && part.outward === true) attempted.add(String(part.name));
+            part.status = "error";
+            part.result = !running
+              ? "Stopped before anyone answered."
+              : part.outward === true
+                ? "The app closed while this was running. It may or may not have finished."
+                : "Stopped before it finished.";
+            delete part.approval;
+          } else if (part.type === "question" && part.answer === undefined) {
+            part.expired = true;
+          } else if (part.type === "secret" && !part.saved) {
+            part.expired = true;
+          }
+        }
+        if (attempted.size > 0) {
+          parts.push({
+            type: "error",
+            code: "interrupted",
+            message: `The app closed while ${[...attempted].join(", ")} was running, so it may or may not have finished. Check before asking again, so it isn't done twice.`,
+          });
+          failed += 1;
+        } else {
+          stopped += 1;
+        }
+        save.run(JSON.stringify(parts), attempted.size > 0 ? "error" : "stopped", String(row.id));
+      }
+      return { stopped, failed };
+    });
   }
 
   /** Total tokens per bot (Usage settings). */

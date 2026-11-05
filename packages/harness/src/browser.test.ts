@@ -19,7 +19,7 @@ import {
 } from "./browser";
 import { shop } from "./fixtures/shop";
 import { auth, makeHarness, type TestHarness } from "./testing";
-import { clickRisk, enterRisk, spaceRisk } from "./visual";
+import { clickRisk, enterRisk, spaceRisk, VISUAL_TOOL_NAMES, visualTools } from "./visual";
 
 describe("browser output", () => {
   const snapshot: PageSnapshot = {
@@ -85,7 +85,8 @@ describe.skipIf(!existsSync(EDGE))("browser (real Edge, hidden window)", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     h = await makeHarness({ config: { dataDir } });
-    h.store.settings.set("browser", { ...DEFAULT_BROWSER_SETTINGS, show: false });
+    // One real Edge for every bot here; per-bot profiles are tested below with a stand-in browser.
+    h.store.settings.set("browser", { ...DEFAULT_BROWSER_SETTINGS, show: false, profiles: "shared" });
     bot = h.store.bots.create({ name: "Shopper" });
   }, 30_000);
 
@@ -244,6 +245,22 @@ describe.skipIf(!existsSync(EDGE))("browser (real Edge, hidden window)", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect(await run("browser_read", {})).toContain("Nova 5");
+    // The user goes to a sign-in page from the panel's address field.
+    const go = await h.app.inject({
+      method: "POST",
+      url: `/api/browser/tabs/${bot.id}/go`,
+      headers: auth,
+      payload: { url: `${base}/login` },
+    });
+    expect(go.statusCode).toBe(204);
+    expect(await run("browser_read", {})).toContain(`Address: ${base}/login`);
+    const bad = await h.app.inject({
+      method: "POST",
+      url: `/api/browser/tabs/${bot.id}/go`,
+      headers: auth,
+      payload: { url: "file:///C:/Windows/win.ini" },
+    });
+    expect(bad.statusCode).toBe(409);
   }, 60_000);
 
   it("gives a Visual Bot only screen tools, and works the shop by looking", async () => {
@@ -396,6 +413,102 @@ describe.skipIf(!existsSync(EDGE))("browser (real Edge, hidden window)", () => {
     expect(listed(await run("browser_read", {}))).not.toBe(listed(first));
   }, 60_000);
 
+  it("won't let a Visual Bot's click land on something that asks, hidden under a harmless box", async () => {
+    const eyes = h.store.bots.create({ name: "Clicker", visual: true });
+    const visual = (name: string) => h.services.browser.tools(eyes).find((spec) => spec.name === name)!;
+    const act = async (name: string, args: Record<string, unknown>) => {
+      const spec = visual(name);
+      return spec.run(spec.args.parse(spec.prepare ? spec.prepare(args) : args), ctx);
+    };
+    const boxOf = (label: string) =>
+      Array.from({ length: 100 }, (_, ref) => h.services.browser.mark(eyes.id, ref)).find((mark) =>
+        mark?.label.includes(label),
+      )!;
+    const title = async () =>
+      (await h.services.browser.status()).tabs.find((t) => t.botId === eyes.id)?.title;
+
+    await act("screen_go_to", { address: `${base}/covered` });
+    const next = boxOf("Next page");
+    // Judged by the box the bot chose: harmless.
+    expect(await visual("screen_click").risk({ box: next.ref }, ctx)).toMatchObject({ level: "safe" });
+    // But a "Subscribe now" layer is on top, and that is what the click would hit.
+    await expect(act("screen_click", { box: next.ref })).rejects.toThrow("covered by “Subscribe now”");
+    const middle = { x: next.x! + next.w! / 2, y: next.y! + next.h! / 2 };
+    await expect(act("screen_click_at", middle)).rejects.toThrow("covered by “Subscribe now”");
+    expect(await title()).not.toBe("subscribed");
+    // A checkbox is named by its label, not its value ("on"), so ticking an agreement asks.
+    expect(boxOf("Keep me posted").kind).toBe("checkbox");
+    expect(await visual("screen_click").risk({ box: boxOf("I agree").ref }, ctx)).toMatchObject({
+      level: "ask",
+    });
+    // A checkbox drawn over its own input still gets the click.
+    await act("screen_click", { box: boxOf("Keep me posted").ref });
+    expect(await title()).toBe("kept");
+    // A layer that is no control (like YouTube's preview over a thumbnail) doesn't stop the click.
+    await act("screen_go_to", { address: `${base}/covered?layer=plain` });
+    await act("screen_click", { box: boxOf("Next page").ref });
+    // Without the layer, the same click goes through.
+    await act("screen_go_to", { address: `${base}/covered?layer=off` });
+    await act("screen_click", { box: boxOf("Next page").ref });
+    expect(await title()).toBe("next clicked");
+  }, 90_000);
+
+  it("blends in as an ordinary browser by default, and says it's automated when that's switched off", async () => {
+    const who = async () => /webdriver=\S+ agent=[^\n]+/.exec(await run("browser_read", {}))?.[0] ?? "";
+    await run("browser_open", { url: `${base}/whoami` });
+    const blended = await who();
+    expect(blended).toContain("webdriver=false");
+    expect(blended).not.toContain("Headless");
+    await h.services.browser.saveSettings({ ...h.services.browser.settings(), blendIn: false });
+    try {
+      await run("browser_open", { url: `${base}/whoami` });
+      const plain = await who();
+      expect(plain).toContain("webdriver=true");
+      expect(plain).toContain("Headless");
+    } finally {
+      await h.services.browser.saveSettings({ ...h.services.browser.settings(), blendIn: true });
+    }
+  }, 90_000);
+
+  it("carries on by itself once the user has solved a check, with nobody replying", async () => {
+    await run("browser_open", { url: `${base}/solvable` });
+    const asked: string[] = [];
+    const waiting = {
+      ...ctx,
+      // Nobody types anything: the card is only settled by the check going away.
+      ask: (question: string, choices?: { until?: Promise<string> }) => {
+        asked.push(question);
+        return choices?.until ?? new Promise<string>(() => {});
+      },
+    };
+    const started = Date.now();
+    const handoff = tool("browser_handoff");
+    const result = (await handoff.run({ reason: "Solve the check" }, waiting)) as string;
+    expect(asked[0]).toContain("carries on by itself");
+    expect(result).toContain("The user solved the check");
+    expect(result).toContain("Plenty of results");
+    expect(Date.now() - started).toBeLessThan(15_000);
+  }, 60_000);
+
+  it("doesn't take an ordinary page for a human check", async () => {
+    const eyes = h.store.bots.create({ name: "Reader", visual: true });
+    const visual = (name: string) => h.services.browser.tools(eyes).find((spec) => spec.name === name)!;
+    const act = async (name: string, args: Record<string, unknown>) => {
+      const spec = visual(name);
+      return (await spec.run(spec.args.parse(spec.prepare ? spec.prepare(args) : args), ctx)) as {
+        text: string;
+      };
+    };
+    const page = await act("screen_go_to", { address: `${base}/article` });
+    expect(page.text).not.toContain("human check");
+    const more = Array.from({ length: 100 }, (_, ref) => h.services.browser.mark(eyes.id, ref)).find((mark) =>
+      mark?.label.includes("Read more"),
+    )!;
+    await act("screen_click", { box: more.ref });
+    // A real challenge page still counts.
+    expect((await act("screen_go_to", { address: `${base}/check` })).text).toContain("human check");
+  }, 90_000);
+
   it("judges Enter and Space by what has focus now, however it got there", async () => {
     const eyes = h.store.bots.create({ name: "Typist", visual: true });
     const visual = (name: string) => h.services.browser.tools(eyes).find((spec) => spec.name === name)!;
@@ -423,6 +536,14 @@ describe.skipIf(!existsSync(EDGE))("browser (real Edge, hidden window)", () => {
     expect(await visual("screen_click").risk({ box: icon.ref }, ctx)).toMatchObject({ level: "ask" });
     expect(await visual("screen_click_at").risk({ x: 1200, y: 800 }, ctx)).toMatchObject({ level: "ask" });
   }, 90_000);
+});
+
+describe("a Visual Bot's tools", () => {
+  it("are listed by exact name, so an app's `screen__…` tools can't pass for them", () => {
+    const bot = { id: "bot_x", name: "Eyes", visual: true } as Bot;
+    const names = visualTools({} as never, bot, ["shop.example"]).map((spec) => spec.name);
+    expect(names.toSorted()).toEqual([...VISUAL_TOOL_NAMES].toSorted());
+  });
 });
 
 describe("judging clicks and keys", () => {

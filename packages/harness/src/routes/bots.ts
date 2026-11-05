@@ -5,7 +5,7 @@ import { BotId, CreateBotInput, UpdateBotInput, type Bot } from "@mrog/shared";
 import { fail, parse } from "../http";
 import type { Services } from "../services";
 
-export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation }: Services) {
+export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation, agent }: Services) {
   /** Making a bot primary demotes the old one; tell the UI about both. */
   const publishDemotedPrimary = (previous: Bot | undefined, current: Bot) => {
     if (!previous || previous.id === current.id || !current.isPrimary) return;
@@ -39,6 +39,15 @@ export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation
     bus.publish({ type: "bot.updated", bot });
     publishDemotedPrimary(previous, bot);
     return { bot };
+  });
+
+  /** The tools this bot has, on or off, for the Details panel. Ones its list names but aren't offered now are included. */
+  app.get<{ Params: { id: string } }>("/api/bots/:id/tools", async (request, reply) => {
+    const id = parse(BotId, request.params.id, reply);
+    if (!id) return reply;
+    const bot = store.bots.get(id);
+    if (!bot) return fail(reply, 404, "not_found", "No bot has this id.");
+    return { tools: agent.listTools(bot) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/bots/:id", async (request, reply) => {

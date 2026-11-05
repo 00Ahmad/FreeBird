@@ -14,6 +14,7 @@ import type { ModelRuntime, Priority } from "@mrog/model-runtime";
 import { ProviderError, type ChatMessage, type ChatProvider, type ProviderRegistry } from "@mrog/providers";
 import {
   messageText,
+  parseModelRef,
   type Bot,
   type Message,
   type MessagePart,
@@ -26,6 +27,7 @@ import type { Store } from "@mrog/store";
 import type { EventBus } from "./bus";
 import type { ModelCatalog } from "./catalog";
 import { buildSystemPrompt } from "./prompt";
+import { withWatchdog, type WatchdogLimits } from "./watchdog";
 
 /** Where a delegated helper's cards (approvals, questions, secrets) show: the coordinator's message. */
 export interface Surface {
@@ -47,6 +49,11 @@ interface TurnOptions {
   parentSignal?: AbortSignal;
   delegated?: boolean;
   surface?: Surface;
+  /**
+   * A message this turn answers again, because it failed or stalled: the new turn is built from the conversation
+   * without it (it may hold half a reply, which a model would carry on or answer instead of the user).
+   */
+  retryOf?: string;
   /**
    * Keep a local model for the whole turn instead of one reply at a time: bots that never wait for the user (racers)
    * then finish one after another, and the model doesn't re-read each one's conversation (or swap models) between
@@ -75,6 +82,8 @@ interface TurnExtensions {
   ): { maxSteps?: number; selfCheck?: boolean; think?: boolean; stepLimitNote?: boolean };
   /** Waits for what a local model needs first, e.g. Ollama that is still starting. */
   beforeModel?(): Promise<void>;
+  /** Takes the user's secret values out of text the turn saves that didn't come through the tool host (errors). */
+  scrub?(text: string): string;
   /** After any turn ends (e.g. to tidy up the helpers a coordinator made). */
   onTurnEnd?(thread: Thread, bot: Bot, message: Message, info: TurnInfo): void;
   /**
@@ -94,6 +103,8 @@ interface TurnExtensions {
 interface ActiveTurn {
   controller: AbortController;
   botId: string;
+  /** The reply it is writing; known once the turn has started. */
+  messageId?: string;
   steer: ChatMessage[];
   info: TurnInfo;
   /** How it was started, so a follow-up turn for a late message runs the same way. */
@@ -125,6 +136,27 @@ const THINK_END = "</think>";
 /** How long preparing a turn (one short question to the model) may take before the turn starts without it. */
 const BEFORE_TURN_TIMEOUT_MS = 45_000;
 
+/**
+ * The conversation for a turn that answers again (`retryOf` is set), without this bot's unfinished replies to the
+ * user's latest message. Not only the one being retried: a retry that itself failed leaves another half-written reply
+ * behind, and the one before it is still there. Left in, the history would end on the bot's own words instead of the
+ * user's message, and the model would carry on mid-sentence, or answer nothing. Finished replies, and other bots' replies in
+ * a group, stay.
+ */
+export function withoutFailedReplies(
+  messages: Message[],
+  botId: string,
+  retryOf: string | undefined,
+): Message[] {
+  if (!retryOf) return messages;
+  const lastUser = messages.findLastIndex((message) => message.role === "user");
+  return messages.filter(
+    (message, index) =>
+      message.id !== retryOf &&
+      !(index > lastUser && message.role === "bot" && message.botId === botId && message.status !== "done"),
+  );
+}
+
 /** The history with a note added to its newest user message (or as one, when the newest message isn't the user's). */
 function withNote(history: ChatMessage[], note: string): ChatMessage[] {
   const last = history.at(-1);
@@ -147,6 +179,8 @@ export class TurnManager {
       runtime: ModelRuntime;
       registry: ProviderRegistry;
       catalog: ModelCatalog;
+      /** How long a model may stay silent before its request is ended (tests shorten it). */
+      watchdog?: Partial<WatchdogLimits>;
     },
   ) {}
 
@@ -231,6 +265,21 @@ export class TurnManager {
 
   stopBot(botId: string): void {
     for (const turn of this.active.values()) if (turn.botId === botId) turn.controller.abort();
+  }
+
+  /**
+   * Answers the user again where `retryOf` failed, stalled or never got going. If that very reply is still being
+   * written, it is stopped first (a restart); if the bot is busy with anything else, nothing starts. Clicking twice
+   * gives one new turn, not two: the second joins the first.
+   */
+  retry(thread: Thread, bot: Bot, retryOf: string): { started: boolean } {
+    const running = this.active.get(`${thread.id}:${bot.id}`);
+    if (running && !running.controller.signal.aborted) {
+      if (running.messageId !== retryOf) return { started: false };
+      running.controller.abort();
+    }
+    this.start(thread, bot, "user", { retryOf }).catch(logStartFailure);
+    return { started: true };
   }
 
   stopAll(): void {
@@ -354,6 +403,7 @@ export class TurnManager {
       model: ref,
     });
     bus.publish({ type: "message.created", message });
+    turn.messageId = message.id;
     this.setActivity(thread.id, bot.id, "thinking");
 
     const parts: MessagePart[] = [];
@@ -486,19 +536,33 @@ export class TurnManager {
       if (resolved.provider.local) await this.extensions.beforeModel?.();
       const info = await catalog.info(ref);
       if (!info) throw new ProviderError("model_missing", `The model ${ref} is not available.`);
+      // A Visual Bot only has screenshots to go by. Ollama says for sure what a model can do; other providers'
+      // lists are guesses from the model's name, so those are let through rather than wrongly refused.
+      if (bot.visual && !info.capabilities.includes("vision") && parseModelRef(ref).providerId === "ollama")
+        throw new ProviderError(
+          "needs_vision",
+          `${bot.name} is a Visual Bot and works from screenshots, but ${resolved.model} can't see pictures. Pick a model that can, such as qwen3.5:9b.`,
+        );
       const settings = runtime.settings;
       const local = resolved.provider.local ? runtime.localOptions() : undefined;
       if (resolved.provider.local && turn.options.wholeTurn)
         releaseTurnSlot = await this.acquireSlot(priority, thread.id, bot.id, signal);
+      // Silence from the model ends its request with a "stalled" error. The watchdog sits inside the queue for the
+      // shared model, so waiting for a slot never counts as silence.
+      const guarded = withWatchdog(resolved.provider, this.deps.watchdog);
       const provider =
         resolved.provider.local && !releaseTurnSlot
-          ? this.withSlot(resolved.provider, priority, thread.id, bot.id)
-          : resolved.provider;
+          ? this.withSlot(guarded, priority, thread.id, bot.id)
+          : guarded;
       const contextWindow = provider.local
         ? Math.min(settings.numCtx, info.contextWindow ?? settings.numCtx)
         : (info.contextWindow ?? 32_768);
 
-      const history = store.messages.list(thread.id, { limit: 400 }).filter((m) => m.id !== message.id);
+      const history = withoutFailedReplies(
+        store.messages.list(thread.id, { limit: 400 }).filter((m) => m.id !== message.id),
+        bot.id,
+        turn.options.retryOf,
+      );
       const names = new Map(store.bots.list().map((b) => [b.id, b.name]));
       const extras = this.extensions.promptExtras?.(bot, thread, turn.info) ?? {};
       const system = buildSystemPrompt(bot, {
@@ -575,7 +639,13 @@ export class TurnManager {
       const stopped = signal.aborted || (error instanceof ProviderError && error.code === "aborted");
       if (!stopped) {
         const code = error instanceof ProviderError ? error.code : "unknown";
-        parts.push({ type: "error", code, message: (error as Error).message });
+        // A provider or a connected app can put a key or token into its error text.
+        const text = (error as Error).message;
+        parts.push({
+          type: "error",
+          code,
+          message: this.extensions.scrub ? this.extensions.scrub(text) : text,
+        });
         if (!(error instanceof ProviderError)) console.error("[turns] turn failed", error);
       }
       for (const part of parts) {

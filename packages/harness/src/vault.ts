@@ -15,11 +15,41 @@ import {
 import { BADGES, defineTool, safe, type ToolSpec } from "@mrog/tools";
 
 import { fail, parse } from "./http";
+import type { SecretValue } from "./scrubber";
 import type { Services } from "./services";
+
+/** Where connected apps' sign-ins (OAuth tokens and client registrations) are kept in the keychain. */
+export const OAUTH_PREFIX = "MCP_OAUTH_";
+
+/** The token strings inside a saved sign-in, whatever else it holds. */
+function oauthSecrets(raw: string): string[] {
+  try {
+    const saved = JSON.parse(raw) as {
+      tokens?: { access_token?: unknown; refresh_token?: unknown; id_token?: unknown };
+      client?: { client_secret?: unknown };
+    };
+    return [
+      saved.tokens?.access_token,
+      saved.tokens?.refresh_token,
+      saved.tokens?.id_token,
+      saved.client?.client_secret,
+    ].filter((value): value is string => typeof value === "string");
+  } catch {
+    return [];
+  }
+}
 
 const ITEMS_KEY = "vault.items";
 const grantsKey = (botId: string) => `grants:${botId}`;
-const itemSecret = (id: string) => `VAULT_ITEM_${id.toUpperCase().replaceAll("-", "_")}`;
+const ITEM_PREFIX = "VAULT_ITEM_";
+const itemSecret = (id: string) => `${ITEM_PREFIX}${id.toUpperCase().replaceAll("-", "_")}`;
+
+/**
+ * Keychain entries the app keeps for itself: Vault logins and cards, and connected apps' sign-ins (refresh tokens
+ * included). A bot can't ask the user to type into one, and none is ever handed to a command.
+ */
+export const isAppSecret = (name: string): boolean =>
+  name.startsWith(ITEM_PREFIX) || name.startsWith(OAUTH_PREFIX);
 
 /** "https://www.Daraz.pk/login" → "daraz.pk". */
 function siteHost(website: string): string | null {
@@ -75,7 +105,7 @@ function loginMatches(page: string, site: string, subdomains: boolean): boolean 
   return subdomains && page.endsWith(`.${site}`) && site.includes(".") && !SHARED_DOMAINS.has(site);
 }
 
-/** Logins, cards and contact info (UI-SPEC §11 Vault), plus secrets bots request and are granted. */
+/** Logins, cards and contact info, plus secrets bots request and are granted. */
 export class VaultService {
   /** Open secret cards: the name the bot asked for (the only name the value is saved under) and the waiter. */
   private readonly pendingSecrets = new Map<string, { name: string; resolve(saved: boolean): void }>();
@@ -210,6 +240,39 @@ export class VaultService {
       : undefined;
   }
 
+  /**
+   * Every secret value the app holds, for the scrubber: plain secrets and API keys, saved logins' passwords, card
+   * numbers, and the tokens of connected apps' sign-ins. Contact details are not secrets and are left out: the
+   * user's own email address must not vanish from every result.
+   */
+  secretValues(): SecretValue[] {
+    const { vault } = this.services;
+    const items = new Map(this.items().map((item) => [itemSecret(item.id), item]));
+    const out: SecretValue[] = [];
+    for (const name of vault.names()) {
+      const raw = vault.get(name);
+      if (!raw) continue;
+      const item = items.get(name);
+      if (item) {
+        let value: Record<string, string>;
+        try {
+          value = JSON.parse(raw) as Record<string, string>;
+        } catch {
+          continue; // one damaged item must not leave every other secret unscrubbed
+        }
+        if (item.kind === "login" && value.password)
+          out.push({ kind: "login", username: item.username ?? "", password: value.password });
+        else if (item.kind === "card" && value.number) out.push({ kind: "card", number: value.number });
+      } else if (name.startsWith(ITEM_PREFIX)) {
+        // A login or card whose item is gone (or never saved): its stored text is not itself a secret to look for.
+        continue;
+      } else if (name.startsWith(OAUTH_PREFIX)) {
+        for (const token of oauthSecrets(raw)) out.push({ kind: "plain", value: token });
+      } else out.push({ kind: "plain", value: raw });
+    }
+    return out;
+  }
+
   /** Secrets a bot's commands receive as environment variables. */
   envFor(bot: Bot): Record<string, string> {
     const env: Record<string, string> = {};
@@ -221,7 +284,7 @@ export class VaultService {
         const names = loginEnvNames(item.website);
         env[names.username] = item.username ?? "";
         env[names.password] = (JSON.parse(raw) as { password: string }).password;
-      } else {
+      } else if (!isAppSecret(name)) {
         const value = this.services.vault.get(name);
         if (value) env[name] = value;
       }
@@ -250,10 +313,12 @@ export class VaultService {
       defineTool({
         name: "request_secret",
         description:
-          "Ask the user for an API key, token or password. They type it into a secure card; you never see the value. It becomes an environment variable with this name in your commands.",
+          "Ask the user for an API key, token or password. They type it into a secure card; you never see the value. To use it, name it in run_command's secrets: that command gets it as an environment variable with this name.",
         args: z.object({ name: SecretName, reason: z.string().min(1).max(300) }),
         risk: (args) => safe(`Ask for ${args.name}`),
         run: async (args, ctx) => {
+          if (isAppSecret(args.name))
+            return `${args.name} is a name the app keeps for its own sign-ins. Pick another name.`;
           const hook = this.services.turns.partHooks.get(messageId);
           if (!hook) return "The secure card could not be shown.";
           const requestId = randomUUID();
@@ -290,14 +355,14 @@ export class VaultService {
           hook.publish();
           if (!saved) return "The user declined to provide it.";
           this.grant(bot.id, [args.name]);
-          return `Saved securely as ${args.name}. Your commands can read it from the environment variable ${args.name}.`;
+          return `Saved securely as ${args.name}. To use it, put "${args.name}" in run_command's secrets; that command can then read the environment variable ${args.name}.`;
         },
       }),
       ...(items.some((item) => item.kind === "login")
         ? [
             defineTool({
               name: "use_login",
-              description: `Get a saved login for a website as environment variables for your commands (you never see the password). Saved sites: ${items
+              description: `Get a saved login for a website for your commands (you never see the password); then name its two variables in run_command's secrets. Saved sites: ${items
                 .filter((item) => item.kind === "login")
                 .map((item) => item.website)
                 .join(", ")}.`,
@@ -319,7 +384,7 @@ export class VaultService {
                 if (!item?.website) return `No saved login matches ${args.website}.`;
                 this.grant(bot.id, [`login:${item.id}`]);
                 const names = loginEnvNames(item.website);
-                return `Granted. In commands, use the environment variables ${names.username} and ${names.password}.`;
+                return `Granted. To use it, put "${names.username}" and "${names.password}" in run_command's secrets; that command can then read those environment variables.`;
               },
             }),
           ]

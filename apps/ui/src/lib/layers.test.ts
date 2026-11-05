@@ -15,6 +15,19 @@ describe("layer stack", () => {
     expect(closed).toEqual(["editor", "settings"]);
   });
 
+  it("says which layer is on top, so only that one answers the keyboard", () => {
+    const stack = createLayerStack();
+    const dialog = stack.push(() => {});
+    expect(dialog.isTop()).toBe(true);
+    const menu = stack.push(() => {});
+    expect(dialog.isTop()).toBe(false);
+    expect(menu.isTop()).toBe(true);
+    menu();
+    expect(dialog.isTop()).toBe(true);
+    dialog();
+    expect(dialog.isTop()).toBe(false);
+  });
+
   it("forgets removed layers, whatever order they go in", () => {
     const stack = createLayerStack();
     const closed: string[] = [];

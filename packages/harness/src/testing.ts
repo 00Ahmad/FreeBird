@@ -8,6 +8,7 @@ import type { HarnessConfig } from "./config";
 import { settingsNameIndex } from "./index";
 import { buildServer, type RouteModule } from "./server";
 import { createServices, type Services } from "./services";
+import type { WatchdogLimits } from "./watchdog";
 
 const TEST_TOKEN = "t".repeat(64);
 export const auth = { authorization: `Bearer ${TEST_TOKEN}` };
@@ -23,6 +24,7 @@ const testConfig = (over: Partial<HarnessConfig> = {}): HarnessConfig => ({
   vault: "memory",
   keyringService: "test",
   previousKeyringService: null,
+  eventLog: false,
   ...over,
 });
 
@@ -81,13 +83,21 @@ export async function makeHarness(
     handlers?: Record<string, FakeHandler>;
     modules?: RouteModule[];
     setup?(services: Services): void;
+    watchdog?: Partial<WatchdogLimits>;
   } = {},
 ): Promise<TestHarness> {
   const store = openStore(":memory:");
   const bus = new EventBus();
   const vault = new Vault(new MemoryBackend(), settingsNameIndex(store.settings));
   const { impl, calls } = fakeFetch(options.handlers ?? fakeOllama());
-  const services = createServices({ config: testConfig(options.config), store, vault, bus, fetchImpl: impl });
+  const services = createServices({
+    config: testConfig(options.config),
+    store,
+    vault,
+    bus,
+    fetchImpl: impl,
+    watchdog: options.watchdog,
+  });
   options.setup?.(services);
   const app = await buildServer(services, options.modules);
   return {

@@ -57,7 +57,11 @@ export function toChatHistory(
             role: "tool",
             toolCallId: part.callId,
             name: part.name,
-            content: part.status === "denied" ? "The user denied this action." : (part.result ?? ""),
+            // A call nobody answered in time wasn't refused: it says what really happened, as the bot was told then.
+            content:
+              part.status === "denied" && part.decidedBy !== "timeout"
+                ? "The user denied this action."
+                : (part.result ?? ""),
           });
           pending = "";
         }

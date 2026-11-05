@@ -29,7 +29,15 @@ Another bot, routine or background job is using the shared model. Your chats alw
 
 ### The browser doesn't open
 
-FreeBird needs **Microsoft Edge or Google Chrome** installed. Settings are in **Settings → Browser & search**. If a site shows a human check or a sign-in, the bot hands it to you: solve it in the bot's browser window or the chat's Browser panel, then tell the bot you're done.
+FreeBird needs **Microsoft Edge or Google Chrome** installed. Settings are in **Settings → Browser & search**. If a site shows a sign-in, the bot hands it to you: sign in in the bot's browser window or the chat's Browser panel, then tell the bot you're done.
+
+### Sites keep showing CAPTCHAs or "verify you're human"
+
+- **Solve it once and the bot carries on by itself.** The bot's window comes to the front; once the check is gone, the bot goes on without you replying. The site remembers it in that bot's browser profile, so it rarely asks again.
+- **Turn on Notify me** in the bot's Details, so you get a desktop notification when it needs you instead of watching it.
+- **Google is the strictest.** Bots search on Bing first; ask for Google only when you need it. Many searches in a short time from one connection make Google flag it for a few hours.
+- **For text bots, a search API** (Brave Search or your own SearXNG, in **Settings → Browser & search**) gives search results with no checks at all.
+- Keep **Look like an ordinary browser** on (the default) and the window shown: hidden windows are challenged more.
 
 ### The bot's computer won't start
 

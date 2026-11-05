@@ -1,18 +1,16 @@
 # FreeBird — Roadmap
 
-Built from scratch, no fork. See the [plan](design/PLAN.md) and the [UI spec](design/UI-SPEC.md). `[ ]` = open, `[x]` = done.
+Built from scratch, no fork. `[ ]` = open, `[x]` = done.
 
 ## Research & decisions
 
 - [x] Research Grok Bot (xAI): features and interface
-- [x] Research OpenMausBot (reference only) and check how it shares models in memory
 - [x] Research the Ollama API
-- [x] Write PLAN.md, TODO.md, UI-SPEC.md
 - [x] Decide fork vs greenfield → **greenfield**
-- [ ] Answer the open questions in PLAN §7: name, Electron vs Tauri, mobile, offline scope
+- [ ] Decide Electron vs Tauri for the long term, mobile, and how much must work offline
 - [ ] Get Grok Bot screenshots or a recording for visual details
 - [x] Benchmark tool-capable Ollama models with `pnpm --filter @mrog/harness eval`: qwen3.5:9b and nemotron-3-nano:4b pass 3/3 file tasks; llama3.2:1b is unreliable (recommend ≥ 4B)
-- [ ] Run the eval's shell task (`--allow-commands`) yourself; it was not run here because it lets a model run commands unattended
+- [ ] Run the eval's shell task (`--allow-commands`) on a spare machine: it lets a model run commands unattended, so it isn't part of the regular runs
 
 ## Phase 0 — Foundations
 
@@ -75,10 +73,10 @@ Built from scratch, no fork. See the [plan](design/PLAN.md) and the [UI spec](de
 - [x] Vault: logins / cards / contact info in the keychain, CSV import, secure secret card (`request_secret`), `use_login` → env vars for commands
 - [x] Computer: Docker desktop per bot (bound to 127.0.0.1), live view panel, start/stop/reset, `computer_run` tool
 - [x] Voice: dictation through any OpenAI-compatible transcription endpoint (Ctrl+D), read aloud with OS voices
-- [ ] Computer verified live (Docker wasn't running here; tested against a fake Docker runner)
+- [ ] Computer verified against a live Docker (so far tested against a fake Docker runner)
 - [ ] Teach a task by screen recording (written steps only for now)
 - [ ] Voice chat (calls), local speech-to-text without a provider
-- [ ] OAuth sign-in flows for apps (MCP servers that need OAuth must be configured with tokens for now)
+- [x] OAuth sign-in flows for apps (OAuth with PKCE through the user's browser; see "Apps, secrets and the browser" below)
 - [x] Secure sign-in to web pages with Vault logins (`browser_sign_in`)
 
 ## Phase 6 — Sharing, polish, ship
@@ -109,9 +107,10 @@ Built from scratch, no fork. See the [plan](design/PLAN.md) and the [UI spec](de
 
 ## Bots on the web ✅
 
-- [x] Real browser for bots (`playwright-core` driving installed Edge/Chrome, persistent bot-only profile, one tab per bot, window shown by default so you can watch and take over)
+- [x] Real browser for bots (`playwright-core` driving installed Edge/Chrome, persistent bot-only profiles, one tab per bot, window shown by default so you can watch and take over)
 - [x] Tools: web_search, browser_open/read/click/type/scroll/back/screenshot/handoff; pages come back as text in parts plus numbered elements
-- [x] Human checks, sign-ins and payments go to the user (browser_handoff); never typed: passwords, card numbers; "Buy/Send/Delete…" clicks ask first; the automated browser is never disguised
+- [x] Human checks, sign-ins and payments go to the user (browser_handoff); never typed: passwords, card numbers; "Buy/Send/Delete…" clicks ask first; human checks are never solved by the app
+- [x] "Look like an ordinary browser" (default on): no `--enable-automation` (so no `navigator.webdriver`, no automation bar) and no "Headless" in a hidden window's user agent; no CAPTCHA solving, fingerprint faking or proxies
 - [x] web_search: in the browser (Bing → DuckDuckGo, unrelated results rejected), Brave Search API, or SearXNG (Settings → Browser & search)
 - [x] fetch_url says when a page is a JavaScript shell (points to browser_open) or a 404 (don't guess addresses)
 - [x] Screenshots reach vision models; tool results carry images
@@ -153,6 +152,11 @@ Built from scratch, no fork. See the [plan](design/PLAN.md) and the [UI spec](de
 - [x] `screen_watch`: a short clip (2–6 frames over a few seconds) to follow videos and pages that change
 - [x] Live video in the Browser panel (Chrome screencast, up to ~15 fps while the page changes; falls back to stills when idle)
 - [ ] True realtime vision: not possible with local models today (Ollama takes still images, ~1.5 s per look on an RTX 4070)
+- [x] Audit fixes: a click that would land on a control that asks (under a pop-up or banner) is refused; checkboxes named by their label, not "on"; invisible reCAPTCHAs and articles about "security checks" no longer count as human checks; a Visual Bot on an Ollama model without vision says so; exact tool names; password-marked fields refused
+- [ ] `screen_go_to` says "home pages only" but doesn't enforce it: in evals MiMo and Qwen opened guessed deep addresses (a Google search URL, made-up GSMArena pages), which brought CAPTCHAs and 404s
+- [ ] Controls inside frames and shadow DOM get no box (clicks there can't be judged, so they ask), and typing into a field inside a frame is refused
+- [ ] `screen_watch` keeps the tab for up to 30 s after Stop; Enter and Space are judged by what had focus when the card was made, not when the key is pressed
+- [ ] Evals: Google answers repeated automated searches with a CAPTCHA, so `visual-google` measures Google's block after a few runs; it needs another first step
 
 ## Discussions (clusters) ✅
 
@@ -166,6 +170,55 @@ Built from scratch, no fork. See the [plan](design/PLAN.md) and the [UI spec](de
 - [x] "+ → New race": 3–5 racers (each on the shared model or its own) do the same task alone, in their own threads
 - [x] A judge scores them on criteria it picks, names a winner and compiles the final result from the best parts; Judge now / Stop
 
+## Trust & robustness
+
+- [x] Approvals expire (15 min) as `timeout`, told to the bot as "nobody answered" (not "the user denied"); each decision records who made it (user, rule, policy, group chat, timeout, stopped); answer, Stop and the clock can't settle a card twice
+- [x] Stream-idle watchdog: a cloud model silent for 5 min before its first chunk, or 3 min between chunks, ends as `stalled` (not as a user Stop) and frees the shared model; a local model gets 20 and 10 min (cold loads, long prompts and long tool calls are quiet for minutes); the clock starts after the model slot is acquired
+- [x] No-progress guard: the same call with the same result 3 times in a row (pictures included) ends the turn with a summary
+- [x] Restart recovery: cards nobody can answer are closed; a chat mid-way through an outward action (marked on the message _before_ the call runs, and on the coordinator's hand-off when a helper acts) ends as an error that says so, not as "stopped"
+- [x] NDJSON event log per chat, redacted, rotated, bounded, removed with the chat (`MROG_EVENT_LOG=off` turns it off)
+- [x] Bot computers get a process limit, a memory limit and no raw sockets or device nodes
+- [x] CI: actions pinned to commits, one `CI` job to require
+- [ ] Verify the computer limits against a live Docker (so far only the arguments are tested; the image's init runs as root and bots use `sudo`, which is why `--cap-drop ALL` and `no-new-privileges` are not applied)
+- [ ] Tune the watchdog limits on real hardware (the local 20 / 10 min and cloud 5 / 3 min are estimates); make them settings
+- [ ] A Settings switch for the event log (today only `MROG_EVENT_LOG=off`), and consider default-off; scrub deleted bots' instructions from `_app.ndjson`
+- [ ] Show who decided an approval (the `decidedBy` mark is saved on the message but not yet shown)
+- [ ] Questions (`ask_user`) can't time out; a long-unanswered one still holds its turn
+- [ ] Persisted record of each turn (state per transition) and a way to read the event log in the app
+- [ ] Publish a `SHA256SUMS` and a packaged-app smoke test in CI
+
+## Chat and bots
+
+- [x] Per-bot tool lists (`allow` / `exclude`, exclude wins, `name*` for a family): Details → Tools, filtered before the model sees them, with a prompt note and with the coordinator and browser guidance dropped when their tools are off
+- [x] Questions with choices (`ask_user` `options`, `multiple`): one tap, ticks, or typed; several picks kept one per line
+- [x] Errors in plain words with actions; `POST /api/threads/:id/retry` (answers again without a new user message; refuses a reply that may already have acted, one that is not the latest, a non-member bot)
+- [x] Slow-first-reply rescue (UI only, timed from the reply's own creation, longer for local models, nothing while queued); Switch model restarts the reply
+- [x] Unread badge, title count and "New messages" line (per viewer, counted while the app is open)
+- [x] Tail window over long chats (grows only; includes the first unread message)
+- [x] Aging in the model queue (one rank per minute waited, never beyond a user's chat)
+- [x] Focus trap in dialogs (only the top layer; menus and nested dialogs keep their own keyboard)
+- [ ] Unread counts are cleared when the app restarts, and replies that arrived while it was closed are never counted: the packaged app's address changes each launch, so browser storage doesn't carry over (the compact-sidebar choice has the same limit). Keeping "what the user last saw" on the server would fix both
+- [ ] Bot templates don't carry tool lists yet
+- [ ] Long chats are windowed, not virtualized; `content-visibility` was left out because it fights the scroll anchoring
+- [ ] The slow-reply limits (20 s, and 90 s for a local model) are estimates; make them settings
+- [ ] An allow list can be set through the API but not in the Details panel
+- [ ] A question can't time out; a long-unanswered one still holds its turn
+- [ ] Verified in Edge against a scripted fake Ollama; not yet checked in the Electron shell or on macOS and Linux
+
+## Apps, secrets and the browser
+
+- [x] MCP OAuth with PKCE: SDK auth provider, dynamic client registration, loopback callback (`/oauth/callback`, single-use 10-minute state, escaped page with a strict CSP), tokens in the keychain bound to the server address, refresh, forgotten on address change or removal; "Needs you to sign in" + **Sign in** in Settings
+- [x] Per-bot app grants (`tools.apps`: full / read / off) from `readOnlyHint` / `destructiveHint`, checked against a verb heuristic (stricter wins; unclear counts as a change); destructive tools always ask; helpers capped by their maker's list and grants
+- [x] Big app results kept per bot and chat (LRU, 100 entries / 8 MB) with a shape summary and `query_result` (paths, filters, search, lines); dropped with the chat or bot
+- [x] Secret scrubber over tool output, app results, errors and the event log (raw, percent, JSON, base64, Basic, card forms; 8 characters minimum), refreshed when secrets change
+- [x] `run_command` `secrets`: name the secrets one command gets; the card always asks
+- [x] Per-bot browser profiles (`browser-profiles/<bot>`, helpers share their maker's, a race or cluster shares one; at most 3 at once, LRU closed only after 2 minutes unused, busy, waiting or watched never; deleted with the bot or race, orphans swept at start; existing installs stay shared); open a bot's browser from the Browser panel, which has an address field now
+- [x] `MCP_OAUTH_` and `VAULT_ITEM_` entries are never given to commands or requested by bots; apps with a pasted `Authorization` header never go through OAuth
+- [ ] Sign-in for stdio apps that use OAuth (only HTTP apps go through the flow)
+- [ ] A grant setting per tool (today per app), and showing in the UI which hint or name decided a tool's kind
+- [ ] Moving sign-ins from the shared profile into a bot's own (today the user signs in again)
+- [ ] Per-bot profiles checked with several real Edge windows at once (the profile manager is tested against a stand-in browser; real Edge is tested shared)
+
 ## Fixes from the code audit
 
-- [x] Fix what the code audit found ([audit](design/audit-2026-11.md)); three items are only partly done
+- [x] Fix what a November 2026 code audit found; three items are only partly done

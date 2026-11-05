@@ -269,6 +269,24 @@ describe("computer", () => {
     }
   });
 
+  it("limits a new computer's processes, memory and privileges, and never gives it the host's network or devices", async () => {
+    const { bot } = await withBot();
+    const docker = fakeDocker({ running: false, available: true });
+    await new ComputerManager(h!.services, docker.runner).start(bot.id);
+    const run = docker.calls.find((args) => args[0] === "run")!;
+    expect(run).toEqual(
+      expect.arrayContaining(["--pids-limit=4096", "--memory=8g", "--cap-drop=NET_RAW", "--cap-drop=MKNOD"]),
+    );
+    // The image needs root for its init and sudo for the bot: these would break it, and must not creep in.
+    expect(run).not.toContain("--cap-drop=ALL");
+    expect(run).not.toContain("--privileged");
+    expect(run.join(" ")).not.toMatch(/--network[= ]host|--pid[= ]host|--net[= ]host|no-new-privileges/);
+    // Flags go before the image name, or docker would pass them to the container's command.
+    expect(run.indexOf("--pids-limit=4096")).toBeLessThan(
+      run.indexOf(`lscr.io/linuxserver/webtop:ubuntu-xfce`),
+    );
+  });
+
   it("finds computers still running from before a restart", async () => {
     const { bot } = await withBot();
     const docker = fakeDocker({ running: true, available: true, names: [`mrog-${bot.id}`] });

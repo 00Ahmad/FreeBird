@@ -9,7 +9,7 @@ import { useReact } from "../../hooks/team";
 import { downloadText, fileName } from "../../lib/export";
 import { ReadAloud } from "../voice/VoiceButton";
 
-/** Hover toolbar under a message: reply in thread, react, copy. Reactions only acknowledge (UI-SPEC §5). */
+/** Hover toolbar under a message: reply in thread, react, copy. Reactions only acknowledge. */
 export function MessageActions({
   message,
   saved: inLibrary,

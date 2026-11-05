@@ -35,7 +35,7 @@ Bots use tools, so pick a model that supports them, **4B parameters or more**:
 | `nemotron-3-nano:4b` | Passes the file tasks; completes coordinator tasks but is sloppier with helper names. Good for speed. |
 | `llama3.2:1b`        | Unreliable with tools. Not recommended.                                                               |
 
-Visual Bots need a model that can see images. Run the evals yourself to compare models on your hardware: see [Development](development.md#evals).
+Visual Bots need a model that can see images; with an Ollama model that can't, the reply says so. In the Visual Bot evals (a JavaScript shop, YouTube and Google, run several times each), `ornith-1.5:9b` was the most consistent, `maternion/mimo-v2.6:9b` close behind, and `qwen3.5:9b` sometimes answered before opening the page it was asked to open. Run the evals yourself to compare models on your hardware: see [Development](development.md#evals).
 
 Models without native tool calling still work: FreeBird falls back to a text protocol where the model writes tool calls in its reply, though results are better with native tools.
 

@@ -5,7 +5,9 @@ import type { Bot } from "@mrog/shared";
 import { BotAvatar, cn } from "@mrog/ui-kit";
 
 import { useUpdateBot } from "../hooks/bots";
+import { badgeText } from "../lib/unread";
 import { useUi } from "../state";
+import { useUnread } from "../unread";
 
 interface BotRowProps {
   bot: Bot;
@@ -19,6 +21,7 @@ export function BotRow({ bot, selected, compact, onContextMenu }: BotRowProps) {
   const select = useUi((state) => state.select);
   const startRename = useUi((state) => state.startRename);
   const busy = useUi((state) => Boolean(state.activity[bot.threadId]));
+  const unread = useUnread((store) => store.state.threads[bot.threadId]?.ids.length ?? 0);
   const renaming = useUi((state) => state.renamingBotId === bot.id) && !compact;
 
   if (renaming) return <RenameRow bot={bot} onDone={() => startRename(null)} />;
@@ -30,7 +33,7 @@ export function BotRow({ bot, selected, compact, onContextMenu }: BotRowProps) {
         onClick={() => select(bot.threadId)}
         onContextMenu={(event) => onContextMenu(event, bot)}
         aria-current={selected ? "page" : undefined}
-        aria-label={bot.name}
+        aria-label={unread > 0 ? `${bot.name}, ${unread} unread` : bot.name}
         title={bot.name}
         className={cn(
           "relative flex h-10 w-full items-center justify-center rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent",
@@ -40,6 +43,12 @@ export function BotRow({ bot, selected, compact, onContextMenu }: BotRowProps) {
         <BotAvatar avatar={bot.avatar} size={26} />
         {busy && (
           <span className="absolute top-1.5 right-1.5 size-1.5 animate-pulse rounded-full bg-accent" />
+        )}
+        {unread > 0 && (
+          <span
+            aria-hidden
+            className="absolute top-1 left-1.5 size-2.5 rounded-full bg-accent ring-2 ring-sidebar"
+          />
         )}
       </button>
     );
@@ -60,15 +69,32 @@ export function BotRow({ bot, selected, compact, onContextMenu }: BotRowProps) {
       )}
     >
       <BotAvatar avatar={bot.avatar} size={26} />
-      <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{bot.name}</span>
+      <span
+        className={cn("min-w-0 flex-1 truncate text-[13.5px]", unread > 0 ? "font-semibold" : "font-medium")}
+      >
+        {bot.name}
+      </span>
       {busy && (
         <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent" aria-label="Working" />
       )}
+      {unread > 0 && <UnreadBadge count={unread} />}
       {bot.isPrimary && (
         <Star size={13} className="shrink-0 fill-current text-warning" aria-label="Primary Bot" />
       )}
       {bot.pinned && !bot.isPrimary && <Pin size={13} className="shrink-0 text-ink-3" aria-label="Pinned" />}
     </button>
+  );
+}
+
+/** How many replies are waiting in a chat, as a small badge at the end of its row. */
+export function UnreadBadge({ count }: { count: number }) {
+  return (
+    <span
+      className="min-w-[18px] shrink-0 rounded-full bg-accent px-1.5 text-center text-[11px] leading-[18px] font-semibold text-accent-ink"
+      aria-label={`${count} unread`}
+    >
+      {badgeText(count)}
+    </span>
   );
 }
 

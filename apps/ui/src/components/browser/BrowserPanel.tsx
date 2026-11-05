@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type MouseEvent, type WheelEvent } from "r
 import type { Bot } from "@mrog/shared";
 import { Button, cn, IconButton } from "@mrog/ui-kit";
 
-import { useBrowser } from "../../hooks/phase5";
+import { useBrowser, useBrowserActions } from "../../hooks/phase5";
 import { api } from "../../lib/api";
 import { harnessInfo } from "../../lib/harness";
 import { useUi } from "../../state";
@@ -26,6 +26,8 @@ export function BrowserPanel({ bot }: { bot: Bot }) {
   // This chat's bot first, then its helpers and anyone else with a tab open.
   const [picked, setPicked] = useState<string | null>(null);
   const tab = tabs.find((t) => t.botId === picked) ?? tabs.find((t) => t.botId === bot.id) ?? tabs[0] ?? null;
+  const ownTab = tabs.some((t) => t.botId === bot.id);
+  const perBot = data?.settings.profiles === "per-bot";
 
   return (
     <aside
@@ -58,6 +60,11 @@ export function BrowserPanel({ bot }: { bot: Bot }) {
           ))}
         </div>
       )}
+      {tab && !ownTab && data?.settings.enabled && (
+        <div className="flex items-center gap-2 border-b border-border px-4 py-1.5">
+          <OpenForSignIn bot={bot} perBot={perBot} compact />
+        </div>
+      )}
       {tab ? (
         <LiveTab key={tab.botId} botId={tab.botId} url={tab.url} title={tab.title} />
       ) : (
@@ -66,9 +73,38 @@ export function BrowserPanel({ bot }: { bot: Bot }) {
           <p className="text-[13px] text-ink-2">
             No bot is browsing right now. When {bot.name} or its helpers open a page, it shows here live.
           </p>
+          {data?.settings.enabled && <OpenForSignIn bot={bot} perBot={perBot} />}
         </div>
       )}
     </aside>
+  );
+}
+
+/**
+ * Opens this chat's bot's own tab, so the user can sign in to sites for it. With per-bot profiles the sign-ins
+ * stay with this bot (and its helpers); with a shared profile every bot can use them.
+ */
+function OpenForSignIn({ bot, perBot, compact = false }: { bot: Bot; perBot: boolean; compact?: boolean }) {
+  const { open } = useBrowserActions();
+  return (
+    <div className={cn("flex flex-col gap-1.5", compact ? "w-full" : "mt-2 items-center")}>
+      <div className={cn("flex items-center gap-2", compact && "w-full")}>
+        <Button size="sm" variant="subtle" disabled={open.isPending} onClick={() => open.mutate(bot.id)}>
+          Open {bot.name}'s browser
+        </Button>
+        {compact && (
+          <span className="truncate text-[12px] text-ink-3">to sign in to sites for {bot.name}</span>
+        )}
+      </div>
+      {!compact && (
+        <p className="max-w-72 text-[12px] text-ink-3">
+          {perBot
+            ? `Sign in to sites there and ${bot.name} stays signed in. Other bots don't get these sign-ins.`
+            : "Sign in to sites there and the bots stay signed in. All bots share these sign-ins."}
+        </p>
+      )}
+      {open.error && <p className="text-[12px] text-danger">{open.error.message}</p>}
+    </div>
   );
 }
 
@@ -76,6 +112,7 @@ function LiveTab({ botId, url, title }: { botId: string; url: string; title: str
   const [picture, setPicture] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
+  const [address, setAddress] = useState("");
   const [live, setLive] = useState(false);
   const refresh = useRef<() => void>(() => {});
   const lastScroll = useRef(0);
@@ -188,6 +225,27 @@ function LiveTab({ botId, url, title }: { botId: string; url: string; title: str
         {title ? `${title} · ` : ""}
         {url}
       </div>
+      <form
+        className="flex items-center gap-1.5 border-b border-border px-3 py-1.5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const typed = address.trim();
+          if (!typed) return;
+          void act("go", { url: /^https?:\/\//i.test(typed) ? typed : `https://${typed}` });
+          setAddress("");
+        }}
+      >
+        <input
+          value={address}
+          onChange={(event) => setAddress(event.target.value)}
+          placeholder="Go to an address, e.g. to sign in"
+          aria-label="Open an address in this tab"
+          className="h-7 min-w-0 flex-1 rounded-lg border border-border bg-bg px-2.5 text-[12.5px] outline-none focus:border-accent"
+        />
+        <Button size="sm" variant="subtle" type="submit" disabled={!address.trim()}>
+          Go
+        </Button>
+      </form>
       <div className="min-h-0 flex-1 overflow-auto bg-bg p-2">
         {picture ? (
           <img

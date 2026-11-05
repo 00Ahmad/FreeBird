@@ -19,6 +19,8 @@ export interface HarnessConfig {
   keyringService: string;
   /** The keychain service secrets were saved under before the app was renamed; they move to `keyringService`. */
   previousKeyringService: string | null;
+  /** Keep the on-disk record of events (`<data>/logs`, see eventlog.ts). `MROG_EVENT_LOG=off` turns it off. */
+  eventLog: boolean;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -57,5 +59,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HarnessConfig 
     vault: env.MROG_VAULT === "memory" ? "memory" : "keyring",
     keyringService: env.MROG_KEYRING_SERVICE ?? "FreeBird",
     previousKeyringService: env.MROG_KEYRING_PREVIOUS ?? (env.MROG_KEYRING_SERVICE ? null : "OpenMrogBog"),
+    eventLog: !/^(off|0|false|no)$/i.test(env.MROG_EVENT_LOG ?? ""),
   };
 }

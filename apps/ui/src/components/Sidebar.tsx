@@ -30,7 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import type { Bot, Thread } from "@mrog/shared";
@@ -43,12 +43,30 @@ import { useNewBot, useNewVisualBot } from "../hooks/useNewBot";
 import { api } from "../lib/api";
 import { isMac } from "../lib/harness";
 import { importTemplate } from "../lib/templates";
+import { titleWithUnread, totalUnread } from "../lib/unread";
 import { useUi } from "../state";
-import { BotRow } from "./BotRow";
+import { useUnread } from "../unread";
+import { BotRow, UnreadBadge } from "./BotRow";
 import { ConnectionStatus } from "./ConnectionStatus";
 import { ContextMenu, type MenuEntry } from "./ContextMenu";
 
 export const BOT_SEARCH_ID = "bot-search";
+
+/** The unread badge on a group's row (a dot when the sidebar is compact). */
+function GroupUnread({ threadId, compact }: { threadId: string; compact: boolean }) {
+  const count = useUnread((store) => store.state.threads[threadId]?.ids.length ?? 0);
+  if (count === 0) return null;
+  return compact ? (
+    <span
+      aria-label={`${count} unread`}
+      className="absolute top-1 left-1.5 size-2.5 rounded-full bg-accent ring-2 ring-sidebar"
+    />
+  ) : (
+    <UnreadBadge count={count} />
+  );
+}
+
+const WINDOW_TITLE = typeof document === "undefined" ? "FreeBird" : document.title || "FreeBird";
 
 /** Bots shown in the main list, in order; used by keyboard navigation too. */
 export function visibleBots(bots: Bot[] | undefined, query: string): Bot[] {
@@ -123,6 +141,23 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
       .filter((thread) => !needle || groupTitle(thread, botMap).toLowerCase().includes(needle))
       .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }, [threads, botMap, query]);
+  // The count in the window title covers the chats this sidebar shows, whatever is typed in its search box.
+  const shownThreadIds = useMemo(
+    () => [
+      ...visibleBots(bots, "").map((bot) => bot.threadId),
+      ...(threads ?? []).filter((thread) => thread.kind === "group").map((thread) => thread.id),
+    ],
+    [bots, threads],
+  );
+  const unreadTotal = useUnread((store) => totalUnread(store.state, shownThreadIds));
+  useEffect(() => {
+    document.title = titleWithUnread(WINDOW_TITLE, unreadTotal);
+  }, [unreadTotal]);
+  // Counts for chats that are gone.
+  useEffect(() => {
+    if (threads) useUnread.getState().prune(new Set(threads.map((thread) => thread.id)));
+  }, [threads]);
+
   const clusters = useMemo(() => groups.filter((thread) => thread.cluster && !thread.race), [groups]);
   const races = useMemo(() => groups.filter((thread) => thread.race), [groups]);
   const groupChats = useMemo(() => groups.filter((thread) => !thread.cluster), [groups]);
@@ -400,7 +435,7 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
                     aria-current={thread.id === selectedThreadId ? "page" : undefined}
                     title={groupTitle(thread, botMap)}
                     className={cn(
-                      "flex h-10 w-full items-center gap-2.5 rounded-lg px-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent",
+                      "relative flex h-10 w-full items-center gap-2.5 rounded-lg px-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent",
                       thread.id === selectedThreadId ? "bg-selected" : "hover:bg-hover",
                       compactSidebar && "justify-center px-0",
                     )}
@@ -418,6 +453,7 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
                         {groupTitle(thread, botMap)}
                       </span>
                     )}
+                    <GroupUnread threadId={thread.id} compact={compactSidebar} />
                   </button>
                 ))}
               </div>

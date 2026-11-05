@@ -80,6 +80,12 @@ export function useConnectorActions() {
       mutationFn: (id: string) => api(`/connectors/${id}`, { method: "DELETE" }),
       onSuccess: invalidate,
     }),
+    /** The address to sign in at, or `connected` when no sign-in was needed after all. */
+    signIn: useMutation({
+      mutationFn: (id: string) =>
+        api<{ url: string } | { connected: true }>(`/connectors/${id}/sign-in`, { method: "POST" }),
+      onSuccess: invalidate,
+    }),
   };
 }
 
@@ -167,8 +173,9 @@ export function useBrowserActions() {
       mutationFn: (settings: BrowserSettings) => api("/browser/settings", { method: "PUT", body: settings }),
       onSuccess: invalidate,
     }),
+    /** Opens the window: a bot's own tab (and profile) when `botId` is given, else the shared profile's. */
     open: useMutation({
-      mutationFn: () => api("/browser/open", { method: "POST" }),
+      mutationFn: (botId?: string) => api("/browser/open", { method: "POST", body: botId ? { botId } : {} }),
       onSettled: invalidate,
     }),
     close: useMutation({

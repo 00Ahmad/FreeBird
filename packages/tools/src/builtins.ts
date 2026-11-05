@@ -166,25 +166,57 @@ const runCommand = defineTool({
     process.platform === "win32"
       ? "Run a command in Windows PowerShell 5.1 (not bash) on this computer. Runs in your own folder unless cwd is given. Write PowerShell: variables start with $, `curl` is Invoke-WebRequest (no -s/-L/-A flags), and there is no grep, head, /tmp or /dev/null (use Select-String, Select-Object -First, your folder, $null). To read a web page, use fetch_url instead."
       : "Run a shell command on this computer. Runs in your own folder unless cwd is given.",
+  // A model may send the names as one string ("A, B") or a single name.
+  prepare: (args) => ({
+    ...args,
+    secrets:
+      typeof args.secrets === "string"
+        ? args.secrets.split(/[\s,]+/).filter(Boolean)
+        : Array.isArray(args.secrets) && args.secrets.length === 0
+          ? undefined
+          : args.secrets,
+  }),
   args: z.object({
     command: z.string().min(1).describe("The command line"),
     cwd: z.string().optional().describe("Working folder"),
     timeout_seconds: z.number().int().min(1).max(600).default(120),
+    secrets: z
+      .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/))
+      .max(10)
+      .optional()
+      .describe(
+        "Names of secrets you were given (with request_secret or use_login) to pass to this command as environment variables. Only the ones named here reach it.",
+      ),
   }),
   risk(args) {
     const badges: string[] = [];
     if (looksDestructive(args.command)) badges.push(BADGES.irreversible);
     if (looksSecuritySensitive(args.command)) badges.push(BADGES.security);
-    return { level: "ask", kind: "terminal", badges, summary: args.command };
+    // A command that is given secrets is always shown with them, so the user sees where each one goes.
+    if (args.secrets?.length) badges.push(BADGES.secrets);
+    const summary = args.secrets?.length
+      ? `${args.command}\n(with your secrets: ${args.secrets.join(", ")})`
+      : args.command;
+    return { level: "ask", kind: "terminal", badges, summary };
   },
   async run(args, ctx) {
+    // Only the secrets this command names, and only ones the bot was given: a later command doesn't receive them
+    // just because they were granted once.
+    const granted = ctx.env ?? {};
+    const missing = (args.secrets ?? []).filter((name) => !(name in granted));
+    if (missing.length > 0) {
+      throw new Error(
+        `You haven't been given ${missing.join(", ")}. Ask for it with request_secret (or use_login for a website's login) first.`,
+      );
+    }
+    const env = Object.fromEntries((args.secrets ?? []).map((name) => [name, granted[name]!]));
     const cwd = resolvePath(ctx.workspace, args.cwd ?? ".").abs;
     await mkdir(cwd, { recursive: true });
     const result = await runShell(args.command, {
       cwd,
       timeoutMs: args.timeout_seconds * 1000,
       signal: ctx.signal,
-      env: ctx.env,
+      env,
     });
     return formatCommandResult(result, args.timeout_seconds);
   },
@@ -201,13 +233,76 @@ const fetchUrl = defineTool({
     fetchReadable(args.url, ctx.signal, fetch, { allowPrivate: mayReachLocal(args, args.url) }),
 });
 
+const MAX_OPTIONS = 6;
+const MAX_OPTION_LENGTH = 100;
+
+/**
+ * The choices a model wrote, as a clean list: it may send a real array, a JSON string of one, a bulleted or numbered
+ * list in a string, or objects like {label}. Fewer than two usable choices is not a choice at all: undefined.
+ */
+export function cleanOptions(value: unknown): string[] | undefined {
+  let list: unknown = value;
+  if (typeof list === "string") {
+    const text = list.trim();
+    if (!text) return undefined;
+    try {
+      list = JSON.parse(text);
+    } catch {
+      // One per line. Not split on commas: a choice like "Paris, France" has one in it.
+      list = text.split(/\r?\n/);
+    }
+  }
+  if (!Array.isArray(list)) return undefined;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of list) {
+    const raw =
+      typeof item === "string"
+        ? item
+        : item && typeof item === "object"
+          ? ["label", "text", "value", "name", "title"]
+              .map((key) => (item as Record<string, unknown>)[key])
+              .find((candidate): candidate is string => typeof candidate === "string")
+          : typeof item === "number"
+            ? String(item)
+            : undefined;
+    // Bullets and numbering a model puts in front of a line.
+    const text = raw
+      ?.trim()
+      .replace(/^(?:[-*•]|\d{1,2}[.)])\s+/, "")
+      .trim();
+    if (!text || text.length > MAX_OPTION_LENGTH || seen.has(text.toLowerCase())) continue;
+    seen.add(text.toLowerCase());
+    out.push(text);
+  }
+  return out.length >= 2 ? out.slice(0, MAX_OPTIONS) : undefined;
+}
+
 const askUser = defineTool({
   name: "ask_user",
   description:
-    "Ask the user a short question and wait for the answer. Use only when you can't proceed without it.",
-  args: z.object({ question: z.string().min(1).max(1000) }),
+    "Ask the user a short question and wait for the answer. Use only when you can't proceed without it. If the answer is one of a few known choices, pass them as options (2 to 6 short strings) so the user can tap one; set multiple to true to let them pick several. They can always type something else.",
+  prepare: (args) => ({
+    question: args.question,
+    options: cleanOptions(args.options),
+    multiple: args.multiple,
+  }),
+  args: z.object({
+    question: z.string().min(1).max(1000),
+    options: z.array(z.string().min(1).max(MAX_OPTION_LENGTH)).min(2).max(MAX_OPTIONS).optional(),
+    multiple: z.boolean().optional(),
+  }),
   risk: (args) => safe(args.question),
-  run: async (args, ctx) => `The user answered: ${await ctx.ask(args.question)}`,
+  run: async (args, ctx) => {
+    const answer = await ctx.ask(args.question, { options: args.options, multiple: args.multiple });
+    // Several picks come back one per line; listed one per line to the bot too, since a choice may contain a comma.
+    return args.options && args.multiple
+      ? `The user chose:\n${answer
+          .split("\n")
+          .map((line) => `- ${line}`)
+          .join("\n")}`
+      : `The user answered: ${answer}`;
+  },
 });
 
 export const BUILTIN_TOOLS: ToolSpec[] = [

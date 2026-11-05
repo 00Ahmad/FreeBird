@@ -22,7 +22,7 @@ export const ConnectorConfig = z.object({
   name: z.string().min(1).max(60),
   transport: ConnectorTransport,
   enabled: z.boolean(),
-  /** Per-tool toggles (UI-SPEC §9): tools listed here are hidden from bots. */
+  /** Per-tool toggles: tools listed here are hidden from bots. */
   disabledTools: z.array(z.string()),
   /** Ask before each use (default) or let bots use it freely. */
   askBeforeUse: z.boolean(),
@@ -41,7 +41,8 @@ export type AddConnectorInput = z.infer<typeof AddConnectorInput>;
 export const UpdateConnectorInput = ConnectorConfig.omit({ id: true }).partial();
 export type UpdateConnectorInput = z.infer<typeof UpdateConnectorInput>;
 
-export const ConnectorState = z.enum(["off", "connecting", "connected", "error"]);
+/** "auth": the app wants the user to sign in (OAuth) before it can be used. */
+export const ConnectorState = z.enum(["off", "connecting", "connected", "error", "auth"]);
 
 export const ConnectorView = ConnectorConfig.extend({
   state: ConnectorState,
