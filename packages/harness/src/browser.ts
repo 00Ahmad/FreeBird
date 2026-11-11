@@ -3,7 +3,7 @@ import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { chromium, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type BrowserContext, type Frame, type Page } from "playwright-core";
 import { z } from "zod";
 
 import {
@@ -23,6 +23,7 @@ import {
   NOT_FOUND_NOTE,
   resolvesPrivately,
   safe,
+  type Risk,
   type ToolContext,
   type ToolResult,
   type ToolSpec,
@@ -91,6 +92,8 @@ export interface PageElement {
   h?: number;
   /** A search box by what the page says it is (Enter there only searches). */
   search?: boolean;
+  /** What a text box holds now (never for a password or card field), so the bot can see what it typed. */
+  holds?: string;
 }
 
 const AREAS = [
@@ -126,7 +129,9 @@ export function formatScreenMap(elements: PageElement[]): string {
       // Whole characters, so an emoji is never cut in half.
       const characters = [...element.label];
       const name = characters.length > 60 ? `${characters.slice(0, 59).join("")}…` : element.label;
-      return `[${element.ref}] ${element.kind}${name ? ` "${name}"` : ""}`;
+      const held = element.holds ? [...element.holds] : [];
+      const holds = held.length > 40 ? `${held.slice(0, 39).join("")}…` : element.holds;
+      return `[${element.ref}] ${element.kind}${name ? ` "${name}"` : ""}${holds ? ` holding "${holds}"` : ""}`;
     });
     lines.push(`${title}: ${entries.join(" · ")}`);
   }
@@ -166,6 +171,27 @@ const HUMAN_CHECK_TEST = `((text) => {
 })`;
 
 /**
+ * What makes a box a secret one (a password, a card number or code), in the site's own words. Tokens of the
+ * autocomplete value count ("billing cc-number"), and so do the box's name, id, placeholder and label. One
+ * definition for the page scripts and this side, so they can't disagree.
+ */
+const SECRET_AUTOCOMPLETE = /(?:^|\s)(?:cc-\S*|(?:current|new)-password)(?=\s|$)/i;
+const SECRET_HINT =
+  /(?<![a-z])(?:card|cc)[\s_-]*(?:number|num|no)(?![a-z])|credit[\s_-]*card|(?<![a-z0-9])(?:cvc|cvv|cvn|csc)(?![a-z0-9])|security[\s_-]*code/i;
+
+/** A box for a password or a card number: by its type, or by what the site says it holds ("show password" included). */
+export const isSecretField = (type: string, autocomplete: string, hints = "") =>
+  type.toLowerCase() === "password" || SECRET_AUTOCOMPLETE.test(autocomplete) || SECRET_HINT.test(hints);
+
+/** In-page function: is this a box for a password or card number? (The same rule as isSecretField.) */
+export const SECRET_FIELD = `((el) => {
+  if (!el.matches("input, textarea, [contenteditable], [role=textbox]")) return false;
+  const hints = ["name", "id", "placeholder", "aria-label"].map((name) => el.getAttribute(name) || "").join(" ");
+  return (el.getAttribute("type") || "").toLowerCase() === "password" ||
+    ${SECRET_AUTOCOMPLETE}.test(el.getAttribute("autocomplete") || "") || ${SECRET_HINT}.test(hints);
+})`;
+
+/**
  * In-page function: is this a search box? Decided only by what the page says the box is (its type, role or name),
  * never by what has been typed into it, so typing "search" into a message box doesn't make Enter there safe.
  */
@@ -179,7 +205,7 @@ const IS_SEARCH_BOX = `((el) => {
 
 /** Things a person could click or type into, for Visual Bots' boxes. */
 const CONTROLS =
-  "a[href], button, input:not([type=hidden]), textarea, select, summary, [role=button], [role=link], [role=tab], [role=checkbox], [role=option], [role=menuitem], [role=combobox], [role=searchbox], [onclick]";
+  "a[href], button, input:not([type=hidden]), textarea, select, summary, [role=button], [role=link], [role=tab], [role=checkbox], [role=option], [role=menuitem], [role=combobox], [role=searchbox], [role=textbox], [contenteditable=''], [contenteditable=true], [onclick]";
 
 /**
  * In-page function: what a control is and the name a person would read on (or next to) it, for Visual Bots' screen
@@ -187,31 +213,37 @@ const CONTROLS =
  * never part of a name.
  */
 const DESCRIBE_CONTROL = `((el) => {
-  const secret = (el.getAttribute("type") || "").toLowerCase() === "password" ||
-    /^cc-/.test((el.getAttribute("autocomplete") || "").toLowerCase());
+  const secret = ${SECRET_FIELD}(el);
   // A checkbox's or radio's value is usually just "on": its name is the label next to it ("I agree to the terms").
   const tick = /^(checkbox|radio)$/i.test(el.getAttribute("type") || "");
   const labelled = el.labels && el.labels.length ? [...el.labels].map((label) => label.innerText).join(" ") : "";
-  const text = (el.getAttribute("aria-label") || el.innerText || labelled || (secret || tick ? "" : el.value) || el.getAttribute("placeholder") ||
-    el.getAttribute("title") || el.querySelector("img[alt]")?.getAttribute("alt") || el.querySelector("svg title")?.textContent || "")
-    .replace(/\\s+/g, " ").trim();
   const element = el.tagName.toLowerCase();
   const role = el.getAttribute("role");
   const type = (el.getAttribute("type") || "text").toLowerCase();
+  const pressable = element === "input" && /^(submit|button|image|reset)$/.test(type);
+  // A box you type into: its name is its label, and what's in it is said apart, so typed text is never taken for
+  // the name (and the bot can see what the box holds).
+  const typing = !secret && !tick && !pressable &&
+    (element === "input" || element === "textarea" || el.isContentEditable || role === "textbox" || role === "searchbox");
+  const text = (el.getAttribute("aria-label") || (typing ? "" : el.innerText) || labelled || (secret || tick || typing ? "" : el.value) ||
+    el.getAttribute("placeholder") || el.getAttribute("aria-placeholder") || el.getAttribute("data-placeholder") ||
+    el.getAttribute("title") || el.querySelector("img[alt]")?.getAttribute("alt") || el.querySelector("svg title")?.textContent || "")
+    .replace(/\\s+/g, " ").trim();
+  const held = typing ? String((el.isContentEditable ? el.innerText : el.value) || "").replace(/\\s+/g, " ").trim() : "";
   const kind =
     element === "input" && (type === "search" || role === "combobox" || role === "searchbox") ? "search box" :
     role === "searchbox" || role === "combobox" ? "search box" :
     element === "input" && type === "password" ? "password box" :
     element === "input" && (type === "checkbox" || type === "radio") ? type :
     element === "input" && /^(submit|button|image|reset)$/.test(type) ? "button" :
-    element === "input" || element === "textarea" ? "text box" :
+    element === "input" || element === "textarea" || el.isContentEditable || role === "textbox" ? "text box" :
     element === "select" ? "dropdown" :
     role === "tab" ? "tab" :
     role === "checkbox" ? "checkbox" :
     element === "a" || role === "link" ? (el.querySelector("img, video") ? "picture link" : "link") :
     "button";
   // Whole characters, so an emoji is never cut in half.
-  return { kind, label: [...text].slice(0, 90).join(""), search: ${IS_SEARCH_BOX}(el) };
+  return { kind, label: [...text].slice(0, 90).join(""), search: ${IS_SEARCH_BOX}(el), ...(held ? { holds: [...held].slice(0, 80).join("") } : {}) };
 })`;
 
 /** Of a page's text, at most this much is read: as many parts as browser_read can ask for. */
@@ -244,9 +276,7 @@ const SNAPSHOT_SCRIPT = `(() => {
     if (style.visibility !== "hidden" && style.display !== "none") picked.push(el);
   }
   // What's typed into a password or card field never leaves the page.
-  const secret = (el) =>
-    (el.getAttribute("type") || "").toLowerCase() === "password" ||
-    /^cc-/.test((el.getAttribute("autocomplete") || "").toLowerCase());
+  const secret = ${SECRET_FIELD};
   // A checkbox's or radio's value is usually just "on": its name is the label next to it.
   const tick = (el) => /^(checkbox|radio)$/i.test(el.getAttribute("type") || "");
   const labelled = (el) => el.labels && el.labels.length ? [...el.labels].map((l) => l.innerText).join(" ") : "";
@@ -279,7 +309,7 @@ const HUMAN_CHECK_SCRIPT = `${HUMAN_CHECK_TEST}((document.body ? document.body.i
  * can say which thing it chose by looking ("the Daraz result is box 7"). Refs are data-mrog-ref, like snapshots,
  * so clicks and sign-in find the same element. Labels feed the screen map and approval cards.
  */
-const MARKS_SCRIPT = `(() => {
+export const MARKS_SCRIPT = `(() => {
   document.getElementById("mrog-marks")?.remove();
   for (const el of document.querySelectorAll("[data-mrog-ref]")) el.removeAttribute("data-mrog-ref");
   const describe = ${DESCRIBE_CONTROL};
@@ -306,8 +336,14 @@ const MARKS_SCRIPT = `(() => {
     frame.style.cssText = "position:fixed;border:2px solid " + color + ";border-radius:3px;left:" + box.left + "px;top:" + box.top + "px;width:" + box.width + "px;height:" + box.height + "px";
     const tag = document.createElement("div");
     tag.textContent = String(n);
-    tag.style.cssText = "position:absolute;left:-2px;top:-2px;transform:translateY(-100%);background:" + color + ";color:#fff;font:bold 12px/15px Arial,sans-serif;padding:0 4px;border-radius:3px 3px 3px 0";
-    if (box.top < 16) tag.style.transform = "none";
+    // The number sits level with its own box, on its left: drawn above the box, in a tight list it landed on the row
+    // before and covered that row's first letter, so models read it as the number of the wrong item. With no room
+    // on the left, it goes inside the box's top-left corner.
+    tag.style.cssText = "position:absolute;left:-2px;top:-2px;transform:translateX(-100%);background:" + color + ";color:#fff;font:bold 12px/15px Arial,sans-serif;padding:0 4px;border-radius:3px 0 0 3px";
+    if (box.left < 26) {
+      tag.style.transform = "none";
+      tag.style.borderRadius = "0 0 3px 0";
+    }
     frame.appendChild(tag);
     layer.appendChild(frame);
     const middleX = (box.left + box.width / 2) / innerWidth;
@@ -336,13 +372,64 @@ const FOCUSED_SCRIPT = `(() => {
 })()`;
 
 /**
- * A box for a password or a card number: by its type, or by what the site says it holds (a password shown as plain
- * text by a "show password" switch is still one).
+ * Runs in a page or frame: marks the boxes for passwords and card numbers, for a screenshot to cover (see shoot()).
+ * Returns how many there are.
  */
-const isSecretField = (type: string, autocomplete: string) =>
-  type === "password" ||
-  autocomplete.startsWith("cc-") ||
-  /(?:^|\s)(?:current|new)-password\b/.test(autocomplete);
+const MARK_SECRETS_SCRIPT = `(() => {
+  const secret = ${SECRET_FIELD};
+  const fields = [...document.querySelectorAll("input, textarea, [contenteditable], [role=textbox]")].filter(secret);
+  for (const el of fields) el.setAttribute("data-mrog-secret", "");
+  return fields.length;
+})()`;
+
+/** Takes the marks of MARK_SECRETS_SCRIPT off again. */
+const UNMARK_SECRETS_SCRIPT = `for (const el of document.querySelectorAll("[data-mrog-secret]")) el.removeAttribute("data-mrog-secret")`;
+
+/**
+ * What has keyboard focus, for typing: whether it holds a secret, and what kind of thing it is. Only the element
+ * itself is looked at, so a button is no more a box for text than a link.
+ */
+const TYPING_TARGET_SCRIPT = `(() => {
+  const el = document.activeElement;
+  if (!el) return null;
+  const tag = el.tagName;
+  return {
+    tag,
+    type: tag === "INPUT" ? el.type : "",
+    multiline: tag === "TEXTAREA" || el.isContentEditable,
+    secret: ${SECRET_FIELD}(el),
+  };
+})()`;
+
+/** What TYPING_TARGET_SCRIPT says about the focused element. */
+interface TypingTarget {
+  tag: string;
+  type: string;
+  multiline: boolean;
+  secret: boolean;
+}
+
+/** Input types that hold text a person types (dates are typed digit by digit). */
+const TEXT_INPUT_TYPES = new Set([
+  "text",
+  "search",
+  "email",
+  "url",
+  "tel",
+  "number",
+  "date",
+  "datetime-local",
+  "month",
+  "week",
+  "time",
+]);
+
+/**
+ * Whether keys typed now go into text: a text area, an editable region or a text-like input. Typing at a button,
+ * checkbox or submit button would press it (Space and Enter click them), so those are no place to type.
+ */
+export const takesTyping = (target: Pick<TypingTarget, "tag" | "type" | "multiline"> | null): boolean =>
+  Boolean(target && (target.multiline || (target.tag === "INPUT" && TEXT_INPUT_TYPES.has(target.type))));
 
 /**
  * In-page function: what a click at (x, y) would really land on (whatever is on top there), and whether that is box
@@ -497,6 +584,8 @@ export class BrowserManager {
   /** Whether this install had the shared profile before per-bot profiles existed (checked once). */
   private hadSharedProfile: boolean | undefined;
   private readonly pages = new Map<string, Page>();
+  /** Tabs being opened in each profile, one after another (see page()). */
+  private readonly opening = new Map<string, Promise<void>>();
   /** The elements each bot last saw, so a click's approval card can say what will be clicked. */
   private readonly seen = new Map<string, Map<number, PageElement>>();
   /** Each bot's latest page snapshot, so further parts of its text are read without numbering the page again. */
@@ -898,16 +987,44 @@ export class BrowserManager {
     if (approved || isPrivateHost(target.hostname)) this.allowedHosts.add(target.host);
   }
 
-  /** The bot's own tab, opened on first use. A persistent profile starts with one blank tab: reuse it. */
-  private async page(botId: string): Promise<Page> {
-    if (this.gone.has(botId)) throw new Error("This bot was deleted.");
+  /** The bot's open tab, if it has one. */
+  private openTabOf(botId: string): Page | undefined {
     const existing = this.pages.get(botId);
-    if (existing && !existing.isClosed()) {
-      const profile = this.profiles.get(this.tabProfile.get(botId) ?? "");
-      if (profile) profile.usedAt = Date.now();
-      return existing;
-    }
+    if (!existing || existing.isClosed()) return undefined;
+    const profile = this.profiles.get(this.tabProfile.get(botId) ?? "");
+    if (profile) profile.usedAt = Date.now();
+    return existing;
+  }
+
+  /**
+   * The bot's own tab, opened on first use. Tabs of one profile are opened one at a time: bots sharing a profile
+   * (racers, a cluster, a helper and its maker) all wake up together when the browser has started, and each would
+   * otherwise pick the same blank tab. Two bots in one tab renumber each other's boxes, so a click approved as
+   * "Next" lands on the other bot's "Place order".
+   */
+  private page(botId: string): Promise<Page> {
+    if (this.gone.has(botId)) return Promise.reject(new Error("This bot was deleted."));
+    const existing = this.openTabOf(botId);
+    if (existing) return Promise.resolve(existing);
     const key = this.profileKey(botId);
+    const mine = (this.opening.get(key) ?? Promise.resolve()).then(() => this.openTab(botId, key));
+    const settled = mine.then(
+      () => {},
+      () => {},
+    );
+    this.opening.set(key, settled);
+    void settled.then(() => {
+      if (this.opening.get(key) === settled) this.opening.delete(key);
+    });
+    return mine;
+  }
+
+  /** A persistent profile starts with one blank tab: reuse it if no other bot has it. */
+  private async openTab(botId: string, key: string): Promise<Page> {
+    if (this.gone.has(botId)) throw new Error("This bot was deleted.");
+    // Opened by an earlier call in the line.
+    const existing = this.openTabOf(botId);
+    if (existing) return existing;
     const context = await this.ensureContext(key);
     if (this.gone.has(botId)) throw new Error("This bot was deleted.");
     const taken = new Set(this.pages.values());
@@ -982,7 +1099,32 @@ export class BrowserManager {
           { cause: error },
         );
       }
-      throw error;
+      // The browser's own words (and its call log) mean nothing to a model: say what happened and what to do.
+      const message = (error as Error).message;
+      // A page that failed to load is followed by the browser's error page; let it finish, or it cuts the bot's
+      // next page load short ("interrupted by another navigation").
+      if (/net::ERR_/.test(message)) {
+        await page.waitForURL(/^chrome-error:/, { timeout: 3000 }).catch(() => {});
+        await page.waitForLoadState("load", { timeout: 3000 }).catch(() => {});
+      }
+      if (/ERR_HTTP_RESPONSE_CODE_FAILURE/.test(message))
+        throw new Error(`${url} answered with an error and no page. ${NOT_FOUND_NOTE}`, { cause: error });
+      if (/ERR_NAME_NOT_RESOLVED|ERR_ADDRESS_UNREACHABLE/.test(message))
+        throw new Error(
+          `There's no site at ${new URL(url).host}. Check the address, or find the site with a search.`,
+          {
+            cause: error,
+          },
+        );
+      if (
+        /ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_CONNECTION_TIMED_OUT|ERR_TIMED_OUT|Timeout/.test(
+          message,
+        )
+      )
+        throw new Error(`${new URL(url).host} didn't answer. Try again in a moment, or try another site.`, {
+          cause: error,
+        });
+      throw new Error(message.split("\n")[0], { cause: error });
     }
   }
 
@@ -1043,9 +1185,10 @@ export class BrowserManager {
 
   async type(botId: string, ref: number, text: string, submit: boolean): Promise<PageSnapshot> {
     const { page, locator } = await this.element(botId, ref);
-    const type = ((await locator.getAttribute("type")) ?? "").toLowerCase();
-    const autocomplete = ((await locator.getAttribute("autocomplete")) ?? "").toLowerCase();
-    if (isSecretField(type, autocomplete)) {
+    const secret = await page.evaluate(
+      `(() => { const el = document.querySelector('[data-mrog-ref="${ref}"]'); return Boolean(el) && ${SECRET_FIELD}(el); })()`,
+    );
+    if (secret === true) {
       throw new Error(
         "Bots don't type passwords or card numbers. Ask the user to fill this in with browser_handoff.",
       );
@@ -1082,9 +1225,38 @@ export class BrowserManager {
     return this.snapshot(botId);
   }
 
+  /**
+   * A picture of the tab for the model. Password and card boxes (and "show password" ones) are covered while it is
+   * taken: what's typed in them is never to be read off a picture, whoever typed it (the user, during a handoff).
+   * The boxes keep their values, and the marks are taken off again.
+   */
+  private async shoot(page: Page, quality: number): Promise<Buffer> {
+    const frames = page.frames();
+    const covered: Frame[] = [];
+    try {
+      await Promise.all(
+        frames.map(async (frame) => {
+          try {
+            if (((await frame.evaluate(MARK_SECRETS_SCRIPT)) as number) > 0) covered.push(frame);
+          } catch (error) {
+            // A frame that is gone has nothing to hide; the page itself must be covered or nothing is taken.
+            if (frame === page.mainFrame()) throw error;
+          }
+        }),
+      );
+      return await page.screenshot({
+        type: "jpeg",
+        quality,
+        mask: covered.map((frame) => frame.locator("[data-mrog-secret]")),
+      });
+    } finally {
+      await Promise.all(covered.map((frame) => frame.evaluate(UNMARK_SECRETS_SCRIPT).catch(() => {})));
+    }
+  }
+
   async screenshot(botId: string): Promise<{ url: string; data: string }> {
     const page = await this.page(botId);
-    const data = (await page.screenshot({ type: "jpeg", quality: 60 })).toString("base64");
+    const data = (await this.shoot(page, 60)).toString("base64");
     return { url: page.url(), data };
   }
 
@@ -1242,7 +1414,7 @@ export class BrowserManager {
         description: "Click a link or button on the page, by its number from the list.",
         args: z.object({ ref: z.number().int().min(1) }),
         // Judged like a Visual Bot's click: buttons with no name, and numbers it hasn't seen, ask too.
-        risk: (args) => clickRisk(this.seen.get(id)?.get(args.ref), `Click “${label(args.ref)}”`),
+        risk: (args) => this.clickApproval(id, args.ref, `Click “${label(args.ref)}”`),
         run: async (args) => read(await this.click(id, args.ref)),
       }),
       defineTool({
@@ -1537,7 +1709,7 @@ export class BrowserManager {
       mapped = labels;
       this.seen.set(botId, new Map(labels.map((element) => [element.ref, element])));
     }
-    const picture = await page.screenshot({ type: "jpeg", quality: 60 });
+    const picture = await this.shoot(page, 60);
     if (marks) await page.evaluate(`document.getElementById("mrog-marks")?.remove()`).catch(() => {});
     const check = Boolean(await page.evaluate(HUMAN_CHECK_SCRIPT).catch(() => false));
     this.humanCheck.set(botId, check);
@@ -1568,7 +1740,7 @@ export class BrowserManager {
     const started = Date.now();
     for (let index = 0; index < frames; index++) {
       if (index > 0) await page.waitForTimeout(Math.max(0, started + index * gap - Date.now()));
-      const shot = await page.screenshot({ type: "jpeg", quality: 45 });
+      const shot = await this.shoot(page, 45);
       images.push({ mediaType: "image/jpeg", data: shot.toString("base64") });
     }
     this.changed();
@@ -1582,6 +1754,30 @@ export class BrowserManager {
   /** A box the bot last saw (for approval cards). */
   mark(botId: string, ref: number): PageElement | undefined {
     return this.seen.get(botId)?.get(ref);
+  }
+
+  /** Whether the page in a bot's tab has a control with this number now (a click on any other number is refused). */
+  async hasNumber(botId: string, ref: number): Promise<boolean> {
+    const page = this.pages.get(botId);
+    if (!page || page.isClosed()) return false;
+    return (
+      (await page
+        .locator(`[data-mrog-ref="${ref}"]`)
+        .count()
+        .catch(() => 0)) > 0
+    );
+  }
+
+  /**
+   * A click's approval: judged by what the bot saw there. A number that isn't on the page at all is let through
+   * unasked, because the click is refused straight away ("there's no [n]"): a card about it would only hold the bot
+   * (and you) on something that can't happen.
+   */
+  async clickApproval(botId: string, ref: number, summary: string): Promise<Risk> {
+    const element = this.mark(botId, ref);
+    if (!element && !(await this.hasNumber(botId, ref)))
+      return safe(`${summary} (there's no such number on the page, so this will be refused)`);
+    return clickRisk(element, summary);
   }
 
   /** The control under a spot of the latest screenshot (the smallest box around it), if any. */
@@ -1667,27 +1863,80 @@ export class BrowserManager {
     return this.clickAndFollow(page, () => page.mouse.click(x, y));
   }
 
-  /** Types into whatever the bot clicked last, like a person typing. */
+  /** What has keyboard focus in a tab, for typing (null when nothing does). */
+  private typingTarget(page: Page): Promise<TypingTarget | null> {
+    return page.evaluate(TYPING_TARGET_SCRIPT).catch(() => null) as Promise<TypingTarget | null>;
+  }
+
+  /**
+   * Types into whatever the bot clicked last, like a person typing. Space and Enter press a focused button or tick a
+   * checkbox, so nothing is typed unless the focus is a box for text. A line break in the text is an Enter press
+   * (judged as one by the approval), and in a one-line box it ends the typing there if the page moves on.
+   */
   async typeText(botId: string, text: string, enter: boolean): Promise<ToolResult> {
     const page = await this.page(botId);
-    const focused = (await page.evaluate(
-      `(() => { const el = document.activeElement; return el ? { type: (el.getAttribute("type") || "").toLowerCase(), autocomplete: (el.getAttribute("autocomplete") || "").toLowerCase(), editable: el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) } : null; })()`,
-    )) as { type: string; autocomplete: string; editable: boolean } | null;
-    if (!focused?.editable) {
+    const focused = await this.typingTarget(page);
+    if (!focused) {
       throw new Error(
         "Nothing to type into is selected. Click the text box first (screen_click), then type.",
       );
     }
-    if (isSecretField(focused.type, focused.autocomplete)) {
+    if (focused.secret) {
       throw new Error(
         "Bots don't type passwords or card numbers. Use browser_sign_in or ask the user with browser_handoff.",
       );
     }
-    await page.keyboard.type(text, { delay: 20 });
-    if (enter) {
+    if (!takesTyping(focused)) {
+      throw new Error(
+        `What is selected is ${focused.type ? `a ${focused.type} input` : `a ${focused.tag.toLowerCase()}`}, not a text box, so typing could press it instead. Click the text box first (screen_click), then type.`,
+      );
+    }
+    // What's in the box is replaced, as a person selects the old text before typing over it: a search box that
+    // still holds the last search, or a second try at the same text, would otherwise run the two together.
+    await page.keyboard.press("ControlOrMeta+A");
+    const lines = text.split(/\r\n|\r|\n/);
+    let submitted = false;
+    let stopped = false;
+    if (text) {
+      for (const [index, line] of lines.entries()) {
+        if (index > 0) {
+          if (focused.multiline) await page.keyboard.press("Enter");
+          else {
+            submitted = true;
+            await this.acting(page, () => page.keyboard.press("Enter"));
+            // The page may have moved on (a form sent): the rest of the text isn't typed at whatever has focus now.
+            if (!takesTyping(await this.typingTarget(page))) {
+              stopped = true;
+              break;
+            }
+          }
+        }
+        if (line) await page.keyboard.type(line, { delay: 20 });
+      }
+    } else await page.keyboard.press("Backspace");
+    // Read back before Enter moves on: autocomplete or the page itself may have changed what was typed.
+    const held = submitted
+      ? null
+      : ((await page
+          .evaluate(
+            `(() => { const el = document.activeElement; if (!el) return null; const value = el.isContentEditable ? el.innerText : el.value; return typeof value === "string" ? value.replace(/\\s+/g, " ").trim().slice(0, 200) : null; })()`,
+          )
+          .catch(() => null)) as string | null);
+    if (enter && !stopped) {
       await this.acting(page, () => page.keyboard.press("Enter"));
     }
-    return this.look(botId);
+    const after = await this.look(botId);
+    if (stopped)
+      return {
+        ...after,
+        text: `Enter was pressed at a line break and the page moved on, so the text after it was not typed.\n${after.text}`,
+      };
+    if (held === null) return after;
+    const note =
+      held === text.replace(/\s+/g, " ").trim()
+        ? `The box now holds “${held}”${enter ? ", and Enter was pressed" : ""}.`
+        : `⚠ The box now holds “${held}”, not exactly what you typed. Check it before going on.`;
+    return { ...after, text: `${note}\n${after.text}` };
   }
 
   async pressKey(botId: string, key: string): Promise<ToolResult> {

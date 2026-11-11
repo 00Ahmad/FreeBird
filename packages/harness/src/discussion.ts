@@ -23,6 +23,15 @@ import {
 
 import { fail, parse } from "./http";
 import type { Services } from "./services";
+import {
+  askModel,
+  charsFor,
+  fitTexts,
+  lastSection,
+  mergeSections,
+  sectionGaps,
+  templateHeadings,
+} from "./reports";
 import { mentionedBots } from "./team";
 
 /** Tools a bot keeps while discussing: finding and reading sources, nothing that acts (Visual Bots' too). */
@@ -46,8 +55,15 @@ const DISCUSSION_MAX_STEPS = 6;
  * loading the model) before a fallback is used.
  */
 const MODERATOR_TIMEOUT_MS = 90_000;
-/** Of the transcript, the newest this many characters go to the moderator. */
+/** Of the transcript, at most this many characters go to the moderator. */
 const TRANSCRIPT_CHARS = 40_000;
+/** Room for the summary itself, and for filling in a section it left out. */
+const SUMMARY_TOKENS = 3000;
+const REPAIR_TOKENS = (gaps: number) => Math.min(SUMMARY_TOKENS, 600 + 500 * gaps);
+/** Tokens kept back from the moderator's context for the summary, the instructions and the list of addresses. */
+const SUMMARY_RESERVED = SUMMARY_TOKENS + 3500;
+const SUMMARY_SYSTEM =
+  "You are the neutral moderator of a discussion between AI bots. Write the final summary for the user. Use only what was said in the transcript: never add facts, numbers or sources that aren't in it, and keep each source with the claim it was given for. Link only to addresses from the list of addresses used in the discussion; if a claim's source isn't in that list, name it and write (no address given). Be concise and finish every section. Use Markdown.";
 const settingsKey = (threadId: string) => `discussion:${threadId}`;
 
 const RULES = [
@@ -70,15 +86,19 @@ const SUMMARY_SECTIONS: Record<DiscussionGoal, string> = {
     "## Discussion summary\n### What the evidence shows\n(each finding with its source)\n### Disputed or uncertain\n### Claims without a source\n(claims made with neither a source nor checkable reasoning)\n### Sources cited\n(each address with the claim it supports; write None if there were none)\n### Open questions",
 };
 
+/** The sections of a goal's summary that `text` lacks or leaves empty. */
+export const summaryGaps = (text: string, goal: DiscussionGoal) =>
+  sectionGaps(text, templateHeadings(SUMMARY_SECTIONS[goal]));
+
 /** A web address in text; parentheses count only in pairs, so `…/wiki/Mercury_(planet)` stays whole. */
-export const URL_PATTERN = /https?:\/\/(?:[^\s<>"'()[\]]|\([^\s<>"'()[\]]*\))+/g;
+export const URL_PATTERN = /https?:\/\/(?:[^\s<>"'()[\]]|\([^\s<>"'()[\]]*\))+/gi;
+/** What clings to the end of an address in prose: punctuation, and the quotes or Markdown marks around it. */
+const URL_TAIL = /[.,;:!?`*_"'”’»…。]+$/;
+/** An address as written in text, without the punctuation or Markdown marks that follow it. */
+export const trimUrl = (url: string) => url.replace(URL_TAIL, "");
 /** How addresses are compared: no trailing punctuation, slash or #fragment, any case. */
 export const normalizeUrl = (url: string) =>
-  url
-    .replace(/[.,;:!?]+$/, "")
-    .replace(/#.*$/, "")
-    .replace(/\/+$/, "")
-    .toLowerCase();
+  trimUrl(url).replace(/#.*$/, "").replace(/\/+$/, "").toLowerCase();
 
 /**
  * Keeps only links to addresses the bots really opened or wrote; any other link (a model filling in a
@@ -88,14 +108,20 @@ export function keepKnownLinks(markdown: string, known: Set<string>): string {
   const kept: string[] = [];
   // Checked links are set aside so the bare-address pass below doesn't touch them.
   const hold = (text: string) => `⟦${kept.push(text) - 1}⟧`;
-  const linked = markdown.replace(
-    /\[([^\]]+)\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))+)\)/g,
-    (link, label: string, url: string) =>
-      known.has(normalizeUrl(url)) ? hold(link) : `${label} (no address given)`,
-  );
-  const bare = linked.replace(URL_PATTERN, (url) =>
-    known.has(normalizeUrl(url)) ? url : "(no address given)",
-  );
+  const linked = markdown
+    // A placeholder the model typed itself would be swapped for a link or "undefined".
+    .replace(/[⟦⟧]/g, "")
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))+)\)/gi,
+      (link, label: string, url: string) =>
+        known.has(normalizeUrl(url)) ? hold(link) : `${label} (no address given)`,
+    );
+  const bare = linked.replace(URL_PATTERN, (url) => {
+    if (known.has(normalizeUrl(url))) return url;
+    // The marks closing a `code span`, **bold** or quote around it stay, so the text around stays balanced.
+    const closing = url.slice(trimUrl(url).length).replace(/[^`*_"'”’»]/g, "");
+    return `(no address given)${closing}`;
+  });
   return bare.replace(/⟦(\d+)⟧/g, (_, index: string) => kept[Number(index)]!);
 }
 
@@ -249,50 +275,36 @@ export function installDiscussions(services: Services) {
     system: string,
     user: string,
     options: { signal: AbortSignal; maxTokens: number; timeoutMs?: number; onText?: (text: string) => void },
-  ): Promise<string> => {
-    await services.ollamaLauncher.settled();
-    const { ref, provider, model } = moderatorModel(team);
-    // The time limit starts once Ollama is up, not while it's still starting.
-    const signal = options.timeoutMs
-      ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs)])
-      : options.signal;
-    // Moderating needs no long private reasoning; it only makes each step slower.
-    const think = (await services.catalog.info(ref))?.capabilities.includes("thinking") ? false : undefined;
-    const call = async () => {
-      let out = "";
-      for await (const chunk of provider.chat({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        maxTokens: options.maxTokens,
-        think,
-        local: provider.local ? runtime.localOptions() : undefined,
-        signal,
-      })) {
-        if (chunk.type !== "text") continue;
-        out += chunk.text;
-        options.onText?.(chunk.text);
-      }
-      return out;
-    };
-    return provider.local ? runtime.run("user", call, { signal }) : call();
-  };
+  ): Promise<string> => (await askModel(services, moderatorModel(team).ref, system, user, options)).text;
 
-  const transcript = (state: Discussion): string => {
+  /**
+   * The discussion so far, fitted to what the moderator's model can read with `reserved` tokens kept back: every
+   * turn keeps its start, so the openings aren't lost to a long last round.
+   */
+  const transcript = (state: Discussion, team: Bot[], reserved: number): string => {
     const names = new Map(store.bots.list().map((bot) => [bot.id, bot.name]));
-    const lines = store.messages
+    const said = store.messages
       .list(state.threadId, { limit: 400 })
-      .filter((message) => message.createdAt >= state.startedAt && message.role !== "system")
+      .filter(
+        (message) =>
+          message.createdAt >= state.startedAt && message.role !== "system" && message.id !== state.summaryId,
+      )
       .map((message) => {
+        // A deleted expert's messages lose their bot; only the moderator's summary is meant to have none.
         const who =
-          message.role === "user" ? "User" : ((message.botId && names.get(message.botId)) ?? "Moderator");
+          message.role === "user"
+            ? "User"
+            : (message.botId && names.get(message.botId)) ||
+              (message.moderator ? "Moderator" : "A former expert");
         const text = messageText(message).trim();
         return text ? `[${who}]: ${text.slice(0, 3000)}` : "";
       })
       .filter(Boolean);
-    return lines.join("\n\n").slice(-TRANSCRIPT_CHARS);
+    const local = moderatorModel(team).provider.local;
+    const budget = local
+      ? Math.min(TRANSCRIPT_CHARS, charsFor(runtime.settings.numCtx, reserved))
+      : TRANSCRIPT_CHARS;
+    return fitTexts(said, budget).join("\n\n");
   };
 
   /** Every address the bots opened, found in results, or wrote during the discussion, with who used it. */
@@ -301,13 +313,23 @@ export function installDiscussions(services: Services) {
     const found = new Map<string, { url: string; by: Set<string> }>();
     const add = (url: string, who: string) => {
       const key = normalizeUrl(url);
-      const entry = found.get(key) ?? { url: url.replace(/[.,;:!?]+$/, ""), by: new Set<string>() };
+      const entry = found.get(key) ?? { url: trimUrl(url), by: new Set<string>() };
       entry.by.add(who);
       found.set(key, entry);
     };
+    // Links the user gave count too, so a summary citing them keeps them.
+    for (const url of state.topic.match(URL_PATTERN) ?? []) add(url, "the user");
     for (const message of store.messages.list(state.threadId, { limit: 400 })) {
-      if (message.createdAt < state.startedAt || message.role !== "bot" || !message.botId) continue;
-      const who = names.get(message.botId) ?? "a bot";
+      if (message.createdAt < state.startedAt) continue;
+      if (message.role === "user") {
+        for (const part of message.parts)
+          if (part.type === "text")
+            for (const url of part.text.match(URL_PATTERN) ?? []) add(url, "the user");
+        continue;
+      }
+      // The moderator's own summary isn't a source.
+      if (message.role !== "bot" || message.moderator) continue;
+      const who = (message.botId && names.get(message.botId)) || "a former expert";
       for (const part of message.parts) {
         if (part.type === "text") for (const url of part.text.match(URL_PATTERN) ?? []) add(url, who);
         if (part.type !== "tool") continue;
@@ -359,7 +381,7 @@ export function installDiscussions(services: Services) {
       const text = await ask(
         team,
         "You moderate a discussion between AI bots. Answer exactly in the format asked, nothing else.",
-        `Topic: ${state.topic}\nGoal: ${DISCUSSION_GOALS[state.goal].description}\n\nTranscript so far:\n${transcript(state)}\n\nNot yet spoken this round:\n${roster(remaining, state.roles)}\n\nWho should speak next? Prefer someone whose claim was just challenged, or who can best answer the strongest open point or a claim that lacks evidence. Reply exactly:\nNEXT: <name>\nFOCUS: <one sentence: the specific point they should answer>`,
+        `Topic: ${state.topic}\nGoal: ${DISCUSSION_GOALS[state.goal].description}\n\nTranscript so far:\n${transcript(state, team, 1500)}\n\nNot yet spoken this round:\n${roster(remaining, state.roles)}\n\nWho should speak next? Prefer someone whose claim was just challenged, or who can best answer the strongest open point or a claim that lacks evidence. Reply exactly:\nNEXT: <name>\nFOCUS: <one sentence: the specific point they should answer>`,
         {
           signal: entry.controller.signal,
           timeoutMs: MODERATOR_TIMEOUT_MS,
@@ -375,63 +397,101 @@ export function installDiscussions(services: Services) {
     return { bot: remaining[0]!, focus: userFocus };
   };
 
-  /** The moderator's summary, streamed into its own message. */
-  const summarize = async (entry: Live, thread: Thread, team: Bot[]) => {
+  /**
+   * The moderator's summary, streamed into its own message. A section the model left out, left empty or was cut off
+   * in is asked for once more and put in its place, so the report ends whole. `ended`: why the discussion stopped
+   * before its last round, for the summary to say.
+   */
+  const summarize = async (entry: Live, thread: Thread, team: Bot[], ended: string | null = null) => {
     const { state, controller } = entry;
-    const { ref } = moderatorModel(team);
-    let message = store.messages.create({
-      threadId: thread.id,
-      role: "bot",
-      botId: null,
-      moderator: true,
-      parts: [],
-      status: "streaming",
-      model: ref,
-    });
-    bus.publish({ type: "message.created", message });
-    state.summaryId = message.id;
-    publish(state);
-    turns.setActivity(thread.id, null, "working");
+    let message: Message | undefined;
     let text = "";
     let status: Message["status"] = "done";
-    const known = sources(state);
-    const list =
-      [...known.values()]
-        .slice(0, 80)
-        .map((source) => `- ${source.url} (${[...source.by].join(", ")})`)
-        .join("\n") || "(none)";
+    let known = new Set<string>();
+    // The message and the "working" mark are set up inside the try, so a failure while preparing still clears them.
     try {
-      await ask(
-        team,
-        "You are the neutral moderator of a discussion between AI bots. Write the final summary for the user. Use only what was said in the transcript: never add facts, numbers or sources that aren't in it, and keep each source with the claim it was given for. Link only to addresses from the list of addresses the bots used; if a claim's source isn't in that list, name it and write (no address given). Be concise and finish every section. Use Markdown.",
-        `Topic: ${state.topic}\nGoal: ${DISCUSSION_GOALS[state.goal].description}\n\nTranscript:\n${transcript(state)}\n\nAddresses the bots used:\n${list}\n\nWrite the summary with exactly these sections:\n${SUMMARY_SECTIONS[state.goal]}`,
-        {
-          signal: controller.signal,
-          maxTokens: 3000,
-          onText: (chunk) => {
-            text += chunk;
-            bus.publish({
-              type: "message.delta",
-              threadId: thread.id,
-              messageId: message.id,
-              partIndex: 0,
-              kind: "text",
-              text: chunk,
-            });
+      const { ref } = moderatorModel(team);
+      const started = store.messages.create({
+        threadId: thread.id,
+        role: "bot",
+        botId: null,
+        moderator: true,
+        parts: [],
+        status: "streaming",
+        model: ref,
+      });
+      message = started;
+      bus.publish({ type: "message.created", message: started });
+      state.summaryId = started.id;
+      publish(state);
+      turns.setActivity(thread.id, null, "working");
+      const used = sources(state);
+      known = new Set(used.keys());
+      const list =
+        [...used.values()]
+          .slice(0, 80)
+          .map((source) => `- ${source.url} (${[...source.by].join(", ")})`)
+          .join("\n") || "(none)";
+      const early = ended
+        ? `\n\nThe discussion ended early (${ended}); summarize what was said and say that it ended early.`
+        : "";
+      const about = `Topic: ${state.topic}\nGoal: ${DISCUSSION_GOALS[state.goal].description}${early}\n\nTranscript:\n${transcript(state, team, SUMMARY_RESERVED)}\n\nAddresses used in the discussion:\n${list}`;
+      const headings = templateHeadings(SUMMARY_SECTIONS[state.goal]);
+      const write = () =>
+        askModel(
+          services,
+          ref,
+          SUMMARY_SYSTEM,
+          `${about}\n\nWrite the summary with exactly these sections:\n${SUMMARY_SECTIONS[state.goal]}`,
+          {
+            signal: controller.signal,
+            maxTokens: SUMMARY_TOKENS,
+            onText: (chunk) => {
+              text += chunk;
+              bus.publish({
+                type: "message.delta",
+                threadId: thread.id,
+                messageId: started.id,
+                partIndex: 0,
+                kind: "text",
+                text: chunk,
+              });
+            },
           },
-        },
-      );
+        );
+      // A call that failed before writing anything (the model server hiccuped) is tried once more.
+      const first = await write().catch((error: unknown) => {
+        if (controller.signal.aborted || text) throw error;
+        console.warn(`[discussion] the summary failed, trying again: ${(error as Error).message}`);
+        return write();
+      });
+      const gaps = sectionGaps(text, headings);
+      const last = first.cut ? lastSection(text, headings) : null;
+      if (last && !gaps.includes(last)) gaps.push(last);
+      if (gaps.length > 0 && !controller.signal.aborted) {
+        const more = await askModel(
+          services,
+          ref,
+          SUMMARY_SYSTEM,
+          `${about}\n\nThe summary so far:\n${text}\n\nThese sections are missing, empty or cut off: ${gaps.join(", ")}. Write only those sections, each under its ### heading, in full and from the transcript.`,
+          { signal: controller.signal, maxTokens: REPAIR_TOKENS(gaps.length) },
+        ).catch((error: unknown) => {
+          if (controller.signal.aborted) throw error;
+          console.warn(`[discussion] filling the summary's gaps failed: ${(error as Error).message}`);
+          return null;
+        });
+        if (more) text = mergeSections(text, more.text, gaps, headings);
+      }
     } catch (error) {
       status = controller.signal.aborted ? "stopped" : "error";
       if (status === "error") throw error;
     } finally {
-      // Streamed as written; saved with any made-up links taken out.
-      text = keepKnownLinks(text, new Set(known.keys()));
-      const parts = text ? [{ type: "text" as const, text }] : [];
-      const saved = store.messages.update(message.id, { parts, status });
-      if (saved) {
-        message = saved;
-        bus.publish({ type: "message.updated", message });
+      if (message) {
+        // Streamed as written; saved with any made-up links taken out.
+        text = keepKnownLinks(text, known);
+        const parts = text ? [{ type: "text" as const, text }] : [];
+        const saved = store.messages.update(message.id, { parts, status });
+        if (saved) bus.publish({ type: "message.updated", message: saved });
       }
       if (!turns.isBusy(thread.id)) turns.setActivity(thread.id, null, "idle");
     }
@@ -460,25 +520,50 @@ export function installDiscussions(services: Services) {
     };
     try {
       let failures = 0;
+      let delivered = 0;
+      // Why the bots couldn't go on; with turns already spoken, the summary still covers them.
+      let failed: string | null = null;
       rounds: for (let round = 1; round <= state.rounds; round += 1) {
         state.round = round;
         state.spoken = [];
-        const remaining = members(thread);
-        while (remaining.length > 0) {
+        // Who has yet to speak this round, by id. The team is read again before every turn, so an expert deleted
+        // meanwhile is skipped instead of being picked.
+        const waiting = new Set(members(thread).map((bot) => bot.id));
+        while (waiting.size > 0) {
           await hold();
           if (signal.aborted) return end("stopped");
           if (entry.finishEarly) break rounds;
           const team = members(thread);
-          if (team.length < 2) return end("error", "A discussion needs at least two bots.");
+          const remaining = team.filter((member) => waiting.has(member.id));
+          if (remaining.length === 0) break;
+          if (team.length < 2) {
+            const reason = "A discussion needs at least two bots.";
+            if (delivered === 0) return end("error", reason);
+            failed = reason;
+            break rounds;
+          }
           const { bot, focus } = await pickSpeaker(entry, team, remaining);
-          const at = remaining.findIndex((member) => member.id === bot.id);
-          if (at !== -1) remaining.splice(at, 1);
+          waiting.delete(bot.id);
           entry.focus = focus;
           state.speakerId = bot.id;
           publish(state);
-          const reply = await turns.start(store.threads.get(thread.id) ?? thread, bot, "user");
+          let reply: Message;
+          try {
+            reply = await turns.start(store.threads.get(thread.id) ?? thread, bot, "user");
+          } catch (error) {
+            entry.focus = null;
+            // Deleted after being picked: it can't speak, and the others go on.
+            if (!store.bots.get(bot.id)) continue;
+            throw error;
+          }
           entry.focus = null;
-          if (signal.aborted || reply.status === "stopped") return end("stopped");
+          if (signal.aborted) return end("stopped");
+          // Deleting the speaker stops its turn; that ends its turn, not the discussion.
+          if (!store.bots.get(bot.id)) {
+            if (messageText(reply).trim()) delivered += 1;
+            continue;
+          }
+          if (reply.status === "stopped") return end("stopped");
           state.spoken = [...state.spoken, bot.id];
           publish(state);
           if (entry.stepOnce) {
@@ -490,8 +575,15 @@ export function installDiscussions(services: Services) {
           if (reply.status === "error") {
             const part = reply.parts.find((p) => p.type === "error");
             // A missing model fails every turn the same way.
-            if ((part?.type === "error" && part.code === "model_missing") || ++failures >= 3)
-              return end("error", part?.type === "error" ? part.message : "The bots' replies kept failing.");
+            if ((part?.type === "error" && part.code === "model_missing") || ++failures >= 3) {
+              failed = part?.type === "error" ? part.message : "The bots' replies kept failing.";
+              if (delivered === 0) return end("error", failed);
+              break rounds;
+            }
+          } else if (messageText(reply).trim()) {
+            delivered += 1;
+            // Only failures in a row mean the bots can't go on.
+            failures = 0;
           }
         }
       }
@@ -499,8 +591,9 @@ export function installDiscussions(services: Services) {
       state.speakerId = null;
       state.paused = false;
       publish(state);
-      await summarize(entry, thread, members(thread));
-      end(signal.aborted ? "stopped" : "done");
+      await summarize(entry, thread, members(thread), failed);
+      // Ended early by a failure: the report is there, and the reason stays shown with it.
+      end(signal.aborted ? "stopped" : "done", signal.aborted ? null : failed);
     } catch (error) {
       if (signal.aborted) end("stopped");
       else {

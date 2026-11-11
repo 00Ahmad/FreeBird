@@ -97,6 +97,11 @@ Built from scratch, no fork. `[ ]` = open, `[x]` = done.
 - [x] `spawn_bot` (asks first only for a helper on a different model), `delegate` (up to 5 tasks in parallel), `dismiss_bot`; `message_bot` for every bot
 - [x] Coordinators use helpers on their own when a job has several independent parts (products, options, sources, sites): one short planning question to the model before the turn, a prompt rule, and a reminder after 3 own lookups; quick questions, file work and step-by-step jobs they do themselves
 - [ ] Helpers on one local model take turns at the default "bots at once" = 1, so a 3-helper web job can take over 5 minutes; consider a higher default when VRAM allows
+- [x] `delegate` makes a helper for a name nobody has (on the model already in use, so no approval; at most 6 helpers; never in a group chat), because models that skip `spawn_bot` otherwise retry "No teammate is called X" until they give up; a name that differs only in case, spacing or punctuation means the existing bot
+- [x] A coordinator's conversation with a helper or teammate is a **Bot conversation** in the sidebar, not a group chat, and the helper's prompt no longer says it is in a group chat with the user
+- [x] The planning question before a coordinator's turn always switches thinking off for Ollama models (MiMo and Ornith don't report that they think)
+- [ ] The `delegate` auto-create path is covered by tests but not yet seen in a live run of a model that skips `spawn_bot` (MiMo v2.6 created helpers with `spawn_bot` in the one run made)
+- [ ] No shared team group chat for a coordinator and three or more helpers: each helper sees only its own task (its own conversation), and a shared thread would need per-helper filtered histories
 - [x] One level only: bots on a handed-over task get no hand-off tools (no chains or loops)
 - [x] Stopping a coordinator stops its helpers
 - [x] Helpers' approvals, questions and secret requests show in the coordinator's chat
@@ -104,6 +109,19 @@ Built from scratch, no fork. `[ ]` = open, `[x]` = done.
 - [x] Engine: one nudge when a model goes silent after using tools
 - [x] Real-model eval (`evals/delegation.eval.ts`): qwen3.5:9b passes; nemotron-3-nano:4b completes but is sloppy with helper names
 - [ ] Parallel helpers on the same local model run concurrently in Ollama (bypassing the app's "bots at once" limit)
+
+## Parallel Bots ✅
+
+- [x] One request, one reply: the model picks three roles for the question and answers as each in three sections; the app adds the instruction to that one request only, offers no tools, and skips planning and history summaries so nothing else is asked
+- [x] The mode follows the user's newest unanswered message (so Try again, a queued turn and Switch model keep it); nothing is steered into a Parallel Bots reply and no Parallel Bots message is steered into a running one
+- [x] A tolerant section reader (`##`, `###`, bold, "Agent 1:", streaming prefixes, code blocks), three cards that fill as the reply streams, and the plain reply when it didn't come out in sections
+- [x] `evals/parallel.eval.ts`: six questions per model, scored on three sections, three different roles and an answer in each
+- [ ] Checked on 9B models only so far; try 12–30B with the eval and tune the instruction if needed
+- [ ] No automatic second request for a missing section (strictly one request); a reply with fewer than three sections is shown as written, with a note to send the question again (a finished reply has no Try again)
+- [ ] Roles are always invented for the question; picking three of the user's own bots (with their instructions and memory) isn't built
+- [ ] No tools in this mode; "use tools first, then write the three sections" would need a second kind of turn
+- [ ] A long chat is trimmed to what fits, not summarised, in this mode (a summary would be a second request)
+- [ ] Not offered in group chats, clusters or races
 
 ## Bots on the web ✅
 
@@ -147,7 +165,7 @@ Built from scratch, no fork. `[ ]` = open, `[x]` = done.
 - [x] A red dot shows where it's about to click (window and Browser panel); a new Visual Bot opens with its Browser panel
 - [x] Coordinators can spawn Visual helpers (`spawn_bot` with visual)
 - [x] Only the latest 2 screenshots stay in the conversation (user-attached pictures are kept)
-- [x] Evals: visual-shop (offline), visual-google and visual-youtube (live)
+- [x] Evals: visual-shop, visual-explore and visual-missing (offline), visual-google and visual-youtube (live)
 - [x] Faster moves: thinking off between moves, one short sentence before each action (MiMo reads a screenshot in about 1 s; long narration was the slow part)
 - [x] `screen_watch`: a short clip (2–6 frames over a few seconds) to follow videos and pages that change
 - [x] Live video in the Browser panel (Chrome screencast, up to ~15 fps while the page changes; falls back to stills when idle)
@@ -222,3 +240,17 @@ Built from scratch, no fork. `[ ]` = open, `[x]` = done.
 ## Fixes from the code audit
 
 - [x] Fix what a November 2026 code audit found; three items are only partly done
+
+## Second code audit (0.0.5)
+
+- [x] Approvals: typed line breaks ask like Enter; Visual Bots type only into text boxes; "Always allow" matches the exact action; a connected app's card shows the whole call (no "Always allow" when cut off or irreversible); the `run_command` card shows its folder
+- [x] Leaks: card, security-code and password fields are masked in screenshots and absent from the screen map; chat images load on request; no key is stored or sent for a server that takes none; racers can't wait on cards nobody sees
+- [x] Robustness: `fetch_url` is linear and capped; bots in one browser profile get separate tabs; queued turns re-read the bot and obey Stop; a routine started before the app closed doesn't run again; secrets granted mid-turn reach `run_command`
+- [x] Secrets limited to 1,280 characters everywhere; big OAuth sign-ins stored in pieces
+- [x] Connected apps: distinct names for colliding tools, a dead connection shows as an error, paginated tool lists read in full, stricter verb classification
+- [x] Discussions: deleting an expert doesn't end it; known links survive backticks, bold and quotes; the user's own links count as known
+- [x] UI: no lost streamed text, a Reload fallback instead of a blank window, AltGr keys aren't shortcuts, group chats work with per-bot models, a question card doesn't steal focus
+- [x] The webhook address keeps its port between launches
+- [ ] About 50 lower-severity findings (input-method Enter in CJK text, event-log leak of passwords with a quote, recursive MCP schemas, `edit_file` on multi-line text in CRLF files, commands waiting on stdin, silent errors in some settings controls, the race word count for CJK)
+- [ ] Connected apps reconnect by themselves; the OAuth callback hides error text unless the sign-in state is valid; a history that starts with an orphan `tool_result` for Anthropic; deleting old keychain entries for providers that take no key
+- [ ] Tests for the desktop shell's saved port and for the chunked sign-in storage against the real Windows keychain

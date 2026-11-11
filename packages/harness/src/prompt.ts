@@ -32,7 +32,9 @@ export function buildSystemPrompt(bot: Bot, context: PromptContext): string {
   ];
   if (bot.instructions.trim())
     sections.push(`Your standing instructions from the user:\n${bot.instructions.trim()}`);
-  if (context.thread.kind === "group") {
+  // A bot-to-bot thread is a group only in how it's stored: no user is in it, and what the bot was asked to do comes
+  // from the hand-over prompt instead.
+  if (context.thread.kind === "group" && !context.thread.pair) {
     const names = context.teammates.map((mate) => mate.name).join(", ") || "no other bots";
     sections.push(
       `This is a group chat with the user and these bots: ${names}. Messages from other bots are prefixed with their name in brackets. Answer only for yourself, keep it short, and don't repeat what a teammate already said.`,

@@ -54,6 +54,10 @@ Give one task to 3–5 bots. Each picks its own strategy and works alone, on the
 
 Describe a topic and a goal (**explore ideas**, **reach a decision** or **research a question**). FreeBird proposes a team of 3–5 bots with different roles, or you pick them. A moderator chooses who speaks next; every claim must be backed by a page the bot actually opened, or by reasoning someone could check, and links the bots never opened are flagged. You can pause, step, steer or stop at any time, and you get a structured summary at the end. [Read more](docs/races-and-clusters.md#clusters)
 
+### 🧩 Parallel Bots: one question, three answers, one request
+
+Switch on **Parallel Bots** and your question goes to the model once. It picks three roles that fit that question and answers as each of them in a single reply, shown as three cards. No fixed personas to set up, one place in the queue instead of three, no second model to load: it works on one local model with one slot, so it suits a modest GPU. [Read more](docs/features.md#parallel-bots)
+
 ### 🤝 A Chief of Staff that builds its own team
 
 Your primary bot is a coordinator. When a job splits into independent parts (comparing products, checking several sites), it **creates helper bots on its own**, gives each a task, runs them at the same time and combines their answers. Helpers' approvals and questions show up in your chat. [Read more](docs/features.md#coordinators-and-helpers)
@@ -62,11 +66,12 @@ Your primary bot is a coordinator. When a job splits into independent parts (com
 
 - **Real tools with approvals:** files in each bot's own folder, terminal commands, web pages, a real browser (Edge/Chrome) you can watch and take over, web search, and its own Docker desktop computer.
 - **Visual Bots** that browse by looking at screenshots and clicking, like a person. Each bot keeps its own browser sign-ins, and after you solve a site's check it carries on by itself.
-- **Group chats** of 2–6 bots with @mentions; **bot-to-bot messages** in readable threads.
+- **Group chats** of 2–6 bots with @mentions; what a coordinator and its helpers say to each other is kept apart, in **Bot conversations** you can read any time.
 - **Routines:** weekly schedules, intervals, one-time runs, webhooks, and "Teach a task".
 - **Connect apps** through any MCP server, with per-tool toggles, one-click sign-in (OAuth) and read-only access per bot.
 - **Vault** for logins, cards and contact info in your OS keychain; passwords never reach the model, and saved secrets are hidden from tool output and logs.
 - **Choose each bot's tools**, and answer its questions with one tap.
+- **Problems in plain words**: errors say what happened and offer **Try again** or **Switch model**; a stalled model is cut off, an unanswered approval expires, unread chats get a badge, and an event log per chat helps when something went wrong.
 - **Memory, skills and templates:** see and edit what each bot remembers, save `/skills`, share a bot as a template.
 - **Voice:** dictation and read-aloud. **Library:** keep the replies worth keeping.
 - **Command palette** (Ctrl+K), keyboard shortcuts, light and dark themes.

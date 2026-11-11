@@ -122,27 +122,148 @@ const attr = (attrs: string, name: string) => {
 };
 
 /**
+ * Most of a page that is turned into text. Anything past it is dropped (and the text says so), so a huge or hostile
+ * page can't hold up the harness, which every bot, the chat stream and the Stop button share.
+ */
+const MAX_HTML_CHARS = 400_000;
+
+const BLOCK_TAGS = "script|style|noscript|svg|head";
+
+/**
+ * Where `<name …>…</name>` blocks sit in a page, as [start, end) pairs. Done in one pass: an opening tag with no
+ * closing one is left alone, and that is found out once per name rather than once per opening tag, so a page made of
+ * unclosed tags can't make the search quadratic.
+ */
+function blockSpans(html: string, names: string): [number, number][] {
+  const opening = new RegExp(`<(${names})`, "gi");
+  const closers = new Map<string, RegExp>();
+  const unclosed = new Set<string>();
+  const spans: [number, number][] = [];
+  // The first ">" at or after the last place looked, kept so opening tags that share it don't each search for it.
+  let gt = -1;
+  for (;;) {
+    const found = opening.exec(html);
+    if (!found) break;
+    const name = found[1]!.toLowerCase();
+    if (unclosed.has(name)) continue;
+    if (gt < opening.lastIndex) {
+      gt = html.indexOf(">", opening.lastIndex);
+      // No ">" left: nothing after this can be a tag.
+      if (gt === -1) break;
+    }
+    let closer = closers.get(name);
+    if (!closer) closers.set(name, (closer = new RegExp(`</${name}>`, "gi")));
+    closer.lastIndex = gt + 1;
+    if (!closer.exec(html)) {
+      unclosed.add(name);
+      continue;
+    }
+    spans.push([found.index, closer.lastIndex]);
+    opening.lastIndex = closer.lastIndex;
+  }
+  return spans;
+}
+
+/** The page without its scripts, styles, hidden parts and inline pictures. */
+function withoutBlocks(html: string): string {
+  let out = "";
+  let from = 0;
+  for (const [start, end] of blockSpans(html, BLOCK_TAGS)) {
+    out += `${html.slice(from, start)} `;
+    from = end;
+  }
+  return out + html.slice(from);
+}
+
+/** Replaces every tag with a space. A "<" with no ">" after it is just text. */
+function stripTags(html: string): string {
+  let out = "";
+  let from = 0;
+  let at = 0;
+  for (;;) {
+    const open = html.indexOf("<", at);
+    const close = open === -1 ? -1 : html.indexOf(">", open + 1);
+    if (close === -1) break;
+    // "<>" is not a tag.
+    if (close === open + 1) {
+      at = close;
+      continue;
+    }
+    out += `${html.slice(from, open)} `;
+    from = at = close + 1;
+  }
+  return out + html.slice(from);
+}
+
+const LINK = /^<a\s[^>]*href="([^"]+)"[^>]*>$/i;
+
+/** What one tag turns into: a form or field is described, a line break becomes one, anything else is dropped. */
+function tagText(tag: string): string {
+  const form = /^<form\b([^>]*)>$/i.exec(tag);
+  if (form) {
+    const method = (attr(form[1]!, "method") ?? "get").toUpperCase();
+    return `\n[form: ${method} ${attr(form[1]!, "action") || "(this page)"}]\n`;
+  }
+  const field = /^<(input|textarea|select)\b([^>]*)>$/i.exec(tag);
+  if (field) {
+    const [, name, attrs] = field as unknown as [string, string, string];
+    const type = (attr(attrs, "type") ?? (name.toLowerCase() === "input" ? "text" : name)).toLowerCase();
+    if (/^(hidden|submit|button|image|reset)$/.test(type)) return " ";
+    const label = attr(attrs, "aria-label") ?? attr(attrs, "placeholder");
+    const fieldName = attr(attrs, "name");
+    return ` [${type} field${label ? ` "${label}"` : ""}${fieldName ? ` name=${fieldName}` : ""}] `;
+  }
+  if (/^<(br|\/p|\/div|\/li|\/h[1-6]|\/tr)/i.test(tag)) return "\n";
+  if (/^<li/i.test(tag)) return "- ";
+  return " ";
+}
+
+/**
+ * Every tag in one left-to-right pass, so the time taken grows with the page and not with how its tags are broken.
+ * A link shows its target after its text: `<a href="/x">Shop</a>` becomes `Shop (/x)`.
+ */
+function markupToText(html: string): string {
+  const parts: string[] = [];
+  // The link being read: where its opening tag sits in `parts`, and where it points.
+  let link: { slot: number; url: string } | undefined;
+  let from = 0;
+  let at = 0;
+  for (;;) {
+    const open = html.indexOf("<", at);
+    const close = open === -1 ? -1 : html.indexOf(">", open + 1);
+    // A "<" with no ">" after it, and everything after, is text.
+    if (close === -1) break;
+    // "<>" is not a tag.
+    if (close === open + 1) {
+      at = close;
+      continue;
+    }
+    parts.push(html.slice(from, open));
+    const tag = html.slice(open, close + 1);
+    if (link && /^<\/a>$/i.test(tag)) {
+      parts[link.slot] = "";
+      parts.push(` (${link.url})`);
+      link = undefined;
+    } else {
+      const opens = link ? null : LINK.exec(tag);
+      // Dropped like any tag unless its closing tag turns up, in which case the text between them is the link's.
+      if (opens) link = { slot: parts.length, url: opens[1]! };
+      parts.push(opens ? " " : tagText(tag));
+    }
+    from = at = close + 1;
+  }
+  parts.push(html.slice(from));
+  return parts.join("");
+}
+
+/**
  * Readable text from an HTML page: drops scripts, styles and tags, keeps link targets, and shows forms and their
  * fields (a site's search box is how a person finds things there).
  */
 export function htmlToText(html: string): string {
-  return html
-    .replace(/<(script|style|noscript|svg|head)[^>]*>[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<form\b([^>]*)>/gi, (_whole, attrs: string) => {
-      const method = (attr(attrs, "method") ?? "get").toUpperCase();
-      return `\n[form: ${method} ${attr(attrs, "action") || "(this page)"}]\n`;
-    })
-    .replace(/<(input|textarea|select)\b([^>]*)>/gi, (_whole, tag: string, attrs: string) => {
-      const type = (attr(attrs, "type") ?? (tag.toLowerCase() === "input" ? "text" : tag)).toLowerCase();
-      if (/^(hidden|submit|button|image|reset)$/.test(type)) return " ";
-      const label = attr(attrs, "aria-label") ?? attr(attrs, "placeholder");
-      const name = attr(attrs, "name");
-      return ` [${type} field${label ? ` "${label}"` : ""}${name ? ` name=${name}` : ""}] `;
-    })
-    .replace(/<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, "$2 ($1)")
-    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr)[^>]*>/gi, "\n")
-    .replace(/<li[^>]*>/gi, "- ")
-    .replace(/<[^>]+>/g, " ")
+  const page = withoutBlocks(html);
+  const cut = page.length > MAX_HTML_CHARS;
+  const text = markupToText(cut ? page.slice(0, MAX_HTML_CHARS) : page)
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
@@ -152,6 +273,7 @@ export function htmlToText(html: string): string {
     .replace(/[ \t]+/g, " ")
     .replace(/\n\s*\n\s*\n+/g, "\n\n")
     .trim();
+  return cut ? `${text}\n…(page cut at ${MAX_HTML_CHARS} characters)` : text;
 }
 
 /**
@@ -160,14 +282,8 @@ export function htmlToText(html: string): string {
  */
 export function looksScriptRendered(html: string): boolean {
   if (html.length < 400) return false;
-  const scripts = [...html.matchAll(/<script[^>]*>[\s\S]*?<\/script>/gi)].reduce(
-    (total, match) => total + match[0].length,
-    0,
-  );
-  const text = html
-    .replace(/<(script|style|noscript|svg|head)[^>]*>[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ");
+  const scripts = blockSpans(html, "script").reduce((total, [start, end]) => total + end - start, 0);
+  const text = stripTags(withoutBlocks(html)).replace(/\s+/g, " ");
   return scripts / html.length > 0.4 && text.length / html.length < 0.03;
 }
 

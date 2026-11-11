@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { MAX_SECRET_LENGTH, SECRET_TOO_LONG } from "./api";
+
 export interface ProviderPreset {
   preset: string;
   label: string;
@@ -152,14 +154,14 @@ export const AddProviderInput = z.object({
   preset: z.string(),
   label: z.string().trim().min(1).max(60).optional(),
   baseUrl: z.url().optional(),
-  apiKey: z.string().trim().min(1).max(4096).optional(),
+  apiKey: z.string().trim().min(1).max(MAX_SECRET_LENGTH, SECRET_TOO_LONG).optional(),
 });
 export type AddProviderInput = z.infer<typeof AddProviderInput>;
 
 export const UpdateProviderInput = z.object({
   label: z.string().trim().min(1).max(60).optional(),
   baseUrl: z.url().optional(),
-  apiKey: z.string().trim().min(1).max(4096).optional(),
+  apiKey: z.string().trim().min(1).max(MAX_SECRET_LENGTH, SECRET_TOO_LONG).optional(),
   enabled: z.boolean().optional(),
 });
 export type UpdateProviderInput = z.infer<typeof UpdateProviderInput>;

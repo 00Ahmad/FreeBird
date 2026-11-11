@@ -1,6 +1,6 @@
 {
   "name": "freebird",
-  "version": "0.0.2",
+  "version": "0.0.5",
   "description": "A team of AI bots you chat with like coworkers, on local models (Ollama, LM Studio, llama.cpp…) or any API provider.",
   "license": "MIT",
   "repository": {
@@ -36,6 +36,7 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:ui": "vitest --ui",
     "lint": "oxlint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -43,6 +44,7 @@
   },
   "devDependencies": {
     "@types/node": "26.6.6",
+    "@vitest/ui": "5.0.5",
     "esbuild": "0.28.2",
     "oxlint": "1.90.0",
     "prettier": "3.9.10",

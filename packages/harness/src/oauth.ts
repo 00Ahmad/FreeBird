@@ -18,7 +18,8 @@ import { OAUTH_PREFIX } from "./vault";
  * part the SDK leaves to the app: where things are kept, and how the user is sent to sign in and back.
  *
  * - Everything for one app's sign-in (its client registration, tokens, and the PKCE verifier of a sign-in under way)
- *   is one keychain entry, `MCP_OAUTH_<ID>`, listed with the user's other secrets so it can be deleted there.
+ *   is kept under one name, `MCP_OAUTH_<ID>`, listed with the user's other secrets so it can be deleted there. Big
+ *   tokens make it longer than one keychain entry holds, so the vault keeps such a value in several entries.
  * - It is tied to the server's address: an entry made for another address is never sent anywhere (so editing an
  *   app's URL can't hand its token to a new server), and is deleted.
  * - Nothing opens on its own: when a server wants a sign-in, the app shows "Sign in", and the address is opened only
@@ -116,7 +117,7 @@ export class ConnectorSignIn implements OAuthClientProvider {
   }
 
   private save(next: Saved) {
-    this.deps.vault.set(this.name, JSON.stringify(next));
+    this.deps.vault.setLong(this.name, JSON.stringify(next));
     // The scrubber learns the new token; Settings lists the entry.
     this.deps.bus.publish({ type: "secrets.changed", names: this.deps.vault.names() });
   }

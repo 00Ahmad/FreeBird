@@ -39,3 +39,13 @@ export function nextFocus(count: number, current: number, backwards: boolean): n
   if (!backwards && current === count - 1) return 0;
   return null;
 }
+
+/**
+ * Whether nothing is in use, so something that appears may take focus: the page itself has it (`current` is null),
+ * or the message box does and it is empty. A box with text in it means the user is typing, and their next Enter or
+ * Space would land on whatever took focus.
+ */
+export function focusIsIdle(current: { id: string; value?: string } | null, composerId: string): boolean {
+  if (!current) return true;
+  return current.id === composerId && current.value === "";
+}

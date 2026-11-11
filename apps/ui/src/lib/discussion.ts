@@ -87,7 +87,8 @@ export function discussionSources(messages: Message[], names: Map<string, string
         : "A former member";
     for (const url of messageLinks(message)) add(url, who, true);
     for (const part of message.parts) {
-      if (part.type === "tool" && typeof part.args.url === "string") add(part.args.url, who, false);
+      // A part can be missing if a chunk once landed past the end of the list.
+      if (part?.type === "tool" && typeof part.args.url === "string") add(part.args.url, who, false);
     }
   }
   return [...found.values()].toSorted((a, b) => Number(b.cited) - Number(a.cited));

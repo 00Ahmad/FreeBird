@@ -352,6 +352,208 @@ describe("group discussions", () => {
   });
 });
 
+describe("a discussion whose team changes", () => {
+  const summaryText =
+    "## Discussion summary\n### Most promising ideas\n- [Ada's source](https://example.org/ada) held up.\n### Weak spots and risks\nNone.\n### Where they disagreed\nNone.\n### Sources cited\n- https://example.org/ada\n### Open questions\nNone.";
+
+  function panel(harness: TestHarness, names: string[]) {
+    harness.store.settings.set("runtime", { ...DEFAULT_RUNTIME_SETTINGS, sharedModel: "ollama:test:1b" });
+    const bots = names.map((name) => harness.store.bots.create({ name }));
+    const thread = harness.store.threads.createGroup(
+      "Panel",
+      bots.map((bot) => bot.id),
+    );
+    return { bots, thread };
+  }
+  const drop = (harness: TestHarness, bot: Bot) =>
+    harness.app.inject({ method: "DELETE", url: `/api/bots/${bot.id}`, headers: auth });
+  const begin = (harness: TestHarness, thread: Thread, rounds: number) =>
+    harness.app.inject({
+      method: "POST",
+      url: `/api/threads/${thread.id}/discussion`,
+      headers: auth,
+      payload: { topic: "Should we open a second shop?", goal: "explore", rounds },
+    });
+  const speakerOf = (system: string) =>
+    system.includes("structured discussion") ? /^You are (\w+)/.exec(system)?.[1] : undefined;
+
+  it("carries on when experts are deleted mid-round, and keeps what a deleted expert said", async () => {
+    const spoken: string[] = [];
+    let summaryPrompt = "";
+    let ada!: Bot;
+    let dan!: Bot;
+    h = await makeHarness({
+      handlers: fakeOllama(async (body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        if (system.startsWith("You are the neutral moderator")) {
+          summaryPrompt = body.messages.at(-1)?.content ?? "";
+          return reply(summaryText);
+        }
+        const bot = speakerOf(system);
+        if (!bot) return reply("");
+        spoken.push(bot);
+        // One who already spoke and one who hasn't leave while Bea is speaking.
+        if (bot === "Bea") await Promise.all([drop(h!, ada), drop(h!, dan)]);
+        return reply(`${bot} here. https://example.org/${bot.toLowerCase()}`);
+      }),
+    });
+    const { bots, thread } = panel(h, ["Ada", "Bea", "Cy", "Dan"]);
+    [ada, , , dan] = bots as [Bot, Bot, Bot, Bot];
+    const done = ended(h);
+    await begin(h, thread, 1);
+    const final = await done;
+
+    expect(final).toMatchObject({ status: "done", error: null });
+    expect(spoken).toEqual(["Ada", "Bea", "Cy"]);
+    const summary = h.store.messages.get(final.summaryId!)!;
+    expect(summary.status).toBe("done");
+    // Ada's link survives her deletion, and she shows up as a former expert, not as the moderator.
+    expect(messageText(summary)).toContain("[Ada's source](https://example.org/ada)");
+    expect(summaryPrompt).toContain("[A former expert]: Ada here.");
+    expect(summaryPrompt).not.toContain("[Moderator]: Ada");
+    expect(summaryPrompt).toContain("- https://example.org/ada (a former expert)");
+  });
+
+  it("carries on when the speaker is deleted mid-turn", async () => {
+    const spoken: string[] = [];
+    let bea!: Bot;
+    h = await makeHarness({
+      handlers: fakeOllama(async (body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        if (system.startsWith("You are the neutral moderator")) return reply(summaryText);
+        const bot = speakerOf(system);
+        if (!bot) return reply("");
+        spoken.push(bot);
+        if (bot === "Bea") {
+          await drop(h!, bea);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return reply(`${bot} here.`);
+      }),
+    });
+    const { bots, thread } = panel(h, ["Ada", "Bea", "Cy"]);
+    bea = bots[1]!;
+    const done = ended(h);
+    await begin(h, thread, 1);
+    const final = await done;
+
+    expect(final).toMatchObject({ status: "done", error: null });
+    expect(spoken).toEqual(["Ada", "Bea", "Cy"]);
+    expect(h.store.messages.get(final.summaryId!)).toMatchObject({ status: "done" });
+  });
+
+  it("skips experts deleted while the moderator was choosing", async () => {
+    const spoken: string[] = [];
+    const asked: string[] = [];
+    let cy!: Bot;
+    let dan!: Bot;
+    h = await makeHarness({
+      handlers: fakeOllama(async (body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        if (system.startsWith("You are the neutral moderator")) return reply(summaryText);
+        if (system.startsWith("You moderate")) {
+          asked.push(body.messages.at(-1)?.content ?? "");
+          if (asked.length > 1) return reply("NEXT: Ada");
+          // The one it picks and another are deleted before it answers.
+          await Promise.all([drop(h!, cy), drop(h!, dan)]);
+          return reply("NEXT: Cy");
+        }
+        const bot = speakerOf(system);
+        if (bot) spoken.push(bot);
+        return reply(bot ? `${bot} here.` : "");
+      }),
+    });
+    const { bots, thread } = panel(h, ["Ada", "Bea", "Cy", "Dan"]);
+    [, , cy, dan] = bots as [Bot, Bot, Bot, Bot];
+    const done = ended(h);
+    await begin(h, thread, 2);
+    const final = await done;
+
+    expect(final).toMatchObject({ status: "done", error: null });
+    expect(spoken).toEqual(["Ada", "Bea", "Cy", "Dan", "Ada", "Bea"]);
+    // The moderator's next choice is only among those still there.
+    expect(asked[1]).toContain("- Ada");
+    expect(asked[1]).not.toMatch(/- (Cy|Dan)/);
+    expect(h.store.messages.get(final.summaryId!)).toMatchObject({ status: "done" });
+  });
+
+  it("summarizes what was said when too few bots are left to go on", async () => {
+    const spoken: string[] = [];
+    h = await makeHarness({
+      handlers: fakeOllama(async (body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        if (system.startsWith("You are the neutral moderator")) return reply(summaryText);
+        const bot = speakerOf(system);
+        if (!bot) return reply("");
+        spoken.push(bot);
+        // Bea is taken out of the chat while Ada speaks.
+        h!.store.threads.update(thread.id, { memberIds: [ada.id] });
+        return reply(`${bot} here.`);
+      }),
+    });
+    const { bots, thread } = panel(h, ["Ada", "Bea"]);
+    const ada = bots[0]!;
+    const done = ended(h);
+    await begin(h, thread, 2);
+    const final = await done;
+
+    expect(spoken).toEqual(["Ada"]);
+    expect(final).toMatchObject({ status: "done", error: "A discussion needs at least two bots." });
+    expect(h.store.messages.get(final.summaryId!)).toMatchObject({ status: "done" });
+  });
+
+  it("ends only when replies fail several times in a row", async () => {
+    let turn = 0;
+    h = await makeHarness({
+      handlers: fakeOllama((body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        if (system.startsWith("You are the neutral moderator")) return reply(summaryText);
+        if (system.startsWith("You moderate")) return reply("NEXT: nobody");
+        if (!speakerOf(system)) return reply("");
+        turn += 1;
+        // Three failures, each with a good turn in between.
+        return [2, 4, 6].includes(turn)
+          ? new Response("model crashed", { status: 500 })
+          : reply("A point (reasoning).");
+      }),
+    });
+    const { thread } = panel(h, ["Ada", "Bea", "Cy"]);
+    const done = ended(h, 20_000);
+    await begin(h, thread, 3);
+    const final = await done;
+
+    expect(final).toMatchObject({ status: "done", round: 3, error: null });
+    expect(turn).toBeGreaterThanOrEqual(9);
+  });
+
+  it("clears the summary's message and the working mark when preparing it fails", async () => {
+    h = await makeHarness({
+      handlers: fakeOllama((body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        return reply(speakerOf(system) ? "A point (reasoning)." : "");
+      }),
+    });
+    const { thread } = panel(h, ["Ada", "Bea"]);
+    // Reading the messages fails once the summary starts.
+    const unsubscribe = h.bus.subscribe((event) => {
+      if (event.type === "discussion.updated" && event.discussion.status === "summarizing") {
+        vi.spyOn(h!.store.messages, "list").mockImplementation(() => {
+          throw new Error("the database is locked");
+        });
+      }
+    });
+    const done = ended(h);
+    await begin(h, thread, 1);
+    const final = await done;
+    unsubscribe();
+    vi.restoreAllMocks();
+
+    expect(final).toMatchObject({ status: "error", error: "the database is locked" });
+    expect(h.store.messages.get(final.summaryId!)).toMatchObject({ status: "error" });
+    expect(h.services.turns.activities()[thread.id]).toBeUndefined();
+  });
+});
+
 describe("clusters", () => {
   const team = [
     {
@@ -487,6 +689,69 @@ describe("discussion parsing", () => {
         "- Amazon fee schedule (no address given) — 15%.",
         "- Survey: https://example.org/a?b=1. Also (no address given)",
       ].join("\n"),
+    );
+  });
+
+  it("keeps the marks around an address that was made up or real", () => {
+    const known = new Set([normalizeUrl("https://a.com/x")]);
+    const bad = "https://b.com/y";
+    // Real ones stay as they are, whatever closes them.
+    for (const text of [
+      "`https://a.com/x`",
+      "**https://a.com/x**",
+      "_https://a.com/x_",
+      "“https://a.com/x”",
+      "https://a.com/x…",
+      "https://a.com/x。",
+      "(https://a.com/x)",
+      "HTTPS://A.com/x",
+    ])
+      expect(keepKnownLinks(text, known), text).toBe(text);
+    // Made-up ones are replaced, and what closes around them stays balanced.
+    expect(keepKnownLinks(`\`${bad}\``, known)).toBe("`(no address given)`");
+    expect(keepKnownLinks(`**${bad}**`, known)).toBe("**(no address given)**");
+    expect(keepKnownLinks(`“${bad}”`, known)).toBe("“(no address given)”");
+    expect(keepKnownLinks(`${bad}…`, known)).toBe("(no address given)");
+    expect(keepKnownLinks("See HTTPS://made.up/x", known)).toBe("See (no address given)");
+  });
+
+  it("leaves text that looks like a held-back link alone", () => {
+    const known = new Set([normalizeUrl("https://a.com/x")]);
+    expect(keepKnownLinks("Item ⟦7⟧ and [A](https://a.com/x) and ⟦0⟧", known)).toBe(
+      "Item 7 and [A](https://a.com/x) and 0",
+    );
+  });
+
+  it("counts the links the user gave as known", async () => {
+    h = await makeHarness({
+      handlers: fakeOllama((body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        if (system.startsWith("You are the neutral moderator"))
+          return reply(
+            "## Discussion summary\n### Recommendation\nSee [the guide](https://docs.example.com/guide) and [the brief](https://docs.example.com/brief), not [this](https://made.up/z).\n### Arguments for and against\nNone.\n### Where they disagreed\nNone.\n### Sources cited\nNone.\n### What would change the recommendation\nNothing.",
+          );
+        if (system.includes("structured discussion")) {
+          // The user adds a link while the bots are talking.
+          h!.store.messages.create({
+            threadId: thread.id,
+            role: "user",
+            parts: [{ type: "text", text: "Also read https://docs.example.com/brief." }],
+          });
+        }
+        return reply("A point (reasoning).");
+      }),
+    });
+    const { thread } = await group(h);
+    const done = ended(h);
+    await h.app.inject({
+      method: "POST",
+      url: `/api/threads/${thread.id}/discussion`,
+      headers: auth,
+      payload: { topic: "Is https://docs.example.com/guide right?", goal: "decide", rounds: 1 },
+    });
+    const final = await done;
+    expect(messageText(h.store.messages.get(final.summaryId!)!)).toContain(
+      "See [the guide](https://docs.example.com/guide) and [the brief](https://docs.example.com/brief), not this (no address given).",
     );
   });
 });

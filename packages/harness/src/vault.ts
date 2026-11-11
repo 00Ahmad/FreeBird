@@ -5,14 +5,17 @@ import { z } from "zod";
 
 import {
   ImportCsvInput,
+  isSecretTooLong,
   loginEnvNames,
   NewVaultItem,
+  SECRET_TOO_LONG,
   SecretName,
   VaultItem,
   type Bot,
   type MessagePart,
 } from "@mrog/shared";
 import { BADGES, defineTool, safe, type ToolSpec } from "@mrog/tools";
+import { SecretTooLongError } from "@mrog/vault";
 
 import { fail, parse } from "./http";
 import type { SecretValue } from "./scrubber";
@@ -158,7 +161,7 @@ export class VaultService {
         address: input.address ?? "",
       };
     }
-    this.services.vault.set(itemSecret(id), JSON.stringify(secret));
+    this.services.vault.setLong(itemSecret(id), JSON.stringify(secret));
     this.saveItems([...this.items(), item]);
     return item;
   }
@@ -294,7 +297,8 @@ export class VaultService {
 
   /**
    * Answers an open secret card: saves `value` (null when the user skipped it) under the name the bot asked for,
-   * whatever the request says. False when the card is no longer waiting.
+   * whatever the request says. False when the card is no longer waiting. A value that can't be saved throws and leaves
+   * the card waiting, so the user can try again or skip it.
    */
   respondSecret(requestId: string, value: string | null): boolean {
     const pending = this.pendingSecrets.get(requestId);
@@ -457,7 +461,7 @@ export function registerVaultRoutes(app: FastifyInstance, vaultService: VaultSer
     const body = parse(
       z.object({
         name: SecretName.optional(),
-        value: z.string().min(1).max(16_384).optional(),
+        value: z.string().optional(),
         decline: z.boolean().optional(),
       }),
       request.body,
@@ -465,8 +469,16 @@ export function registerVaultRoutes(app: FastifyInstance, vaultService: VaultSer
     );
     if (!body) return reply;
     const value = !body.decline && body.value ? body.value : null;
-    if (!vaultService.respondSecret(request.params.id, value)) {
-      return fail(reply, 410, "expired", "This request is no longer waiting.");
+    // The card stays open on an error, so the user can paste a shorter value or skip it.
+    if (isSecretTooLong(value)) return fail(reply, 400, "secret_too_long", SECRET_TOO_LONG);
+    try {
+      if (!vaultService.respondSecret(request.params.id, value)) {
+        return fail(reply, 410, "expired", "This request is no longer waiting.");
+      }
+    } catch (error) {
+      if (error instanceof SecretTooLongError) return fail(reply, 400, error.code, error.message);
+      console.error("[harness] vault error", error);
+      return fail(reply, 503, "vault_unavailable", "The system keychain could not be used.");
     }
     return reply.code(204).send();
   });

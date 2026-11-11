@@ -1,14 +1,17 @@
 import { skipToken, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import type { Message, MessagePart, SendMessageInput, Thread } from "@mrog/shared";
+import type { Message, SendMessageInput, Thread } from "@mrog/shared";
 
 import { api, ApiRequestError } from "../lib/api";
-import { keepStreamed, type Delta } from "../lib/messages";
+import { HeldEvents, keepStreamed, mergeDelta, mergeMessage, replayHeld, type Delta } from "../lib/messages";
 
 const THREADS_KEY = ["threads"] as const;
 export const messagesKey = (threadId: string) => ["messages", threadId] as const;
 const olderMessagesKey = (threadId: string) => [...messagesKey(threadId), "older"] as const;
+
+/** Events for a thread whose messages are being fetched for the first time: they have nothing to land on yet. */
+const held = new HeldEvents();
 
 /** Messages per request; a shorter answer means the thread has nothing older. */
 const PAGE = 200;
@@ -51,9 +54,18 @@ export function useMessages(threadId: string | null) {
     queryKey: key,
     enabled: Boolean(threadId),
     queryFn: async () => {
-      const { messages } = await api<{ messages: Message[] }>(`/threads/${threadId}/messages?limit=${PAGE}`);
-      // Compared with the cache as it is now, after the chunks that streamed in during the request.
-      return keepStreamed(client.getQueryData<Message[]>(key), messages);
+      const id = threadId!;
+      held.begin(id);
+      let page: Message[];
+      try {
+        page = (await api<{ messages: Message[] }>(`/threads/${id}/messages?limit=${PAGE}`)).messages;
+      } catch (error) {
+        held.end(id);
+        throw error;
+      }
+      // Compared with the cache as it is now, after the chunks that streamed in during the request, and then with
+      // what arrived for a thread that had nothing cached yet.
+      return replayHeld(keepStreamed(client.getQueryData<Message[]>(key), page), held.end(id));
     },
   });
 }
@@ -108,33 +120,29 @@ export function upsertMessage(client: QueryClient, message: Message) {
     });
     return;
   }
-  client.setQueryData<Message[]>(messagesKey(message.threadId), (old) => {
-    if (!old) return old;
-    const at = old.findIndex((existing) => existing.id === message.id);
-    // Older than everything loaded: it belongs to history that isn't shown, not to the live page.
-    if (at === -1 && old[0] && message.createdAt < old[0].createdAt) return old;
-    if (at === -1) return [...old, message].toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
-    const next = old.slice();
-    next[at] = message;
-    return next;
-  });
+  const key = messagesKey(message.threadId);
+  if (!client.getQueryData<Message[]>(key)) {
+    held.hold(message.threadId, { message });
+    return;
+  }
+  client.setQueryData<Message[]>(key, (old) => old && mergeMessage(old, message));
 }
 
-/** Appends a streamed chunk to a cached message, creating the part if it's new. */
+/**
+ * Appends a streamed chunk to a cached message, creating the part if it's new. A chunk the cached copy can't take
+ * yet (it lacks the parts before it) is dropped and the thread refetched, rather than leaving a hole in the parts.
+ */
 export function applyDelta(client: QueryClient, delta: Delta) {
-  client.setQueryData<Message[]>(messagesKey(delta.threadId), (old) => {
-    if (!old) return old;
-    const at = old.findIndex((message) => message.id === delta.messageId);
-    if (at === -1) return old;
-    const message = old[at]!;
-    const parts: MessagePart[] = message.parts.slice();
-    const part = parts[delta.partIndex];
-    if (part && part.type === delta.kind) parts[delta.partIndex] = { ...part, text: part.text + delta.text };
-    else parts[delta.partIndex] = { type: delta.kind, text: delta.text };
-    const next = old.slice();
-    next[at] = { ...message, parts };
-    return next;
-  });
+  const key = messagesKey(delta.threadId);
+  const old = client.getQueryData<Message[]>(key);
+  if (!old) {
+    held.hold(delta.threadId, { delta });
+    return;
+  }
+  const { messages, behind } = mergeDelta(old, delta);
+  if (messages !== old) client.setQueryData<Message[]>(key, messages);
+  // Don't restart a fetch that is already under way: every chunk of a busy reply lands here.
+  if (behind) void client.invalidateQueries({ queryKey: key, exact: true }, { cancelRefetch: false });
 }
 
 export function useSendMessage(threadId: string) {

@@ -25,12 +25,15 @@ A race gives the **same task to 3–5 bots that work independently**. A judge th
 
 ### What happens
 
-1. **Racing.** Every racer gets the task in its own thread and works alone; none sees the others. Each starts by choosing a strategy, ideally one the others might not think of, and writes it as the first line of its answer. Racers can search and read the web and work with files in their own folder, but they never stop to ask you questions: they make reasonable assumptions and state them.
+1. **Racing.** Every racer gets the task in its own thread and works alone; none sees the others. Each starts by choosing a strategy, ideally one the others might not think of, and writes it as the first line of its answer. Racers can search and read the web and work with files in their own folder, but they never stop to ask you questions: they make reasonable assumptions and state them. A call that would need your approval (a file outside their folder, an address on your network) is refused at once, so a racer never holds up the others waiting for a card.
 2. **Judging.** When all racers are done (or when you press **Judge now**), the judge:
    - picks **3–5 criteria** that matter for this task (correctness, completeness, evidence, clarity, originality, practicality…),
    - fills in a **score table**, 1–10 per criterion per racer,
    - names the **winner** and explains why, including what each other racer did well,
    - writes the **final result**: the actual answer to your task, built from the strongest parts of every racer, with _(from Name)_ after each borrowed part.
+
+   If the judge's report leaves a part out or empty, the judge is asked once more for just that part, and it is put in its place. If no winner is named, the racer with the highest total in the score table wins (a tie names no winner).
+
 3. You can open any racer's own thread to see exactly how it got there.
 
 Press **Stop** at any time to end the race. Links the racers never actually opened or wrote are flagged in the judge's report, so invented sources don't slip through.
@@ -88,5 +91,7 @@ At the end the moderator writes a summary in a fixed shape for the goal:
 | Where they disagreed | Where they disagreed                                   | Claims without a source |
 | Sources cited        | Sources cited                                          | Sources cited           |
 | Open questions       | What would change the recommendation                   | Open questions          |
+
+If the summary leaves a section out, leaves it empty or is cut off in the middle of one, the moderator is asked once more for just those sections, and they are put in their place. If the experts' replies keep failing after some of them have spoken, the discussion ends early and the moderator still sums up what was said (the summary says it ended early). Only **Stop** ends a cluster without a summary; use **Finish** to wrap up early with one.
 
 Any link in the summary that no expert actually opened or wrote is replaced by its label marked _"no address given"_, so you can tell checked sources from made-up ones.

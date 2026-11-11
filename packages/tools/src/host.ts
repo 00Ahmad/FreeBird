@@ -80,10 +80,13 @@ export function createToolHost(
   const byName = new Map(specs.map((spec) => [spec.name, spec]));
   const schemas = new Map(specs.map((spec) => [spec.name, argsSchema(spec)]));
   // Secrets the bot's commands get from the Vault must never come back to the model (e.g. `echo $env:PASSWORD`).
-  const secrets = Object.values(context.env ?? {})
-    .filter((value) => value.length >= 4)
-    .toSorted((a, b) => b.length - a.length);
-  const masked = (text: string) => secrets.reduce((out, value) => out.replaceAll(value, "[hidden]"), text);
+  // Read from the context on every call, not once here: the owner may grant a secret in the middle of a turn, and
+  // that value has to reach the next command and be hidden from its output.
+  const masked = (text: string) =>
+    Object.values(context.env ?? {})
+      .filter((value) => value.length >= 4)
+      .toSorted((a, b) => b.length - a.length)
+      .reduce((out, value) => out.replaceAll(value, "[hidden]"), text);
   // The command's own secrets first (they may be short), then everything the app knows is secret.
   const hide = (text: string) => (hooks.scrub ? hooks.scrub(masked(text)) : masked(text));
   return {
@@ -112,6 +115,7 @@ export function createToolHost(
         );
         return { status: "error", result: `Invalid arguments for ${call.name}: ${issues.join("; ")}` };
       }
+      // A spread, so an `env` getter on the context is read now and each call sees the secrets granted so far.
       const ctx: ToolContext = { ...context, signal };
       let risk: Risk;
       try {

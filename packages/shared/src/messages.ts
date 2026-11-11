@@ -75,6 +75,8 @@ export const Message = z.object({
   botId: BotId.nullable(),
   /** A discussion moderator's summary. (A bot message without a bot can also be from a deleted bot.) */
   moderator: z.boolean().default(false),
+  /** A message sent in Parallel Bots mode, or the reply to one (written in three sections). */
+  parallel: z.boolean().default(false),
   parts: z.array(MessagePart),
   status: MessageStatus,
   model: z.string().nullable(),
@@ -117,6 +119,8 @@ export const SendMessageInput = z.object({
     .max(4)
     .optional(),
   replyToId: MessageId.optional(),
+  /** Parallel Bots: one request, and one reply with three roles' answers in three sections. Chats with one bot only. */
+  parallel: z.boolean().optional(),
 });
 export type SendMessageInput = z.infer<typeof SendMessageInput>;
 

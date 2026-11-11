@@ -5,6 +5,7 @@ import type { MessagePart } from "@mrog/shared";
 import { Button, cn } from "@mrog/ui-kit";
 
 import { api } from "../../lib/api";
+import { focusIsIdle } from "../../lib/focus";
 import { answerBody, answerLines, togglePick, type AnswerBody } from "../../lib/question";
 import { COMPOSER_ID } from "./Composer";
 
@@ -21,23 +22,22 @@ export function QuestionCard({ part, live }: { part: QuestionPart; live: boolean
   const [sending, setSending] = useState(false);
   const card = useRef<HTMLDivElement>(null);
   const firstOption = useRef<HTMLButtonElement>(null);
+  const answerInput = useRef<HTMLInputElement>(null);
   const options = part.options ?? [];
   const multiple = Boolean(part.multiple) && options.length > 0;
   const waiting = part.answer === undefined && !part.expired && live;
 
-  // Keyboard users land on the first choice, but only when nothing is in use: a question that arrives while the user
-  // is typing must not take focus, or their next Enter or Space would answer it.
+  // Keyboard users land on the first choice (or the answer box, when there are none), but only when nothing is in
+  // use: a question that arrives while the user is typing must not take focus, or their next Enter or Space would
+  // answer it.
   const offered = useRef(false);
   useEffect(() => {
-    if (offered.current || !waiting || options.length === 0) return;
+    if (offered.current || !waiting) return;
     offered.current = true; // once, when the card appears
     const current = document.activeElement as HTMLElement | null;
-    const idle =
-      !current ||
-      current === document.body ||
-      (current.id === COMPOSER_ID && (current as HTMLTextAreaElement).value === "");
-    if (idle) firstOption.current?.focus();
-  }, [waiting, options.length]);
+    if (focusIsIdle(current && current !== document.body ? current : null, COMPOSER_ID))
+      (firstOption.current ?? answerInput.current)?.focus();
+  }, [waiting]);
 
   const submit = async (body: AnswerBody | null) => {
     if (!body || sending) return;
@@ -123,11 +123,11 @@ export function QuestionCard({ part, live }: { part: QuestionPart; live: boolean
             }}
           >
             <input
+              ref={answerInput}
               value={typed}
               onChange={(event) => setTyped(event.target.value)}
               placeholder={options.length > 0 ? "Or write your own answer" : "Your answer"}
               aria-label={options.length > 0 ? "Or write your own answer" : "Your answer"}
-              autoFocus={options.length === 0}
               maxLength={4000}
               className="h-8 min-w-0 flex-1 rounded-lg border border-border bg-bg px-2.5 outline-none focus:border-accent"
             />

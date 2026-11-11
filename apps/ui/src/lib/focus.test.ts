@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { nextFocus, tabbable, type Focusable } from "./focus";
+import { focusIsIdle, nextFocus, tabbable, type Focusable } from "./focus";
 
 const item = (over: Partial<Focusable> = {}): Focusable => ({ tabIndex: 0, rendered: true, ...over });
 
@@ -60,5 +60,18 @@ describe("where Tab goes inside a dialog", () => {
         }
       }
     }
+  });
+});
+
+describe("whether a new card may take focus", () => {
+  it("may when nothing, or an empty message box, has it", () => {
+    expect(focusIsIdle(null, "composer")).toBe(true);
+    expect(focusIsIdle({ id: "composer", value: "" }, "composer")).toBe(true);
+  });
+
+  it("may not while the user is typing, or is somewhere else", () => {
+    expect(focusIsIdle({ id: "composer", value: "and also" }, "composer")).toBe(false);
+    expect(focusIsIdle({ id: "search", value: "" }, "composer")).toBe(false);
+    expect(focusIsIdle({ id: "" }, "composer")).toBe(false);
   });
 });

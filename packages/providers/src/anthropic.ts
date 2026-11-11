@@ -88,6 +88,10 @@ export function toAnthropicMessages(
       push("user", [{ type: "tool_result", tool_use_id: message.toolCallId, content: message.content }]);
     }
   }
+  // The first message must be the user's, but a history cut mid-conversation (or a thread that opens with the bot)
+  // can start with the bot.
+  if (out[0]?.role === "assistant")
+    out.unshift({ role: "user", content: [{ type: "text", text: "(conversation start)" }] });
   return { system, messages: out };
 }
 

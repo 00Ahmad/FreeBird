@@ -15,6 +15,7 @@ const message = (text: string, id = newId("msg")) =>
     role: "bot",
     botId: null,
     moderator: false,
+    parallel: false,
     parts: [{ type: "text", text }],
     status: "streaming",
     model: null,
@@ -90,5 +91,16 @@ describe("system prompt", () => {
     expect(at(1)).toBe(at(59));
     expect(at(1)).toContain("2026-11-03");
     expect(at(1)).toContain("16:00 and 17:00");
+  });
+
+  it("calls a group a group chat, but not the thread two bots share", () => {
+    const bot = { name: "Ada", label: null, instructions: "" } as unknown as Bot;
+    const teammate = { name: "Boss" } as Bot;
+    const prompt = (thread: Partial<Thread>) =>
+      buildSystemPrompt(bot, { thread: thread as Thread, teammates: [teammate], now: new Date() });
+    expect(prompt({ kind: "group", pair: false })).toContain(
+      "This is a group chat with the user and these bots: Boss",
+    );
+    expect(prompt({ kind: "group", pair: true })).not.toContain("group chat");
   });
 });

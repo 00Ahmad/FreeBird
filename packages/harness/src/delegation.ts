@@ -1,6 +1,14 @@
 import { z } from "zod";
 
-import { isCoordinator, messageText, ModelRef, type Bot, type Message, type Thread } from "@mrog/shared";
+import {
+  BotName,
+  isCoordinator,
+  messageText,
+  ModelRef,
+  type Bot,
+  type Message,
+  type Thread,
+} from "@mrog/shared";
 import { defineTool, safe, type ToolContext, type ToolSpec } from "@mrog/tools";
 
 import type { Services } from "./services";
@@ -77,10 +85,22 @@ export function installDelegation(services: Services) {
         (other) => other.id !== bot.id && !other.clusterId && (!other.hidden || other.parentId === bot.id),
       );
 
+  /** A name without case, spacing or punctuation, so "research_bot" is the bot called "Research Bot". */
+  const squash = (name: string) => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+  /** The teammates a name points at: the same name in any case, or failing that the same letters and digits. */
+  const teammatesNamed = (from: Bot, name: string): Bot[] => {
+    const mates = teammatesOf(from);
+    const exact = mates.filter((mate) => mate.name.toLowerCase() === name.trim().toLowerCase());
+    if (exact.length > 0) return exact;
+    const wanted = squash(name);
+    return wanted ? mates.filter((mate) => squash(mate.name) === wanted) : [];
+  };
+
   /** One teammate by name, or a message the model can act on. */
   const resolve = (from: Bot, name: string): Bot | string => {
     const mates = teammatesOf(from);
-    const matches = mates.filter((mate) => mate.name.toLowerCase() === name.trim().toLowerCase());
+    const matches = teammatesNamed(from, name);
     if (matches.length === 1) return matches[0]!;
     if (matches.length > 1)
       return `More than one teammate is called "${name}". Ask the user which one, or rename one.`;
@@ -149,6 +169,47 @@ export function installDelegation(services: Services) {
     return { text };
   };
 
+  /** A temporary helper of a coordinator, or why it can't be made. */
+  const createHelper = (
+    bot: Bot,
+    input: { name: string; instructions: string; model?: string; visual?: boolean },
+  ): Bot | string => {
+    const name = BotName.safeParse(input.name);
+    if (!name.success) return `"${input.name.slice(0, 60)}" can't be a bot's name. Use a short name.`;
+    const helpers = store.bots.list().filter((other) => other.parentId === bot.id && other.temporary);
+    if (helpers.length >= MAX_HELPERS) {
+      return `You already have ${helpers.length} helpers (${helpers.map((h) => h.name).join(", ")}). Dismiss one with dismiss_bot first.`;
+    }
+    if (store.bots.list().some((other) => other.name.toLowerCase() === name.data.toLowerCase())) {
+      return `A bot called "${name.data}" already exists. Pick another name.`;
+    }
+    let model: string | null = null;
+    if (input.model) {
+      const parsed = ModelRef.safeParse(input.model);
+      if (!parsed.success || !registry.get(parsed.data.split(":")[0]!)) {
+        return `"${input.model}" isn't an available model. Leave model out to use the shared one.`;
+      }
+      model = parsed.data;
+    }
+    const helper = store.bots.create(
+      {
+        name: name.data,
+        label: `${input.visual ? "Visual helper" : "Helper"} of ${bot.name}`,
+        instructions: input.instructions,
+        model,
+        visual: input.visual ?? false,
+      },
+      { parentId: bot.id, temporary: true, section: HELPERS_SECTION },
+    );
+    bus.publish({ type: "bot.created", bot: helper });
+    const own = store.threads.get(helper.threadId);
+    if (own) bus.publish({ type: "thread.created", thread: own });
+    // Every helper has its conversation with its coordinator from the moment it exists, so it is listed and can be
+    // opened even if the coordinator never gives it work (it is empty until then).
+    pairThread(bot, helper);
+    return helper;
+  };
+
   /** `spawn_bot`: a coordinator makes a helper for part of a job. */
   const spawnTool = (bot: Bot) =>
     defineTool({
@@ -178,35 +239,10 @@ export function installDelegation(services: Services) {
           : { level: "ask", kind: "general", badges: [], summary: `${summary} (on ${args.model})` };
       },
       run: async (args) => {
-        const helpers = store.bots.list().filter((other) => other.parentId === bot.id && other.temporary);
-        if (helpers.length >= MAX_HELPERS) {
-          return `You already have ${helpers.length} helpers (${helpers.map((h) => h.name).join(", ")}). Dismiss one with dismiss_bot first.`;
-        }
-        if (store.bots.list().some((other) => other.name.toLowerCase() === args.name.toLowerCase())) {
-          return `A bot called "${args.name}" already exists. Pick another name.`;
-        }
-        let model: string | null = null;
-        if (args.model) {
-          const parsed = ModelRef.safeParse(args.model);
-          if (!parsed.success || !registry.get(parsed.data.split(":")[0]!)) {
-            return `"${args.model}" isn't an available model. Leave model out to use the shared one.`;
-          }
-          model = parsed.data;
-        }
-        const helper = store.bots.create(
-          {
-            name: args.name,
-            label: `${args.visual ? "Visual helper" : "Helper"} of ${bot.name}`,
-            instructions: args.instructions,
-            model,
-            visual: args.visual ?? false,
-          },
-          { parentId: bot.id, temporary: true, section: HELPERS_SECTION },
-        );
-        bus.publish({ type: "bot.created", bot: helper });
-        const own = store.threads.get(helper.threadId);
-        if (own) bus.publish({ type: "thread.created", thread: own });
-        return `Created ${helper.name}. Give it work with delegate.`;
+        const made = createHelper(bot, args);
+        return typeof made === "string"
+          ? made
+          : `Created ${made.name}. It does nothing until you give it its task with delegate, so do that next instead of doing its work yourself.`;
       },
     });
 
@@ -294,8 +330,27 @@ export function installDelegation(services: Services) {
         run: async (args, ctx) => {
           const targets: Bot[] = [];
           const texts: string[] = [];
+          const created: string[] = [];
           for (const task of args.tasks) {
-            const target = resolve(bot, task.bot_name);
+            let target = resolve(bot, task.bot_name);
+            // Models often name a helper in delegate without making it first (spawn_bot, then delegate is two steps
+            // they skip, and small ones keep retrying the same call). A name nobody has is made here, on the model
+            // already in use, which needs no approval either way. Only for a coordinator that may use spawn_bot: with
+            // it switched off, this would be a way round that.
+            if (
+              typeof target === "string" &&
+              canSpawn &&
+              agent.allows(bot, "spawn_bot") &&
+              teammatesNamed(bot, task.bot_name).length === 0
+            ) {
+              const made = createHelper(bot, {
+                name: task.bot_name,
+                instructions: `You are a helper made by ${bot.name}. Do each task you're given with your tools, and reply with the result itself.`,
+              });
+              if (typeof made === "string") return made;
+              created.push(made.name);
+              target = made;
+            }
             if (typeof target === "string") return target;
             if (targets.some((existing) => existing.id === target.id)) {
               return `${target.name} appears twice. Give each bot one task (combine them into one).`;
@@ -311,13 +366,16 @@ export function installDelegation(services: Services) {
             ),
           );
           if (ctx.signal.aborted) throw new Error("Stopped.");
-          return replies
+          const answers = replies
             .map((reply, index) => {
               const target = targets[index]!;
               const answer = reply instanceof Error ? `(${reply.message})` : answerOf(target, reply);
               return `## ${target.name}\n${answer}`;
             })
             .join("\n\n");
+          return created.length > 0
+            ? `(Created ${created.length === 1 ? "helper" : "helpers"} ${created.join(", ")} for this.)\n\n${answers}`
+            : answers;
         },
       }),
       defineTool({

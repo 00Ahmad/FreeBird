@@ -116,6 +116,19 @@ export class RoutineRepo {
     return this.get(id);
   }
 
+  /**
+   * Schedules the next run as a run begins, not only when it ends: a routine that was running when the app quit (or
+   * crashed) must not be due again at the next start, or it would run from scratch and repeat what it already did. A
+   * one-off routine has no next run after this. Run now and webhook runs leave an interval routine's schedule alone.
+   */
+  startRun(id: string, at = new Date()): Routine | null {
+    const current = this.get(id);
+    if (!current) return null;
+    const next = current.enabled ? nextAfterRun(current, at) : null;
+    this.db.prepare("UPDATE routines SET next_run_at = ? WHERE id = ?").run(next?.toISOString() ?? null, id);
+    return this.get(id);
+  }
+
   /** Records a run and schedules the next one. */
   finishRun(id: string, status: "done" | "error" | "stopped", at = new Date()): Routine | null {
     const current = this.get(id);

@@ -121,7 +121,7 @@ export interface AskOptions {
   local?: { numCtx: number; keepAlive: string };
   /** Longest reply wanted (default 700 tokens). */
   maxTokens?: number;
-  /** Only for models that can think; left out, the model's default. */
+  /** Only for models that can think; left out, Ollama's models don't think here and others use their default. */
   think?: boolean;
 }
 
@@ -141,7 +141,9 @@ export async function askWith(
       { role: "user", content: user },
     ],
     maxTokens: options.maxTokens ?? 700,
-    think: options.think,
+    // A thinking model on Ollama thinks by default, and its thinking counts against the reply cap: a short answer
+    // would come back empty. Ollama takes the flag from any model.
+    think: options.think ?? (provider.kind === "ollama" ? false : undefined),
     local: options.local,
     signal: options.signal,
   })) {

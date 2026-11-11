@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import {
   DEFAULT_PERMISSIONS,
   Permissions,
+  PARTLY_HIDDEN_BADGE,
+  ruleMatches,
   type ApprovalDecision,
   type MessagePart,
   type PermissionRule,
@@ -31,10 +33,15 @@ interface Pending {
 
 /**
  * "Always allow" is offered for general actions only, and never for one that may buy, send or change something
- * on a site or touches sign-in: allowing one such click or login must not allow every later one.
+ * on a site, touches sign-in, or has a part the card doesn't show: allowing one such click or login must not allow
+ * every later one, and nobody should approve for good what they could not read. A connected app's call that can't be
+ * undone (it is marked as both irreversible and shared) asks every time too; a file written outside the bot's folder
+ * is also marked irreversible, but "Always" there covers that one path only.
  */
 const canAlways = (risk: Risk) =>
   risk.kind === "general" &&
+  !risk.badges.includes(PARTLY_HIDDEN_BADGE) &&
+  !(risk.badges.includes(BADGES.irreversible) && risk.badges.includes(BADGES.shares)) &&
   !risk.badges.some(
     (badge) => badge === BADGES.acts || badge === BADGES.security || badge === BADGES.secrets,
   );
@@ -88,7 +95,7 @@ export class ApprovalBroker {
   /** A saved rule for this action, most specific (longest match) first. */
   private ruleFor(tool: string, risk: Risk): PermissionRule | undefined {
     return this.permissions()
-      .rules.filter((rule) => rule.tool === tool && (!rule.match || risk.summary.startsWith(rule.match)))
+      .rules.filter((rule) => rule.tool === tool && ruleMatches(rule, risk.summary))
       .toSorted((a, b) => (b.match?.length ?? 0) - (a.match?.length ?? 0))[0];
   }
 
@@ -221,6 +228,8 @@ export class ApprovalBroker {
       this.addRule({
         tool: pending.request.call.name,
         match: pending.request.risk.summary,
+        // That one action: "Fetch http://10.0.0.1" must not also allow "Fetch http://10.0.0.15/admin".
+        exact: true,
         decision: "allow",
       });
     pending.answer(decision === "deny" ? "deny" : "allow");

@@ -43,7 +43,10 @@ describe("races", () => {
     h = await makeHarness({
       handlers: fakeOllama((body) => {
         const system: string = body.messages[0]?.content ?? "";
-        const who = /^You are (\w+)/.exec(system)?.[1] ?? "?";
+        // The judge's turn, and a call to fill in what its report left out.
+        const who = system.includes("judge of a race")
+          ? "Judge"
+          : (/^You are (\w+)/.exec(system)?.[1] ?? "?");
         order.push(who);
         if (system.includes("You are the judge of a race"))
           return reply("Winner: Wren\n\n## Final result\nDone.");
@@ -177,6 +180,54 @@ describe("races", () => {
     expect(again.statusCode).toBe(409);
   });
 
+  it("refuses a racer's call that needs approval at once, instead of holding the model for a card nobody sees", async () => {
+    const steps = new Map<string, number>();
+    const cards: string[] = [];
+    h = await makeHarness({
+      handlers: fakeOllama((body) => {
+        const system: string = body.messages[0]?.content ?? "";
+        if (system.includes("You are the judge of a race"))
+          return reply("Winner: Wren\n## Final result\nOk.");
+        const who = /^You are (\w+)/.exec(system)?.[1] ?? "?";
+        const step = (steps.get(who) ?? 0) + 1;
+        steps.set(who, step);
+        // Wren reaches for a computer on the local network, which would need the user's approval.
+        if (who === "Wren" && step === 1)
+          return ndjson([
+            {
+              message: {
+                tool_calls: [
+                  { function: { name: "fetch_url", arguments: { url: "http://192.168.1.20/admin" } } },
+                ],
+              },
+            },
+            { done: true },
+          ]);
+        return reply(`Strategy: be ${who}-ish.\n${who} says: Bean There.`);
+      }),
+    });
+    h.bus.subscribe((e) => {
+      if (e.type !== "message.updated") return;
+      for (const part of e.message.parts)
+        if (part.type === "tool" && part.status === "pending_approval") cards.push(part.name);
+    });
+    expect((await startRace(h)).statusCode).toBe(201);
+    // The default wait for a card is 15 minutes: this only ends in time if nobody waited for one.
+    const final = await ended(h);
+
+    expect(final).toMatchObject({ status: "done", error: null });
+    expect(final.racers.map((racer) => racer.status)).toEqual(["done", "done", "done"]);
+    expect(cards).toEqual([]);
+    const wren = h.store.bots.list().find((bot) => bot.name === "Wren")!;
+    const tool = h.store.messages
+      .list(wren.threadId)
+      .flatMap((message) => message.parts)
+      .find((part) => part.type === "tool");
+    expect(tool).toMatchObject({ name: "fetch_url", status: "done" });
+    expect(tool?.type === "tool" ? tool.result : "").toContain("racers work on their own");
+    expect(h.services.runtime.queueState()).toEqual({ running: 0, waiting: 0 });
+  });
+
   it("refuses a model that isn't there, and duplicate names", async () => {
     h = await makeHarness();
     const missing = await startRace(h, {
@@ -215,5 +266,9 @@ describe("races", () => {
     expect(parseWinner("Winner: Bo, ahead of Alice", bots)?.id).toBe("bot_bo");
     expect(parseWinner("Winner: Bo (total 30)", bots)?.id).toBe("bot_bo");
     expect(parseWinner("Winner: Alice", bots)?.id).toBe("bot_alice");
+    // As a section of its own (MiMo v2.6 9B writes it so).
+    expect(parseWinner("## Scores\n| Bo | 42 |\n\n## Winner\nBo\n\n## Why\nClearest.", bots)?.id).toBe(
+      "bot_bo",
+    );
   });
 });

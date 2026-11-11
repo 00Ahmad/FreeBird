@@ -1,5 +1,7 @@
 import { join } from "node:path";
 
+import type { FastifyInstance } from "fastify";
+
 import { openStore, type SettingsRepo } from "@mrog/store";
 import { KeyringBackend, MemoryBackend, moveSecrets, Vault, type NameIndex } from "@mrog/vault";
 
@@ -24,6 +26,24 @@ export function settingsNameIndex(settings: SettingsRepo): NameIndex {
     load: () => settings.get<string[]>(VAULT_NAMES_KEY) ?? [],
     save: (names) => settings.set(VAULT_NAMES_KEY, names),
   };
+}
+
+/**
+ * Starts listening. With a random port wanted (0) and a preferred one known, tries that first and falls back to a
+ * random free one if it can't be had, so a preference never stops the app from starting.
+ */
+export async function listenOn(
+  app: FastifyInstance,
+  config: Pick<HarnessConfig, "host" | "port" | "preferredPort">,
+): Promise<string> {
+  if (config.port === 0 && config.preferredPort) {
+    try {
+      return await app.listen({ host: config.host, port: config.preferredPort });
+    } catch {
+      // Busy, or not allowed here: any free port will do.
+    }
+  }
+  return app.listen({ host: config.host, port: config.port });
 }
 
 export interface RunningHarness {
@@ -65,7 +85,7 @@ export async function startHarness(config: HarnessConfig): Promise<RunningHarnes
     services.disposers.unshift(() => log.close());
   }
   const app = await buildServer(services);
-  const url = await app.listen({ host: config.host, port: config.port });
+  const url = await listenOn(app, config);
   // Connected apps' sign-ins come back here (the port is new each time the packaged app starts).
   services.connectors.setCallbackBase(url);
   services.routines.start();

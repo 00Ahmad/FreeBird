@@ -43,6 +43,8 @@ async function run(model: string) {
   store.settings.set("runtime", {
     ...DEFAULT_RUNTIME_SETTINGS,
     sharedModel: `ollama:${model}`,
+    // EVAL_OLLAMA_URL points the run at an Ollama on another address.
+    ...(process.env.EVAL_OLLAMA_URL ? { ollamaUrl: process.env.EVAL_OLLAMA_URL } : {}),
     numCtx: 8192,
   });
   services.agent.approvals.savePermissions({ localExecution: "never", rules: [] });
@@ -83,6 +85,17 @@ async function run(model: string) {
   console.log(`tools: ${tools.map((t) => `${t.name}:${t.status}`).join(", ")}`);
   console.log(`delegate result: ${delegation?.result?.replace(/\s+/g, " ").slice(0, 300) ?? "(none)"}`);
   console.log(`final: ${messageText(reply).replace(/\s+/g, " ").slice(0, 300)}`);
+  // The conversations the coordinator had with its helpers: the task it sent and the answer that came back.
+  const names = new Map(store.bots.list().map((bot) => [bot.id, bot.name]));
+  const talks = store.threads.list().filter((t) => t.pair);
+  console.log(`conversations with helpers: ${talks.length}`);
+  for (const talk of talks) {
+    console.log(`  thread "${talk.title}" (${talk.memberIds.length} bots)`);
+    for (const message of store.messages.list(talk.id)) {
+      const who = names.get(message.botId ?? "") ?? "?";
+      console.log(`    ${who}: ${messageText(message).replace(/\s+/g, " ").slice(0, 130)}`);
+    }
+  }
 
   await app.close();
   store.close();

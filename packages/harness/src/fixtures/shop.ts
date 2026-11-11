@@ -91,6 +91,70 @@ export function shop(): Server {
         <label style="position:absolute;left:300px;top:480px"><input type="checkbox"> I agree to the terms</label>
         ${layer ? `<div ${action} style="position:fixed;left:0;top:0;width:100%;height:380px;background:rgba(255,255,255,0.01)">${kind === "plain" ? "" : "Subscribe now"}</div>` : ""}`);
     }
+    // An outlet whose own search finds nothing: what's on sale is only found by browsing its menu and pages, as on
+    // shops whose search is poor. The Pixelto A2 is on the second page of Phones.
+    if (url.pathname.startsWith("/outlet")) {
+      // "/outlet/" and "/outlet" are the same page, as on real sites.
+      const path = url.pathname.replace(/\/+$/, "") || "/";
+      const outlet = [
+        ["Nova 5 Lite", "Rs. 24,999"],
+        ["Kestrel 8", "Rs. 41,000"],
+        ["Moto Breeze", "Rs. 22,450"],
+        ["Galaxo M3", "Rs. 38,900"],
+        ["Lumia Go", "Rs. 19,999"],
+        ["Orbit X", "Rs. 45,500"],
+        ["Pixelto A2 6GB/128GB", "Rs. 31,250"],
+        ["Zenith 4", "Rs. 27,300"],
+      ].map(([name, price], index) => ({ id: index + 1, name: name!, price: price! }));
+      const menu = `<nav><a href="/outlet">Outlet home</a> · <a href="/outlet/phones">Phones</a> · <a href="/outlet/laptops">Laptops</a> · <a href="/outlet/deals">Deals</a></nav>
+        <form action="/outlet/search"><input type="search" name="q" placeholder="Search the outlet"></form>`;
+      if (path === "/outlet")
+        return html(`${menu}<h1>Outlet</h1><p>Last season's stock at lower prices.</p>`);
+      if (path === "/outlet/search")
+        return html(
+          `${menu}<h1>Search</h1><p>No results for “${(url.searchParams.get("q") ?? "").replace(/[<>&"]/g, "")}”.</p>`,
+        );
+      if (path === "/outlet/phones") {
+        const second = url.searchParams.get("page") === "2";
+        const shown = second ? outlet.slice(6) : outlet.slice(0, 6);
+        return html(`${menu}<h1>Phones${second ? " (page 2 of 2)" : " (page 1 of 2)"}</h1>
+          ${shown.map((p) => `<div><a href="/outlet/p/${p.id}">${p.name}</a> <span>${p.price}</span></div>`).join("")}
+          ${second ? `<a href="/outlet/phones">‹ Previous page</a>` : `<a href="/outlet/phones?page=2">Next page ›</a>`}`);
+      }
+      if (path === "/outlet/laptops" || path === "/outlet/deals")
+        return html(
+          `${menu}<h1>${path.endsWith("deals") ? "Deals" : "Laptops"}</h1><p>Nothing here right now.</p>`,
+        );
+      const product = outlet.find((p) => path === `/outlet/p/${p.id}`);
+      if (product)
+        return html(
+          `${menu}<h1>${product.name}</h1><p>Outlet price: ${product.price}</p><button>Buy now</button>`,
+        );
+    }
+    // A results page whose search box still holds the last search (as search engines' do), and a rich-text box.
+    if (url.pathname === "/prefilled") {
+      return html(`<input type="search" id="q" aria-label="Search" value="vivo y19s" style="width:400px;font-size:16px">
+        <div id="note" contenteditable="true" aria-label="Note" style="width:400px;height:40px;border:1px solid #999">Old note</div>`);
+    }
+    // A form whose text box, tick box and "Pay now" button sit one Tab apart. Sending it (Enter in the box, or Space
+    // on the focused button) goes to /sent.
+    if (url.pathname === "/form") {
+      return html(`<form action="/sent" method="get">
+        <input type="text" name="note" aria-label="Note">
+        <input type="checkbox" name="gift" id="gift" aria-label="Gift wrap">
+        <input type="submit" value="Pay now">
+      </form>`);
+    }
+    if (url.pathname === "/sent")
+      return html(`<h1>Form sent</h1><p>${url.search.replace(/[<>&"]/g, "")}</p>`);
+    // Payment boxes as sites really write them: a card number in a plain text box, one named by its autocomplete
+    // token, a password a "show password" switch turned into plain text, and a name that is no secret.
+    if (url.pathname === "/pay") {
+      return html(`<input type="text" id="card" name="cardnumber" aria-label="Card number" value="4242 4242 4242 4242"><br>
+        <input type="text" id="billing" autocomplete="billing cc-number" aria-label="Billing card" value="5555 5555 5555 4444"><br>
+        <input type="text" id="pass" autocomplete="current-password" aria-label="Account password" value="hunter2"><br>
+        <input type="text" id="holder" aria-label="Name on card" value="Ada Lovelace">`);
+    }
     // What the page can tell about the browser: whether it says it is automated, and the name it gives.
     if (url.pathname === "/whoami") {
       return html(`<p id="who"></p><script>document.getElementById("who").textContent =

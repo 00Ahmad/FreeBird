@@ -2,7 +2,68 @@
 
 All notable changes to FreeBird. The format follows [Keep a Changelog](https://keepachangelog.com), and the project uses [semantic versioning](https://semver.org).
 
-## Unreleased
+## 0.0.5 - 2026-11-11
+
+### Security
+
+- **Typing can no longer press a button.** A Visual Bot's text with a line break in it now asks for approval exactly like Enter does (it used to submit a form with no card), and `screen_type` refuses unless a real text box has focus, so a space can't click a focused "Pay now" button or tick a box.
+- **Card numbers typed during a handoff no longer reach the model.** Card number, security code and password fields (also a "show password" box and `billing cc-number`-style autocomplete values) are blacked out in every screenshot and left out of the list of page elements.
+- **"Always allow" means that exact action.** It used to match anything that began the same way, so allowing `Fetch http://192.168.1.1` also allowed `http://192.168.1.10/admin`. Rules you type in Custom Rules still match a start; saved rules from before keep working.
+- **A connected app's approval card shows the whole call.** It cut the arguments at 200 characters, so a long message could hide a `bcc` after the cut, and "Always allow" saved the cut text. The card now shows up to 2,000 characters, says how much is hidden past that and then doesn't offer "Always allow", which is also no longer offered for an irreversible call.
+- **The `run_command` card shows the folder** it runs in, with the "Outside the bot's folder" badge when it is elsewhere.
+- **Connected-app tools with similar names can't be mixed up.** `list.items` and `list_items` used to get one name, so a read-only bot could pass a check on one and run the other. Colliding names now get a short suffix.
+- **A web page can no longer freeze the app.** `fetch_url` converted pages with patterns that took minutes on a hostile page of about 1 MB; it is now linear and capped at 400,000 characters.
+- **Bots sharing a browser profile no longer end up in one tab**, where one bot's numbered boxes could be clicked by another.
+- **A key typed for a provider that takes none is no longer stored or sent.** Switching the preset in Add provider also clears the key and name fields, and the server ignores a key for a server that needs none.
+- **Chat images load on request.** An image a reply links to on the web isn't fetched until you press **Load image**.
+- **Racers can't wait for approval cards** nobody can see; a call that needs one is refused at once, and the model slot stays free for the others.
+
+### Fixed
+
+- **Secrets granted during a turn now reach `run_command` in that turn** (and are hidden in its output). The bot used to be told "You haven't been given NAME" and asked again until it ran out of steps.
+- **Secrets longer than the Windows limit** (1,280 characters) get a clear message instead of "keychain could not be used" or a stuck card. Connected apps that issue large tokens (Microsoft, Atlassian) can now sign in and refresh: their sign-in is stored in pieces.
+- **Queued messages behave.** A message waiting behind a running reply uses the bot's current tools and instructions, Stop and Clear chat cancel it, and several messages sent during a Parallel Bots reply get one answer instead of one each. A routine or helper hand-off is never answered in Parallel Bots mode.
+- **A routine that was running when the app closed doesn't run again** at the next start.
+- **The "prepare the turn" step no longer times out while waiting for the model** that other bots are using.
+- **`delegate` no longer makes a helper when the coordinator's `spawn_bot` switch is off.**
+- **Deleting an expert mid-discussion doesn't end it:** the others carry on to the summary, and the deleted expert's lines and links stay (labelled "A former expert").
+- **Summaries and judge reports keep real links** wrapped in backticks, bold, quotes or ending with `…` or `。`, accept `HTTPS://` in capitals and addresses you gave yourself. Three unrelated failed replies spread over a long discussion no longer end it, and a failure while writing the summary no longer leaves the thread on "working".
+- **Streamed text is no longer lost** when you open a chat whose bot is mid-reply, a reply can't stay on "streaming" forever, and a missing part no longer blanks the window (there is a Reload fallback).
+- **AltGr keys** (`[`, `]`, `{`) are no longer swallowed by shortcuts on German, Nordic and Portuguese keyboards.
+- **Group chats work when each bot has its own model** and no shared model is set.
+- **A question without choices doesn't take focus** while you are typing in the message box.
+- **A connected app whose program quits is shown as an error** instead of staying "connected", paginated tool lists are read in full, and `resolve_…`, `check_…`, `trash_…`, `rm_…`, `discard_…` and similar names are classed correctly (changes, not reads).
+- **The routine webhook address keeps its port** between launches (another port is used only if it is taken).
+- **Short answers from Ollama thinking models** (history summaries, group-chat routing) are no longer empty, and Anthropic bots no longer fail with a 400 when a conversation starts with the bot's own message.
+- **A helper the coordinator created but never gave work had no thread to look at.** The conversation between a coordinator and a helper was only created when the first task was handed over, so a coordinator that made helpers and then did the work itself left nothing in **Bot conversations**. Now every helper gets its thread with the coordinator the moment it is created (empty until it has work), and `spawn_bot`'s reply tells the model plainly that the helper does nothing until `delegate` gives it a task.
+
+## 0.0.4 - 2026-11-11
+
+### Added
+
+- **Parallel Bots: one question, three answers, one request.** A columns button next to the message box (in a chat with one bot) sends your message to the model once, with a short instruction. The model picks three roles that fit that question and answers as each of them in a single reply, which is shown as three cards that fill in as it is written. It is one request, so it takes one place in the queue instead of three, no second model loads and memory stays at one slot; it isn't faster to write than three answers would be, but it avoids reading the chat and the bot's instructions three times. No tools or helpers in this mode, no summarising of a long chat first, and Try again after a failed reply keeps the mode. Your message gets a **Parallel Bots** mark, and a reply that didn't come out in sections is shown as written, with a note to send the question again. `evals/parallel.eval.ts` runs real models through it so a 9B can be compared with a 14B or a 30B later. See [Parallel Bots](docs/features.md#parallel-bots).
+- **The documentation is tested** (`scripts/docs.test.ts`, run by `pnpm test` and CI): every link and heading anchor resolves, every package has the app's version and the changelog has an entry for it, the providers, built-in tools and settings pages the docs list are the ones the app has, and no personal path or address is in a markdown file.
+- **A troubleshooting entry for Ollama running but listing no models** (usually `OLLAMA_MODELS` pointing at the wrong folder).
+- **`pnpm test:ui`** opens the test suite in a browser dashboard (Vitest UI): run the tests, search and filter them, and see why one failed.
+- **An eval for the reports that end races and clusters** (`evals/reports.eval.ts`): real models run a cluster and a race, and every section of the summary and the judge's report must be there and filled in, with a winner named.
+- **Evals for exploring a site:** a shop whose search finds nothing, where the phone is only on page 2 of its menu, and one where the phone isn't there at all (the bot must say so, not make up a price). For Visual and text bots: `explore`, `missing`, `visual-explore`, `visual-missing`.
+
+### Fixed
+
+- **A message lost its moderator mark while it was being written.** The update that saves a streaming reply read only some of the message's columns, so every update of a cluster moderator's summary reported it as an ordinary message from no bot. All marks now survive those updates.
+- **A coordinator that skips `spawn_bot` is no longer left with nobody.** Some models (small ones, and ones without native tool calls) hand a task to a helper's name with `delegate` without making the helper first, and got "No teammate is called X. Teammates: none." again and again until they gave up and did everything themselves. `delegate` now makes a helper for a name nobody has, on the model already in use (no approval card, as with `spawn_bot`), within the limit of 6 helpers and never in a group chat; a name that differs from a teammate's only in case, spacing or punctuation ("research_bot") now means that teammate.
+- **Helpers working for a coordinator were told they were in a group chat with you.** The conversation between a coordinator and a helper is stored like a group, so the helper's instructions said it was in a group chat with you and should keep it short. They now don't.
+- **Bot-to-bot conversations aren't listed as group chats.** A coordinator's conversation with a helper or teammate ("Boss ↔ Helper") has its own **Bot conversations** section in the sidebar, and **Group chats** are only the ones you made.
+- **The planning question before a coordinator's turn always turns thinking off for Ollama models**, as the race and cluster reports already did. Models whose Ollama listing doesn't say they think (Ornith 1.5, MiMo v2.6) could spend the planner's few tokens thinking and return no plan.
+- **Typing no longer runs into what a box already holds.** A Visual Bot typing into a search box that still held the last search (as search engines' do), or trying the same text twice, got the two run together ("vivo y19spixel phone"). Now what was in the box is replaced, the bot is told what the box holds afterwards (and warned if it isn't what it typed), and the screen map shows what each text box holds.
+- **Races and clusters end with a whole report.** A summary or judge's report that left a section out, left it empty or was cut off in the middle gets that section asked for once more and put in its place, and a race whose judge named no winner takes the top score in its table. A cluster whose experts' replies start failing still gets a summary of what was said, instead of ending with none. On a small context, the moderator and the judge get every turn and every racer's answer cut to an even share, instead of losing the opening turns or the last racers off the end.
+- **Cluster summaries on Ornith and MiMo came out empty or cut off.** Ollama's model list doesn't say that some models think (Ornith 1.5 and MiMo v2.6 among them), so the moderator couldn't switch their thinking off, and with room for a 3,000-token summary Ornith spent all of it thinking. The moderator's calls and the filling-in of a report now always switch thinking off on Ollama. Ordinary chats are unchanged: these models still think before replying, which in evals they need to do well.
+- **Rich-text boxes** (as in mail and chat composers) get a numbered box, so Visual Bots can type into them.
+- **Box numbers sit level with their own box.** Drawn above it, in a tight list the number landed on the row before and covered its first letter, and models clicked the item below the one they meant.
+- **No approval card for something that can't happen.** Typing with nothing selected, or clicking a number that isn't on the page, asked first and then failed anyway; an unwatched bot waited on the card. Now they're refused at once with what to do instead.
+- **A guessed address that doesn't exist says so in plain words**, instead of the browser's own error with its call log, and the next page the bot opens is no longer cut short by the browser's error page.
+
+## 0.0.3 - 2026-11-06
 
 ### Added
 

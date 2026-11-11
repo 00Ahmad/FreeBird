@@ -13,13 +13,17 @@ import {
   formatResults,
   formatScreenMap,
   formatSnapshot,
+  isSecretField,
+  MARKS_SCRIPT,
   relevant,
+  SECRET_FIELD,
+  takesTyping,
   type PageElement,
   type PageSnapshot,
 } from "./browser";
 import { shop } from "./fixtures/shop";
 import { auth, makeHarness, type TestHarness } from "./testing";
-import { clickRisk, enterRisk, spaceRisk, VISUAL_TOOL_NAMES, visualTools } from "./visual";
+import { clickRisk, enterRisk, spaceRisk, typeRisk, VISUAL_TOOL_NAMES, visualTools } from "./visual";
 
 describe("browser output", () => {
   const snapshot: PageSnapshot = {
@@ -128,8 +132,9 @@ describe.skipIf(!existsSync(EDGE))("browser (real Edge, hidden window)", () => {
     // Clicking "Buy now" would act on the site: it asks first.
     const buy = refOf(product, "Buy now");
     expect(await tool("browser_click").risk({ ref: buy }, ctx)).toMatchObject({ level: "ask" });
-    // A number it never saw can't be judged, so it asks too.
-    expect(await tool("browser_click").risk({ ref: 999 }, ctx)).toMatchObject({ level: "ask" });
+    // A number that isn't on the page isn't asked about: the click is refused at once, so no card holds the bot.
+    expect(await tool("browser_click").risk({ ref: 999 }, ctx)).toMatchObject({ level: "safe" });
+    await expect(run("browser_click", { ref: 999 })).rejects.toThrow("There's no [999] on the page now");
     const back = await run("browser_back", {});
     expect(back).toContain("Nova 5");
   }, 60_000);
@@ -470,6 +475,77 @@ describe.skipIf(!existsSync(EDGE))("browser (real Edge, hidden window)", () => {
     }
   }, 90_000);
 
+  it("types over what a box holds instead of adding to it, and says what the box holds now", async () => {
+    const eyes = h.store.bots.create({ name: "Writer", visual: true });
+    const visual = (name: string) => h.services.browser.tools(eyes).find((spec) => spec.name === name)!;
+    const act = async (name: string, args: Record<string, unknown>) => {
+      const spec = visual(name);
+      return (await spec.run(spec.args.parse(args), ctx)) as { text: string };
+    };
+    const box = (label: string) =>
+      Array.from({ length: 100 }, (_, ref) => h.services.browser.mark(eyes.id, ref)).find((mark) =>
+        mark?.label.includes(label),
+      )!;
+
+    const page = await act("screen_go_to", { address: `${base}/prefilled` });
+    // The map tells the box's name apart from what's in it: the last search is still there.
+    expect(page.text).toContain('search box "Search" holding "vivo y19s"');
+    await act("screen_click", { box: box("Search").ref });
+    const typed = await act("screen_type", { text: "pixel phone" });
+    expect(typed.text).toContain("The box now holds “pixel phone”.");
+    // A second try at the same text doesn't run the two together.
+    await act("screen_type", { text: "pixel phone" });
+    expect(box("Search").holds).toBe("pixel phone");
+    // A rich-text box (as in mail and chat composers) gets a box, and is typed over the same way.
+    expect(box("Note")).toMatchObject({ kind: "text box", holds: "Old note" });
+    await act("screen_click", { box: box("Note").ref });
+    expect((await act("screen_type", { text: "new note" })).text).toContain("The box now holds “new note”.");
+    // Typing with nothing selected doesn't hold the bot on a card about Enter: it's told to click a box first.
+    await act("screen_go_to", { address: `${base}/outlet` });
+    expect(await visual("screen_type").risk({ text: "phone", enter: true }, ctx)).toMatchObject({
+      level: "safe",
+    });
+    await expect(act("screen_type", { text: "phone", enter: true })).rejects.toThrow(
+      "Click the text box first",
+    );
+  }, 90_000);
+
+  it("draws each box's number level with its own box, so a tight list doesn't pair numbers with the wrong row", async () => {
+    const eyes = h.store.bots.create({ name: "Counter", visual: true });
+    await h.services.browser.goTo(eyes.id, `${base}/outlet/phones?page=2`);
+    const page = (
+      h.services.browser as unknown as { pages: Map<string, import("playwright-core").Page> }
+    ).pages.get(eyes.id)!;
+    await page.evaluate(MARKS_SCRIPT);
+    // In-page code as a string, like the app's own scripts (the tests are typed for Node, not the page).
+    const placed = (await page.evaluate(`[...document.querySelectorAll("#mrog-marks > div")].map((frame) => {
+      const box = frame.getBoundingClientRect();
+      const tag = frame.firstElementChild.getBoundingClientRect();
+      return { number: frame.textContent, top: box.top, bottom: box.bottom, tagTop: tag.top };
+    })`)) as { number: string; top: number; bottom: number; tagTop: number }[];
+    expect(placed.length).toBeGreaterThan(4);
+    for (const mark of placed) {
+      // Level with its own box (within the frame's border), never on the row above.
+      expect(mark.tagTop, `number ${mark.number}`).toBeGreaterThanOrEqual(mark.top - 3);
+      expect(mark.tagTop, `number ${mark.number}`).toBeLessThan(mark.bottom);
+    }
+  }, 60_000);
+
+  it("tells a bot plainly that a guessed address doesn't exist, instead of the browser's own error", async () => {
+    const eyes = h.store.bots.create({ name: "Guesser", visual: true });
+    const go = h.services.browser.tools(eyes).find((spec) => spec.name === "screen_go_to")!;
+    const error = await go
+      .run(go.args.parse(go.prepare!({ address: `${base}/outlet/phones/pixelto-a2` })), ctx)
+      .catch((caught: Error) => caught);
+    expect(String(error)).toContain("doesn't exist on the site");
+    expect(String(error)).not.toMatch(/ERR_|Call log/);
+    // And the outlet doesn't mind a trailing slash.
+    const home = (await go.run(go.args.parse(go.prepare!({ address: `${base}/outlet/` })), ctx)) as {
+      text: string;
+    };
+    expect(home.text).toContain('link "Phones"');
+  }, 60_000);
+
   it("carries on by itself once the user has solved a check, with nobody replying", async () => {
     await run("browser_open", { url: `${base}/solvable` });
     const asked: string[] = [];
@@ -536,6 +612,90 @@ describe.skipIf(!existsSync(EDGE))("browser (real Edge, hidden window)", () => {
     expect(await visual("screen_click").risk({ box: icon.ref }, ctx)).toMatchObject({ level: "ask" });
     expect(await visual("screen_click_at").risk({ x: 1200, y: 800 }, ctx)).toMatchObject({ level: "ask" });
   }, 90_000);
+
+  it("asks before typed text with a line break in it, and won't type at a button or tick box", async () => {
+    const eyes = h.store.bots.create({ name: "Newline", visual: true });
+    const visual = (name: string) => h.services.browser.tools(eyes).find((spec) => spec.name === name)!;
+    const act = async (name: string, args: Record<string, unknown>) => {
+      const spec = visual(name);
+      return (await spec.run(spec.args.parse(spec.prepare ? spec.prepare(args) : args), ctx)) as {
+        text: string;
+      };
+    };
+    const boxOf = (label: string) =>
+      Array.from({ length: 100 }, (_, ref) => h.services.browser.mark(eyes.id, ref)).find((mark) =>
+        mark?.label.includes(label),
+      )!.ref;
+    const page = () =>
+      (h.services.browser as unknown as { pages: Map<string, import("playwright-core").Page> }).pages.get(
+        eyes.id,
+      )!;
+
+    await act("screen_go_to", { address: `${base}/form` });
+    await act("screen_click", { box: boxOf("Note") });
+    // A line break is an Enter press, so it asks like `enter` does; plain text doesn't.
+    expect(await visual("screen_type").risk({ text: "hello\n" }, ctx)).toMatchObject({ level: "ask" });
+    expect(await visual("screen_type").risk({ text: "line\r\nbreak" }, ctx)).toMatchObject({ level: "ask" });
+    expect(await visual("screen_type").risk({ text: "hello" }, ctx)).toMatchObject({ level: "safe" });
+
+    // Tab to the tick box, then to "Pay now": typing a space there would tick or press it, so nothing is typed.
+    await act("screen_press", { key: "Tab" });
+    await expect(act("screen_type", { text: " " })).rejects.toThrow("not a text box");
+    expect(await page().isChecked("#gift")).toBe(false);
+    await act("screen_press", { key: "Tab" });
+    await expect(act("screen_type", { text: " " })).rejects.toThrow("not a text box");
+    await expect(act("screen_type", { text: "hi\n" })).rejects.toThrow("not a text box");
+    expect(page().url()).not.toContain("/sent");
+
+    // Where the text box has the keys, the approved line break is the Enter that sends the form.
+    await act("screen_go_to", { address: `${base}/form` });
+    await act("screen_click", { box: boxOf("Note") });
+    const sent = await act("screen_type", { text: "hello\n" });
+    expect(sent.text).toContain("/sent?note=hello");
+    expect(sent.text).not.toContain("The box now holds");
+  }, 90_000);
+
+  it("fills a one-line box with browser_type without a line break sending the form, and refuses card boxes", async () => {
+    const form = await run("browser_open", { url: `${base}/form` });
+    const filled = await run("browser_type", { ref: refOf(form, "Note"), text: "hello\nworld" });
+    expect(filled).toContain(`Address: ${base}/form`);
+    expect(filled).not.toContain("/sent");
+    // A card number in a plain text box is refused like a password box is.
+    const pay = await run("browser_open", { url: `${base}/pay` });
+    expect(pay).not.toMatch(/4242|5555|hunter2/);
+    for (const label of ["Card number", "Billing card", "Account password"])
+      await expect(run("browser_type", { ref: refOf(pay, label), text: "1" })).rejects.toThrow(
+        "don't type passwords or card numbers",
+      );
+  }, 60_000);
+
+  it("keeps card numbers and passwords out of the screen map and the picture, even in plain text boxes", async () => {
+    const eyes = h.store.bots.create({ name: "Payer", visual: true });
+    const look = h.services.browser.tools(eyes).find((spec) => spec.name === "screen_look")!;
+    const goTo = h.services.browser.tools(eyes).find((spec) => spec.name === "screen_go_to")!;
+    const page = () =>
+      (h.services.browser as unknown as { pages: Map<string, import("playwright-core").Page> }).pages.get(
+        eyes.id,
+      )!;
+
+    const opened = (await goTo.run(goTo.args.parse({ address: `${base}/pay` }), ctx)) as { text: string };
+    for (const secret of ["4242", "5555", "hunter2"]) expect(opened.text).not.toContain(secret);
+    // An ordinary box still tells what it holds.
+    expect(opened.text).toContain('holding "Ada Lovelace"');
+
+    // The picture has them covered; the boxes keep their values and carry no marks afterwards.
+    const direct = async () => (await page().screenshot({ type: "jpeg", quality: 60 })).toString("base64");
+    const bare = await direct();
+    expect(await direct()).toBe(bare);
+    const seen = (await look.run(look.args.parse({ marks: false }), ctx)) as {
+      images: { data: string }[];
+    };
+    expect(seen.images[0]!.data).not.toBe(bare);
+    expect(await page().inputValue("#card")).toBe("4242 4242 4242 4242");
+    expect(await page().inputValue("#pass")).toBe("hunter2");
+    expect(await page().locator("[data-mrog-secret]").count()).toBe(0);
+    expect(await direct()).toBe(bare);
+  }, 60_000);
 });
 
 describe("a Visual Bot's tools", () => {
@@ -588,6 +748,90 @@ describe("judging clicks and keys", () => {
     expect(spaceRisk(control("I agree", "checkbox"), "Space").level).toBe("ask");
     expect(spaceRisk(control("Write a reply", "text box"), "Space").level).toBe("safe");
     expect(spaceRisk(undefined, "Space").level).toBe("safe");
+  });
+
+  it("judges a line break in typed text exactly like Enter", () => {
+    const search = { ...control("search results", "text box"), search: true };
+    const message = control("Write a reply", "text box");
+    // Free only in a real search box; anywhere else a line break may send or submit, so it asks.
+    for (const text of ["hello\n", "hello\r", "a\r\nb", "\n"]) {
+      expect(typeRisk(search, text, false).level, JSON.stringify(text)).toBe("safe");
+      expect(typeRisk(message, text, false).level, JSON.stringify(text)).toBe("ask");
+      expect(typeRisk(message, text, false)).toEqual(
+        expect.objectContaining({ summary: expect.stringContaining("press Enter") }),
+      );
+      expect(typeRisk(control("Send"), text, false).level, JSON.stringify(text)).toBe("safe");
+    }
+    expect(typeRisk(message, "hello", false).level).toBe("safe");
+    expect(typeRisk(message, "hello", true).level).toBe("ask");
+    expect(typeRisk(search, "hello", true).level).toBe("safe");
+    // With nothing to type into selected, the typing is refused before any key: nothing to ask about.
+    expect(typeRisk(undefined, "a\nb", false).level).toBe("safe");
+    expect(typeRisk(control("Pay now", "button"), " ", true).level).toBe("safe");
+  });
+
+  it("types only into boxes for text, so Space and Enter can't press a button or tick a box", () => {
+    const target = (tag: string, type = "", multiline = false) => ({ tag, type, multiline });
+    for (const type of ["text", "search", "email", "url", "tel", "number"])
+      expect(takesTyping(target("INPUT", type)), type).toBe(true);
+    expect(takesTyping(target("TEXTAREA", "", true))).toBe(true);
+    expect(takesTyping(target("DIV", "", true))).toBe(true);
+    for (const type of ["submit", "button", "reset", "image", "checkbox", "radio", "file", "range", "color"])
+      expect(takesTyping(target("INPUT", type)), type).toBe(false);
+    for (const tag of ["BUTTON", "A", "SELECT", "SUMMARY", "BODY"])
+      expect(takesTyping(target(tag)), tag).toBe(false);
+    expect(takesTyping(null)).toBe(false);
+  });
+
+  it("knows a password or card box by type, autocomplete token, or what the site calls it", () => {
+    // Each case is [type, autocomplete, name/id/placeholder/label]; the page script must agree with this side.
+    const secret: [string, string, string][] = [
+      ["password", "", ""],
+      ["PASSWORD", "", ""],
+      ["text", "current-password", ""],
+      ["text", "new-password", "Choose one"],
+      ["text", "billing cc-number", ""],
+      ["text", "cc-csc", ""],
+      ["text", "section-pay cc-exp", ""],
+      ["text", "", "cardNumber"],
+      ["text", "", "card_number"],
+      ["text", "", "Card no."],
+      ["text", "", "ccnum"],
+      ["tel", "", "cvv"],
+      ["text", "", "card_cvc"],
+      ["text", "", "Security code"],
+      ["text", "", "Credit card"],
+    ];
+    const notSecret: [string, string, string][] = [
+      ["text", "", ""],
+      ["text", "off", "q"],
+      ["email", "email", "Email"],
+      ["text", "name", "Name on card"],
+      ["text", "x-cc-number", ""],
+      ["text", "new-passwords", ""],
+      ["text", "", "discard number"],
+      ["text", "", "card-notes"],
+      ["text", "", "Search products"],
+      ["text", "", "Account number"],
+      ["checkbox", "", "Remember my card"],
+    ];
+    const inPage = new Function(`return ${SECRET_FIELD}`)() as (el: unknown) => boolean;
+    const field = (type: string, autocomplete: string, hint: string) => ({
+      matches: () => true,
+      getAttribute: (name: string) => ({ type, autocomplete, "aria-label": hint })[name] || null,
+    });
+    for (const [type, autocomplete, hint] of secret) {
+      const said = JSON.stringify([type, autocomplete, hint]);
+      expect(isSecretField(type, autocomplete, hint), said).toBe(true);
+      expect(inPage(field(type, autocomplete, hint)), said).toBe(true);
+    }
+    for (const [type, autocomplete, hint] of notSecret) {
+      const said = JSON.stringify([type, autocomplete, hint]);
+      expect(isSecretField(type, autocomplete, hint), said).toBe(false);
+      expect(inPage(field(type, autocomplete, hint)), said).toBe(false);
+    }
+    // Only boxes count: a link or button with such a word in its name is no field.
+    expect(inPage({ matches: () => false, getAttribute: () => "card number" })).toBe(false);
   });
 });
 

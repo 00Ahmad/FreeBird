@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -114,6 +114,140 @@ describe("secrets given to one command", () => {
     );
     expect(asked[0]?.risk.badges).toContain("Gives the command your saved secrets");
     expect(asked[0]?.risk.summary).toContain("with your secrets: API_TOKEN");
+  });
+});
+
+describe("secrets granted during a turn", () => {
+  const probe = (name: string) => `node -e "console.log(process.env.${name})"`;
+
+  it("reaches the next command and is hidden from its output, without rebuilding the host", async () => {
+    // The owner's context reads the grants fresh, like the real one: `env` is a getter.
+    const granted: Record<string, string> = {};
+    const tools = createToolHost(
+      BUILTIN_TOOLS,
+      {
+        workspace,
+        botId: "b",
+        botName: "B",
+        threadId: "t",
+        ask: async () => "",
+        get env() {
+          return { ...granted };
+        },
+      },
+      async () => "allow",
+    );
+    const run = () =>
+      tools.execute(
+        { id: "c", name: "run_command", arguments: { command: probe("API_TOKEN"), secrets: ["API_TOKEN"] } },
+        new AbortController().signal,
+      );
+
+    const before = await run();
+    expect(before.status).toBe("error");
+    expect(before.result).toMatch(/haven't been given API_TOKEN/);
+
+    // request_secret saved it while the turn was running.
+    granted.API_TOKEN = "tok-0123456789";
+    const after = await run();
+    expect(after.status).toBe("done");
+    expect(after.result).not.toContain("tok-0123456789");
+    expect(after.result).toContain("[hidden]");
+  });
+
+  it("hides a value granted since the host was made from any tool's result", async () => {
+    let secret: string | undefined;
+    const tools = createToolHost(
+      [
+        {
+          ...BUILTIN_TOOLS.find((tool) => tool.name === "ask_user")!,
+          name: "leak",
+          run: async () => "pw is hunter22!",
+        },
+      ],
+      {
+        workspace,
+        botId: "b",
+        botName: "B",
+        threadId: "t",
+        ask: async () => "",
+        get env() {
+          return secret ? { SITE_PASSWORD: secret } : undefined;
+        },
+      },
+      async () => "allow",
+    );
+    const leak = () =>
+      tools.execute({ id: "c", name: "leak", arguments: { question: "q" } }, new AbortController().signal);
+    expect((await leak()).result).toBe("pw is hunter22!");
+    secret = "hunter22!";
+    expect((await leak()).result).toBe("pw is [hidden]");
+  });
+});
+
+describe("where a command runs", () => {
+  const riskOf = async (args: Record<string, unknown>) => {
+    const { call, asked } = host("deny");
+    await call("run_command", { command: "echo hi", ...args });
+    return asked[0]!.risk;
+  };
+
+  it("leaves the card alone when no folder is given", async () => {
+    const risk = await riskOf({});
+    expect(risk.summary).toBe("echo hi");
+    expect(risk.badges).toEqual([]);
+  });
+
+  it("shows the real folder, without a warning, when it is inside the bot's folder", async () => {
+    const risk = await riskOf({ cwd: "sub/dir" });
+    expect(risk.summary).toBe(`echo hi\n(in ${join(workspace, "sub", "dir")})`);
+    expect(risk.badges).not.toContain("Outside the bot's folder");
+  });
+
+  it("shows a folder outside the bot's folder in full, with the warning", async () => {
+    const elsewhere = join(workspace, "..");
+    const risk = await riskOf({ cwd: elsewhere });
+    expect(risk.summary).toBe(`echo hi\n(in ${resolve(elsewhere)})`);
+    expect(risk.badges).toContain("Outside the bot's folder");
+  });
+
+  it("shows both the folder and the secrets", async () => {
+    const asked: ApprovalRequest[] = [];
+    const tools = createToolHost(
+      BUILTIN_TOOLS,
+      {
+        workspace,
+        botId: "b",
+        botName: "B",
+        threadId: "t",
+        ask: async () => "",
+        env: { API_TOKEN: "tok-0123456789" },
+      },
+      async (request) => {
+        asked.push(request);
+        return "deny";
+      },
+    );
+    await tools.execute(
+      {
+        id: "c",
+        name: "run_command",
+        arguments: { command: "gh pr list", cwd: "repo", secrets: ["API_TOKEN"] },
+      },
+      new AbortController().signal,
+    );
+    expect(asked[0]?.risk.summary).toBe(
+      `gh pr list\n(in ${join(workspace, "repo")})\n(with your secrets: API_TOKEN)`,
+    );
+  });
+
+  it("runs in the folder the card showed", async () => {
+    const { call } = host();
+    const risk = await riskOf({ cwd: "made/here" });
+    const folder = /\(in (.+)\)/.exec(risk.summary)![1]!;
+    const command = `node -e "require('fs').writeFileSync('here.txt', 'x')"`;
+    expect((await call("run_command", { command, cwd: "made/here" })).status).toBe("done");
+    expect(existsSync(join(folder, "here.txt"))).toBe(true);
   });
 });
 
@@ -468,6 +602,53 @@ describe("forms in fetched pages", () => {
     const shell = `<html><body><h1>Results</h1><div id="list">Loading</div><script>${"fetch('/api').then(r=>r.json()).then(show);".repeat(12)}</script></body></html>`;
     expect(looksScriptRendered(shell)).toBe(true);
     expect(looksScriptRendered("<p>Hi</p>")).toBe(false);
+  });
+});
+
+describe("pages built to be slow", () => {
+  const MB = 1_000_000;
+  const repeated = (piece: string, size = MB) => piece.repeat(Math.ceil(size / piece.length)).slice(0, size);
+  // A wide margin for a slow machine: the old patterns took tens of seconds to minutes on these.
+  const LIMIT_MS = 1_000;
+
+  it.each([
+    ["unclosed <svg>", repeated("<svg>")],
+    ["unclosed <script>", repeated("<script>")],
+    ["unclosed <style> with attributes", repeated('<style media="x">')],
+    ["opening tags with no end", repeated("<svg ")],
+    ["a < with no >", repeated("<")],
+    ["links with no end", repeated('<a href="x">')],
+    ["links with no address", repeated("<a ")],
+    ["forms and fields with no end", repeated("<form <input <select ")],
+  ])("turns %s into text quickly", async (_name, html) => {
+    const { looksScriptRendered } = await import("./web");
+    const started = performance.now();
+    htmlToText(html);
+    looksScriptRendered(html);
+    expect(performance.now() - started).toBeLessThan(LIMIT_MS);
+  });
+
+  it("says when a page was cut, and keeps the start of it", () => {
+    const text = htmlToText(`<p>The start</p>${repeated("<svg>", 2 * MB)}`);
+    expect(text).toContain("The start");
+    expect(text).toMatch(/page cut at 400000 characters/);
+    expect(htmlToText("<p>Short page</p>")).toBe("Short page");
+  });
+
+  it("drops big scripts before the cut, so they don't push the page's text out", () => {
+    const script = `<script>${"var a = 1;".repeat(100_000)}</script>`;
+    expect(htmlToText(`<body>${script}<p>The real content</p></body>`)).toBe("The real content");
+  });
+
+  it("keeps what ordinary pages came out as", () => {
+    const text = htmlToText(
+      `<head><title>T</title></head><body><h1>Shop</h1><ul><li>One</li><li>Two</li></ul><p>See <a href="/x?a=1&amp;b=2">the list</a>.<br>Done &amp; dusted</p><svg><path/></svg></body>`,
+    );
+    expect(text).toBe("Shop\n - One\n- Two\n See the list (/x?a=1&b=2).\nDone & dusted");
+    // A link whose closing tag never comes is dropped like any other tag.
+    expect(htmlToText('<a href="/y">no end')).toBe("no end");
+    // A link inside a link keeps the outer address.
+    expect(htmlToText('<a href="/outer">a <a href="/inner">b</a>')).toBe("a b (/outer)");
   });
 });
 

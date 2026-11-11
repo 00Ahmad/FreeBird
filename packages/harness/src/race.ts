@@ -24,6 +24,7 @@ import {
   URL_PATTERN,
 } from "./discussion";
 import { fail, parse } from "./http";
+import { askModel, charsFor, mergeSections, sectionGaps, sectionText } from "./reports";
 import type { Services } from "./services";
 
 /** What a racer may use: research, and files in its own folder. Nothing that waits on the user mid-race. */
@@ -38,6 +39,8 @@ export const RACE_TOOLS = new Set([
 ]);
 /** Of each racer's answer, at most this much goes to the judge. */
 const ANSWER_CHARS = 14_000;
+/** Tokens kept back from the judge's context for its report and its instructions. */
+const JUDGE_RESERVED = 8000;
 const settingsKey = (threadId: string) => `race:${threadId}`;
 
 const racerInstructions = (task: string, lane: number, lanes: number) =>
@@ -72,16 +75,67 @@ const JUDGE_INSTRUCTIONS = [
   ].join("\n"),
 ].join("\n\n");
 
-/** The judge's "Winner: <name>" line, matched to a racer: the one named first on it. */
+/** The sections of a judge's report, in order. */
+export const JUDGE_SECTIONS = ["Criteria", "Scores", "Why", "Final result"];
+
+/** What a judge's report lacks: sections missing or left empty, the winner line, or template text left in. */
+export function judgeGaps(text: string, racers: string[] = []): string[] {
+  const gaps = sectionGaps(text, JUDGE_SECTIONS);
+  // A score table that leaves out a racer who handed something in isn't a comparison.
+  const scores = sectionText(text, "Scores", JUDGE_SECTIONS);
+  if (scores && !gaps.includes("Scores") && racers.some((name) => !firstNamed(scores, [{ name } as Bot])))
+    gaps.push("Scores");
+  if (!winnerText(text)?.replace(/[<>*_\s]/g, "")) gaps.push("Winner");
+  if (/<(?:criterion|the racer's name|one row per racer|the actual answer)/i.test(text))
+    gaps.push("template text left in");
+  return gaps;
+}
+
+/** Who the judge named the winner, matched to a racer: the one named first. */
 export function parseWinner(text: string, racers: Bot[]): Bot | null {
-  const line = labelled(text, "winner");
+  const line = winnerText(text);
   return line ? firstNamed(line, racers) : null;
+}
+
+/**
+ * Who the judge named: its "Winner: <name>" line, or the first line under a "Winner" heading (some models make it a
+ * section of its own).
+ */
+export function winnerText(text: string): string | null {
+  const line = labelled(text, "winner")?.trim();
+  if (line) return line;
+  const section = sectionText(text, "Winner", [...JUDGE_SECTIONS, "Winner"]);
+  return (
+    section
+      ?.split("\n")
+      .find((row) => row.trim())
+      ?.trim() ?? null
+  );
+}
+
+/** The racer with the highest Total in the judge's Scores table (the last number in their row); null on a tie. */
+export function topScorer(text: string, racers: Bot[]): Bot | null {
+  const totals = new Map<Bot, number>();
+  for (const line of text.split("\n")) {
+    if (!line.trim().startsWith("|")) continue;
+    const cells = line.split("|").map((cell) => cell.replaceAll("*", "").trim());
+    const bot = firstNamed(cells[1] ?? "", racers);
+    const numbers = cells
+      .slice(2)
+      .flatMap((cell) => (/^\d+(?:\.\d+)?(?:\s*\/\s*\d+)?$/.test(cell) ? [Number.parseFloat(cell)] : []));
+    if (bot && numbers.length > 0 && !totals.has(bot)) totals.set(bot, numbers.at(-1)!);
+  }
+  const ranked = [...totals].toSorted((a, b) => b[1] - a[1]);
+  if (ranked.length === 0 || ranked[1]?.[1] === ranked[0]![1]) return null;
+  return ranked[0]![0];
 }
 
 interface Live {
   state: Race;
   /** Stop or Judge now pressed: no racer starts or keeps going. */
   ended: "stopped" | "judge" | null;
+  /** Aborted on Stop: ends work outside a turn, like filling in the judge's report. */
+  controller: AbortController;
 }
 
 /**
@@ -89,7 +143,7 @@ interface Live {
  * picks criteria for the task, scores them, names a winner and compiles the best parts into one result.
  */
 export function installRaces(services: Services) {
-  const { store, bus, turns, agent, catalog, runtime } = services;
+  const { store, bus, turns, agent, catalog, runtime, registry } = services;
   const live = new Map<string, Live>();
 
   const publish = (state: Race) => {
@@ -138,22 +192,88 @@ export function installRaces(services: Services) {
     return raceOf(bot) ? { ...options, selfCheck: false, stepLimitNote: false } : options;
   };
 
-  agent.promptSources.push((bot, thread) => {
-    const entry = live.get(thread.id);
-    if (!entry || entry.state.judgeId !== bot.id || entry.state.status !== "judging") return {};
-    const answers = entry.state.racers.map((racer) => {
+  /**
+   * The task and what each racer handed in, for the judge. Each answer is cut to an even share of what the judge's
+   * model can read, so every racer is seen and the judge still has room to write.
+   */
+  const handedIn = (state: Race, judge: Bot): string => {
+    const ref = judge.model ?? runtime.settings.sharedModel;
+    const local = ref ? registry.resolve(ref).provider.local : true;
+    const share = local
+      ? Math.min(
+          ANSWER_CHARS,
+          Math.floor(charsFor(runtime.settings.numCtx, JUDGE_RESERVED) / state.racers.length),
+        )
+      : ANSWER_CHARS;
+    const answers = state.racers.map((racer) => {
       const racerBot = store.bots.get(racer.botId);
       if (!racerBot) return "";
       const model = racerBot.model ?? runtime.settings.sharedModel ?? "the shared model";
-      return `### ${racerBot.name} (model: ${model}; ${racer.status})\n${answerOf(racer, racerBot).slice(0, ANSWER_CHARS)}`;
+      const answer = answerOf(racer, racerBot);
+      const fitted = answer.length > share ? `${answer.slice(0, share).trimEnd()} …(cut)` : answer;
+      return `### ${racerBot.name} (model: ${model}; ${racer.status})\n${fitted}`;
     });
+    return `The race's task: "${state.task}"\n\nWhat each racer handed in:\n\n${answers.filter(Boolean).join("\n\n")}`;
+  };
+
+  agent.promptSources.push((bot, thread) => {
+    const entry = live.get(thread.id);
+    if (!entry || entry.state.judgeId !== bot.id || entry.state.status !== "judging") return {};
     return {
       extra: [
-        `The race's task: "${entry.state.task}"\n\nWhat each racer handed in:\n\n${answers.filter(Boolean).join("\n\n")}`,
+        handedIn(entry.state, bot),
         "This group chat's usual advice to keep replies short doesn't apply to you: your final result must be complete.",
       ],
     };
   });
+
+  /**
+   * Fills in what the judge's report lacks (a section left out or left empty, or no winner line) with one more call
+   * to the judge's model, put in place in the same message. Null when nothing was missing or nothing was added.
+   */
+  const completeReport = async (report: Message, state: Race, judge: Bot, signal: AbortSignal) => {
+    const text = messageText(report);
+    const delivered = state.racers.flatMap((racer) => {
+      const bot = racer.messageId && racer.status !== "error" ? store.bots.get(racer.botId) : undefined;
+      return bot ? [bot.name] : [];
+    });
+    const gaps = judgeGaps(text, delivered).filter((gap) => gap !== "template text left in");
+    const ref = judge.model ?? runtime.settings.sharedModel;
+    if (gaps.length === 0 || signal.aborted || !ref) return null;
+    const more = await askModel(
+      services,
+      ref,
+      JUDGE_INSTRUCTIONS,
+      `${handedIn(state, judge)}\n\nYour report so far:\n${text.trim() || "(nothing yet)"}\n\nIt is missing these parts, or left them empty: ${gaps.join(", ")}. Write only those parts, in full: each section under its ## heading as in the structure, and the winner as a line "Winner: <name>".${gaps.includes("Scores") ? ` The score table needs one row for each of: ${delivered.join(", ")}.` : ""}`,
+      { signal, maxTokens: gaps.includes("Final result") ? 4000 : Math.min(3000, 800 + 500 * gaps.length) },
+    ).catch((error: unknown) => {
+      if (!signal.aborted)
+        console.warn(`[race] filling in the judge's report failed: ${(error as Error).message}`);
+      return null;
+    });
+    if (!more?.text.trim()) return null;
+    let merged = mergeSections(
+      text,
+      more.text,
+      JUDGE_SECTIONS.filter((section) => gaps.includes(section)),
+      JUDGE_SECTIONS,
+      "##",
+    );
+    const winner = winnerText(more.text)?.replaceAll("*", "").trim();
+    if (gaps.includes("Winner") && winner) {
+      const line = `Winner: ${winner}`;
+      const at = merged.search(/^#{1,6}\s*Why\b/im);
+      merged = at >= 0 ? `${merged.slice(0, at)}${line}\n\n${merged.slice(at)}` : `${merged}\n\n${line}`;
+    }
+    if (merged === text.trimEnd()) return null;
+    const parts = [
+      ...report.parts.filter((part) => part.type !== "text" && part.type !== "error"),
+      { type: "text" as const, text: merged },
+    ];
+    const saved = store.messages.update(report.id, { parts, status: "done" });
+    if (saved) bus.publish({ type: "message.updated", message: saved });
+    return saved;
+  };
 
   /**
    * The judge's report with any link the racers didn't give or open taken out (a model filling in plausible-looking
@@ -208,7 +328,7 @@ export function installRaces(services: Services) {
           racer.status = "running";
           racer.startedAt = new Date().toISOString();
           publish(state);
-          const reply = await turns.start(own, bot, "user", { wholeTurn: true });
+          const reply = await turns.start(own, bot, "user", { wholeTurn: true, unattended: true });
           racer.messageId = reply.id;
           racer.status = reply.status === "done" ? "done" : reply.status === "stopped" ? "stopped" : "error";
           racer.finishedAt = new Date().toISOString();
@@ -229,10 +349,14 @@ export function installRaces(services: Services) {
       publish(state);
       let report = await turns.start(store.threads.get(thread.id) ?? thread, judge, "user", {
         wholeTurn: true,
+        unattended: true,
       });
+      if (report.status !== "stopped")
+        report = (await completeReport(report, state, judge, entry.controller.signal)) ?? report;
       report = keepRacersLinks(report, racers) ?? report;
       state.reportId = report.id;
-      state.winnerId = parseWinner(messageText(report), racers)?.id ?? null;
+      const reportText = messageText(report);
+      state.winnerId = (parseWinner(reportText, racers) ?? topScorer(reportText, racers))?.id ?? null;
       state.status = report.status === "done" ? "done" : report.status === "stopped" ? "stopped" : "error";
       if (state.status === "error")
         state.error =
@@ -327,7 +451,7 @@ export function installRaces(services: Services) {
       error: null,
       startedAt: new Date().toISOString(),
     };
-    const entry: Live = { state, ended: null };
+    const entry: Live = { state, ended: null, controller: new AbortController() };
     live.set(thread.id, entry);
     publish(state);
     void run(entry, thread, racers, judge);
@@ -341,7 +465,10 @@ export function installRaces(services: Services) {
     if (how === "judge" && entry.state.status !== "racing") return false;
     entry.ended = how;
     for (const racer of entry.state.racers) turns.stopBot(racer.botId);
-    if (how === "stopped") turns.stopBot(entry.state.judgeId);
+    if (how === "stopped") {
+      turns.stopBot(entry.state.judgeId);
+      entry.controller.abort();
+    }
     return true;
   };
 

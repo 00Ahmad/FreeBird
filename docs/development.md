@@ -12,18 +12,19 @@ cd FreeBird
 pnpm install
 ```
 
-| Command                             | Does                                                         |
-| ----------------------------------- | ------------------------------------------------------------ |
-| `pnpm dev`                          | Harness + UI + Electron window, with a fresh token           |
-| `pnpm dev:web`                      | Harness + UI only; open <http://127.0.0.1:5173> in a browser |
-| `pnpm test`                         | All unit and integration tests (Vitest)                      |
-| `pnpm test:watch`                   | Tests in watch mode                                          |
-| `pnpm typecheck`                    | `tsc` in every package                                       |
-| `pnpm lint`                         | oxlint                                                       |
-| `pnpm format` / `pnpm format:check` | Prettier                                                     |
-| `pnpm build`                        | UI bundle, Electron main/preload, and the bundled harness    |
-| `pnpm package`                      | Windows installer in `apps/desktop/release/`                 |
-| `npx knip`                          | Unused files, exports and dependencies                       |
+| Command                             | Does                                                                  |
+| ----------------------------------- | --------------------------------------------------------------------- |
+| `pnpm dev`                          | Harness + UI + Electron window, with a fresh token                    |
+| `pnpm dev:web`                      | Harness + UI only; open <http://127.0.0.1:5173> in a browser          |
+| `pnpm test`                         | All unit and integration tests (Vitest)                               |
+| `pnpm test:watch`                   | Tests in watch mode                                                   |
+| `pnpm test:ui`                      | Tests in a browser dashboard: run, search, filter, see why one failed |
+| `pnpm typecheck`                    | `tsc` in every package                                                |
+| `pnpm lint`                         | oxlint                                                                |
+| `pnpm format` / `pnpm format:check` | Prettier                                                              |
+| `pnpm build`                        | UI bundle, Electron main/preload, and the bundled harness             |
+| `pnpm package`                      | Windows installer in `apps/desktop/release/`                          |
+| `npx knip`                          | Unused files, exports and dependencies                                |
 
 Development data lives in `.data/` (git-ignored) and secrets go to the OS keychain under the service name "FreeBird Dev", apart from an installed copy.
 
@@ -62,7 +63,7 @@ Packages are TypeScript source consumed directly by the workspace (no per-packag
 
 ## Tests
 
-`pnpm test` runs about 300 tests across all packages in under a minute. Harness tests start a real Fastify server with an in-memory store and a fake Ollama (`packages/harness/src/testing.ts`), so they need no model. Browser tests use a local fixture shop.
+`pnpm test` runs over 500 tests across all packages in about a minute. A few of them guard the documentation itself (`scripts/docs.test.ts`): every link and heading anchor in the markdown resolves, every package has the app's version and the changelog has an entry for it, the providers, built-in tools and settings pages the docs list are the ones the app has, and no personal path or address is in a markdown file. When one fails after you edit a doc or bump the version, it names what to fix. `pnpm test:ui` opens the same tests in a dashboard in your browser (Vitest UI): every file and test with its time, a search box, filters for failed, passed, skipped and slow tests, and for a failure the error, the diff and the test's code. It reruns tests as you save files. Tests that drive a real Edge are skipped when Edge isn't installed. Harness tests start a real Fastify server with an in-memory store and a fake Ollama (`packages/harness/src/testing.ts`), so they need no model. Browser tests use a local fixture shop.
 
 ## Evals
 
@@ -72,13 +73,21 @@ Evals run real local models on real tasks and print a pass or fail, so changes t
 # File tasks; add --allow-commands to include a shell task that runs model-written commands without approval
 pnpm --filter @mrog/harness eval -- qwen3.5:9b nemotron-3-nano:4b
 
-# The suite: offline fixture-shop tasks (search box, no guessing, plan, coordinator pipeline, visual shop);
+# The suite: offline fixture-shop tasks (search box, no guessing, plan, coordinator pipeline, visual shop, exploring a shop whose search fails, a product that isn't there);
 # --live adds real-web tasks; --only=name,name picks tasks. Reports go to evals/results/ (git-ignored)
 pnpm --filter @mrog/harness exec tsx evals/suite.eval.ts qwen3.5:9b
 
 # Coordinator and helpers. Set EVAL_PROMPT to a job that never mentions helpers to test
-# that the coordinator decides to use them by itself
+# that the coordinator decides to use them by itself; EVAL_OLLAMA_URL runs it against an Ollama on another address
 pnpm --filter @mrog/harness exec tsx evals/delegation.eval.ts qwen3.5:9b
+
+# Parallel Bots: six questions, each sent as one request that must come back as three sections from three different
+# roles. Name several models to compare them (a 9B against a 14B or a 30B); every reply is written to evals/results/
+pnpm --filter @mrog/harness exec tsx evals/parallel.eval.ts qwen3.5:9b
+
+# End-of-run reports: each model named moderates a cluster and judges a race (experts and racers spread over
+# all of them); every section of the summary and the judge's report must be there. EVAL_ONLY=cluster|race
+pnpm --filter @mrog/harness exec tsx evals/reports.eval.ts qwen3.5:9b ornith-1.5:9b
 ```
 
 Only run `--allow-commands` on a machine where a model running commands unattended is acceptable.

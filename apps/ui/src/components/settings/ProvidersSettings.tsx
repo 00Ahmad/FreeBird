@@ -12,6 +12,7 @@ import {
   useUpdateProvider,
 } from "../../hooks/providers";
 import { useModels } from "../../hooks/runtime";
+import { addProviderBody, showsApiKey, showsBaseUrl } from "../../lib/provider-form";
 import { Field, Section, TextInput } from "./parts";
 
 const GROUPS: { id: ProviderPreset["group"]; label: string }[] = [
@@ -143,22 +144,14 @@ function AddProvider({ presets, onDone }: { presets: ProviderPreset[]; onDone():
   const [apiKey, setApiKey] = useState("");
   const [label, setLabel] = useState("");
   const preset = presets.find((candidate) => candidate.preset === presetId)!;
-  const showUrl = preset.needsBaseUrl || preset.group === "local";
+  const showUrl = showsBaseUrl(preset);
 
   return (
     <form
       className="flex flex-col gap-3 rounded-xl border border-border p-4"
       onSubmit={(event) => {
         event.preventDefault();
-        add.mutate(
-          {
-            preset: presetId,
-            ...(label.trim() ? { label: label.trim() } : {}),
-            ...(baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
-            ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-          },
-          { onSuccess: onDone },
-        );
+        add.mutate(addProviderBody(preset, { label, baseUrl, apiKey }), { onSuccess: onDone });
       }}
     >
       <Field label="Provider">
@@ -167,7 +160,10 @@ function AddProvider({ presets, onDone }: { presets: ProviderPreset[]; onDone():
           value={presetId}
           onChange={(event) => {
             setPresetId(event.target.value);
+            // What was typed for one service is not for the next, and a key whose field is gone can't be seen.
             setBaseUrl("");
+            setApiKey("");
+            setLabel("");
           }}
         >
           {GROUPS.map((group) => (
@@ -193,7 +189,7 @@ function AddProvider({ presets, onDone }: { presets: ProviderPreset[]; onDone():
           />
         </Field>
       )}
-      {(preset.needsKey || preset.group === "custom") && (
+      {showsApiKey(preset) && (
         <Field label={preset.needsKey ? "API key" : "API key (optional)"}>
           <TextInput
             type="password"

@@ -6,6 +6,7 @@ import { ROUTINE_MARKER, RoutineInput, type Routine } from "@mrog/shared";
 
 import { fail, parse } from "./http";
 import type { Services } from "./services";
+import { TurnCancelled } from "./turns";
 
 const TICK_MS = 30_000;
 const MAX_PAYLOAD = 64 * 1024;
@@ -61,6 +62,8 @@ export class RoutineRunner {
     if (!bot || !thread) return "skipped";
     this.running.add(routine.id);
     try {
+      // Before anything happens, so a run cut short by the app closing isn't due again (and repeated) at the next start.
+      store.routines.startRun(routine.id);
       const text = `${ROUTINE_MARKER} Routine “${routine.name}”\n${routine.prompt}${extra ? `\n\n${extra}` : ""}`;
       const message = store.messages.create({
         threadId: thread.id,
@@ -73,6 +76,11 @@ export class RoutineRunner {
       store.routines.finishRun(routine.id, status);
       return status;
     } catch (error) {
+      // Waiting behind another turn when Stop was pressed (or its bot was deleted): it never ran.
+      if (error instanceof TurnCancelled) {
+        store.routines.finishRun(routine.id, "stopped");
+        return "stopped";
+      }
       console.error(`[routines] ${routine.name} failed`, error);
       store.routines.finishRun(routine.id, "error");
       return "error";

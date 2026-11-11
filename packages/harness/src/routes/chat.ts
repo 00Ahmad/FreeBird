@@ -35,6 +35,10 @@ export function registerChatRoutes(app: FastifyInstance, { store, turns, bus, di
     }
     const thread = store.threads.get(id);
     if (!thread) return fail(reply, 404, "not_found", "No thread has this id.");
+    // Groups, clusters and races have several bots, and Parallel Bots is one bot answering as three.
+    if (input.parallel && thread.kind === "group") {
+      return fail(reply, 400, "invalid_request", "Parallel Bots works in a chat with one bot.");
+    }
     const message = await turns.send(thread, input);
     return reply.code(201).send({ message });
   });

@@ -38,7 +38,7 @@ Risky actions stop at an **approval card** that shows exactly what will happen, 
 | ---------------------------------------------------------------------------------- | ---------------------------------------------- |
 | Reading and writing files in the bot's own folder                                  | Allowed                                        |
 | Files outside the bot's folder                                                     | Asks                                           |
-| Terminal commands on your computer                                                 | Asks every time ("Always allow" isn't offered) |
+| Terminal commands on your computer (the card shows the folder they run in)         | Asks every time ("Always allow" isn't offered) |
 | Web pages on the internet                                                          | Allowed                                        |
 | Pages and devices on your local network (router, NAS, other computers)             | Asks                                           |
 | Buy / pay / send / delete / subscribe clicks, buttons with no name, Enter in forms | Asks ("Always allow" isn't offered)            |
@@ -46,7 +46,7 @@ Risky actions stop at an **approval card** that shows exactly what will happen, 
 | Creating a helper on the shared model                                              | Allowed                                        |
 | Creating a helper on a different model (may cost money)                            | Asks                                           |
 
-You decide globally in **Settings → General → Execution on this computer** (ask, always allow, or never allow commands), and with **Custom Rules**. "Always allow" on a card saves a rule for that exact action only, never for the whole tool. Group chats can't show cards, so actions that need approval simply aren't available there.
+You decide globally in **Settings → General → Execution on this computer** (ask, always allow, or never allow commands), and with **Custom Rules**. "Always allow" on a card saves a rule for that exact action only (the identical call, so allowing `Fetch http://192.168.1.1` doesn't allow `http://192.168.1.10`), never for the whole tool. Rules you type yourself in Custom Rules still match everything that starts with the text you give. Racers and the race judge work on their own, so a call of theirs that needs approval is refused at once instead of waiting for a card nobody can see. Group chats can't show cards, so actions that need approval simply aren't available there.
 
 ## Secrets never reach the model
 
@@ -56,6 +56,10 @@ You decide globally in **Settings → General → Execution on this computer** (
 - **Saved values are hidden everywhere.** Every saved secret, login password, card number and app sign-in token is replaced with `[hidden]` in command output, connected-app results, error text and the event log, also when it is percent-encoded, JSON-escaped, base64-encoded or part of a `user:password` sign-in. Values shorter than 8 characters aren't matched, because they would hide ordinary words, so keep secrets longer than that.
 - **App sign-ins** (OAuth with PKCE): you sign in on the app's own page in your browser; FreeBird never sees your password there. Each sign-in link works once and for 10 minutes. The tokens are tied to the app's address and are never sent to another server, even if you change the address. Sign-ins and Vault entries (`MCP_OAUTH_…`, `VAULT_ITEM_…`) are never handed to a command, and a bot can't ask you to type into one.
 - **Web sign-ins** (`browser_sign_in`): the app types a vault login into the page itself, only on the login's own site and only over HTTPS. The password never appears in what the model sees, including page snapshots.
+- **Pictures are covered too.** Card number, security code and password fields (including a "show password" box that has turned into plain text) are blacked out in every screenshot a bot receives and never appear in the list of page elements, so a card you type during a handoff isn't visible to the model afterwards.
+- **A secret can be at most 1,280 characters** (the Windows keychain's limit, applied everywhere so it behaves the same on every system). A longer value gets a clear error; connected-app sign-ins, which can be longer, are stored in pieces.
+- **Images in chat load on request.** A picture a bot's reply points to on the web isn't fetched until you press **Load image**, because the address itself could carry your text to someone else's server.
+- Keys typed for a server that takes none (LM Studio, another computer on your network) are ignored, never stored and never sent.
 - Bots never type passwords or card numbers themselves: sign-ins, human checks and payments are handed to you (`browser_handoff`).
 - Saved logins match their exact site by default; subdomains only when you allow it.
 

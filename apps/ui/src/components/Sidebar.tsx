@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  ArrowLeftRight,
   BookOpen,
   ScanEye,
   Bell,
@@ -41,6 +42,7 @@ import { useDeleteGroup, useDuplicateBot, useUpdateGroup } from "../hooks/team";
 import { messagesKey, useThreads } from "../hooks/threads";
 import { useNewBot, useNewVisualBot } from "../hooks/useNewBot";
 import { api } from "../lib/api";
+import { splitGroups } from "../lib/groups";
 import { isMac } from "../lib/harness";
 import { importTemplate } from "../lib/templates";
 import { titleWithUnread, totalUnread } from "../lib/unread";
@@ -158,9 +160,7 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
     if (threads) useUnread.getState().prune(new Set(threads.map((thread) => thread.id)));
   }, [threads]);
 
-  const clusters = useMemo(() => groups.filter((thread) => thread.cluster && !thread.race), [groups]);
-  const races = useMemo(() => groups.filter((thread) => thread.race), [groups]);
-  const groupChats = useMemo(() => groups.filter((thread) => !thread.cluster), [groups]);
+  const { races, clusters, groupChats, botTalks } = useMemo(() => splitGroups(groups), [groups]);
 
   /** A fresh start: messages go, memory, skills and files stay. */
   const clearChat = (threadId: string, name: string) => {
@@ -280,7 +280,9 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
             ? "Delete this race, its racers and their work?"
             : thread.cluster
               ? "Delete this cluster, its experts and its messages?"
-              : "Delete this group chat and its messages?",
+              : thread.pair
+                ? "Delete this conversation between bots and its messages?"
+                : "Delete this group chat and its messages?",
         ) && deleteGroup.mutate(thread.id),
     },
   ];
@@ -421,6 +423,7 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
           { label: "Races", threads: races, icon: <Flag size={14} /> },
           { label: "Clusters", threads: clusters, icon: <Network size={14} /> },
           { label: "Group chats", threads: groupChats, icon: <MessagesSquare size={14} /> },
+          { label: "Bot conversations", threads: botTalks, icon: <ArrowLeftRight size={14} /> },
         ].map(
           (section) =>
             section.threads.length > 0 && (

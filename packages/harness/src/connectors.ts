@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -11,6 +13,7 @@ import {
   APP_VERSION,
   appAccess,
   ConnectorConfig,
+  PARTLY_HIDDEN_BADGE,
   UpdateConnectorInput,
   type AppToolKind,
   type Bot,
@@ -44,12 +47,12 @@ interface McpTool {
 }
 
 const READ_VERBS = new Set(
-  "get list read search find fetch query describe show view lookup look count check retrieve browse explore inspect preview download export summarize summarise whoami status info stat ping validate resolve".split(
+  "get list read search find fetch query describe show view lookup look count retrieve browse explore inspect preview download export summarize summarise whoami status info stat ping validate".split(
     " ",
   ),
 );
 const DESTRUCTIVE_VERBS = new Set(
-  "delete remove destroy drop purge wipe erase truncate revoke cancel terminate kill reset overwrite unpublish archive empty clear ban block".split(
+  "delete remove destroy drop purge wipe erase truncate revoke cancel terminate kill reset overwrite unpublish archive empty clear ban block trash discard rm del prune flush revert rollback withdraw refund void".split(
     " ",
   ),
 );
@@ -67,10 +70,17 @@ const words = (name: string) =>
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
 
+/**
+ * A name that opens with a destructive verb run together with its object (`deleteitem`). Only the first word and only
+ * longer verbs, so `get_archived_items` stays a read and "del" is not "delivery".
+ */
+const opensDestructive = (first: string | undefined) =>
+  !!first && [...DESTRUCTIVE_VERBS].some((verb) => verb.length >= 5 && first.startsWith(verb));
+
 /** What a tool's name says it does. Any destructive word wins; a read only counts when nothing says otherwise. */
 function kindFromName(name: string): AppToolKind | null {
   const parts = words(name);
-  if (parts.some((word) => DESTRUCTIVE_VERBS.has(word))) return "destructive";
+  if (parts.some((word) => DESTRUCTIVE_VERBS.has(word)) || opensDestructive(parts[0])) return "destructive";
   if (parts.some((word) => WRITE_VERBS.has(word))) return "write";
   if (parts[0] && READ_VERBS.has(parts[0])) return "read";
   return null;
@@ -102,11 +112,65 @@ const KIND_WORDS: Record<AppToolKind, string> = {
 interface Live {
   client: Client;
   tools: McpTool[];
+  /** The name each tool is offered to bots under (see exposedNames), by the tool's own name. */
+  names: Map<string, string>;
 }
 
 /** Tool names models accept: letters, digits, _ and -, at most 64 characters. */
 const toolName = (connectorId: string, tool: string) =>
   `${connectorId.replaceAll("-", "_")}__${tool.replace(/[^\w-]/g, "_")}`.slice(0, 64);
+
+/**
+ * The bot-facing name of each of an app's tools. Cleaning a name up can make two the same (`list.items` and
+ * `list_items`), and the bot would call one while the checks looked at the other; so tools whose names collide all
+ * get a short hash of their own name on the end, whatever order the app lists them in.
+ */
+export function exposedNames(connectorId: string, tools: McpTool[]): Map<string, string> {
+  const plain = tools.map((tool) => toolName(connectorId, tool.name));
+  const names = new Map<string, string>();
+  const used = new Set<string>();
+  tools.forEach((tool, index) => {
+    let name = plain[index]!;
+    if (plain.filter((other) => other === name).length > 1) {
+      const hash = createHash("sha256").update(tool.name).digest("hex").slice(0, 6);
+      name = `${name.slice(0, 64 - 7)}_${hash}`;
+    }
+    // The same tool listed twice, or a hash that lands on another name: still one name each.
+    for (let n = 2; used.has(name); n++) name = `${name.slice(0, 64 - 3)}_${n}`;
+    used.add(name);
+    names.set(tool.name, name);
+  });
+  return names;
+}
+
+/** The most of a call's arguments an approval card shows; what is left out is said so. */
+const MAX_SHOWN = 2_000;
+
+/** What an approval card says about a call: all of its arguments up to a limit, and a badge when some are left out. */
+function callSummary(label: string, args: unknown): { summary: string; badges: string[] } {
+  const text = JSON.stringify(args) ?? "";
+  if (text.length <= MAX_SHOWN) return { summary: `${label}(${text})`, badges: [] };
+  return {
+    summary: `${label}(${text.slice(0, MAX_SHOWN)}… (${text.length - MAX_SHOWN} more characters not shown))`,
+    badges: [PARTLY_HIDDEN_BADGE],
+  };
+}
+
+/** The most pages of tools read from one app, so a server that never stops paging can't hold a connect up for ever. */
+const MAX_TOOL_PAGES = 20;
+
+/** Every tool the app lists, following its pages. */
+async function listAllTools(client: Client): Promise<McpTool[]> {
+  const tools: McpTool[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+    const result = await client.listTools(cursor ? { cursor } : undefined, { timeout: 30_000 });
+    tools.push(...(result.tools as McpTool[]));
+    cursor = result.nextCursor;
+    if (!cursor) break;
+  }
+  return tools;
+}
 
 /** Connected apps over MCP: starts each enabled server, lists its tools, and hands them to bots. */
 export class ConnectorManager {
@@ -217,14 +281,18 @@ export class ConnectorManager {
               ...(signIn ? { authProvider: signIn } : {}),
             });
       await client.connect(transport, { timeout: 30_000 });
-      const { tools } = await client.listTools(undefined, { timeout: 30_000 });
+      const tools = await listAllTools(client);
       if (!this.current(config.id, token)) {
         // Superseded, removed or switched off meanwhile: whoever did that owns the status.
         await client.close().catch(() => {});
         return;
       }
-      this.live.set(config.id, { client, tools: tools as McpTool[] });
+      this.live.set(config.id, { client, tools, names: exposedNames(config.id, tools) });
       this.status.set(config.id, { state: "connected", error: null });
+      // A server that exits or drops the connection later is no longer there to call. A deliberate disconnect or a
+      // newer connect bumps the token first, so it never counts as a loss.
+      // oxlint-disable-next-line unicorn/prefer-add-event-listener -- the MCP client is not an EventTarget
+      client.onclose = () => this.lost(config.id, token, `${config.name} stopped or closed the connection.`);
     } catch (error) {
       await client.close().catch(() => {});
       if (!this.current(config.id, token)) return;
@@ -244,6 +312,14 @@ export class ConnectorManager {
         });
       }
     }
+    this.changed();
+  }
+
+  /** The app's connection ended without anyone asking: mark it, take its tools away and tell the UI. */
+  private lost(id: string, token: number, message: string): void {
+    if (this.generation.get(id) !== token) return;
+    this.live.delete(id);
+    this.status.set(id, { state: "error", error: message });
     this.changed();
   }
 
@@ -378,7 +454,8 @@ export class ConnectorManager {
       this.services.bus.publish({ type: "secrets.changed", names: this.services.vault.names() });
     }
     this.signIns.delete(id);
-    this.save(configs.filter((candidate) => candidate.id !== id));
+    // The list as it is now: an app added while this one closed must not be lost with the old list.
+    this.save(this.configs().filter((candidate) => candidate.id !== id));
     return true;
   }
 
@@ -386,7 +463,7 @@ export class ConnectorManager {
   describe(specName: string): { id: string; name: string; tool: string; kind: AppToolKind } | null {
     for (const config of this.configs()) {
       const live = this.live.get(config.id);
-      const tool = live?.tools.find((candidate) => toolName(config.id, candidate.name) === specName);
+      const tool = live?.tools.find((candidate) => live.names.get(candidate.name) === specName);
       if (tool) return { id: config.id, name: config.name, tool: tool.name, kind: classifyTool(tool) };
     }
     return null;
@@ -427,36 +504,55 @@ export class ConnectorManager {
         const kind = classifyTool(tool);
         specs.push(
           defineTool({
-            name: toolName(config.id, tool.name),
+            name: live.names.get(tool.name)!,
             description: `[${config.name}] ${tool.description ?? tool.name}`.slice(0, 1000),
             args: z.record(z.string(), z.unknown()),
             jsonSchema: { type: "object", ...tool.inputSchema },
             risk: (args) => {
-              const what = `${config.name} → ${tool.name}(${JSON.stringify(args).slice(0, 200)})`;
+              const { summary: what, badges: unseen } = callSummary(`${config.name} → ${tool.name}`, args);
               // Only a tool that only reads leaves nothing behind if the app dies mid-call.
               const outward = kind !== "read";
-              // One that can't be undone asks every time, even from an app set not to ask. The user's "ask first" is
-              // never loosened by what a server says about its tools.
+              // One that can't be undone asks every time (its card offers no "Always allow"), even from an app set
+              // not to ask. The user's "ask first" is never loosened by what a server says about its tools.
               if (kind === "destructive")
                 return {
                   level: "ask",
                   kind: "general",
-                  badges: [BADGES.irreversible, BADGES.shares],
+                  badges: [BADGES.irreversible, BADGES.shares, ...unseen],
                   summary: what,
                   outward,
                 };
               return config.askBeforeUse
-                ? { level: "ask", kind: "general", badges: [BADGES.shares], summary: what, outward }
+                ? {
+                    level: "ask",
+                    kind: "general",
+                    badges: [BADGES.shares, ...unseen],
+                    summary: what,
+                    outward,
+                  }
                 : { ...safe(`${config.name} → ${tool.name}`), outward };
             },
             run: async (args, ctx) => {
-              const result = (await live.client.callTool({ name: tool.name, arguments: args }, undefined, {
-                signal: ctx.signal,
-                timeout: 120_000,
-              })) as {
+              let result: {
                 content?: { type: string; text?: string; resource?: { text?: string } }[];
                 isError?: boolean;
               };
+              try {
+                result = (await live.client.callTool({ name: tool.name, arguments: args }, undefined, {
+                  signal: ctx.signal,
+                  timeout: 120_000,
+                })) as typeof result;
+              } catch (error) {
+                // A web app's session can end without the connection closing (the server answers "not found"): from
+                // then on every call fails, so say the app is gone instead of leaving it looking connected.
+                const gone = /not connected|connection closed/i.test((error as Error).message);
+                if (gone || (error as { code?: unknown }).code === 404) {
+                  const token = this.generation.get(config.id);
+                  if (token !== undefined && this.live.get(config.id) === live)
+                    this.lost(config.id, token, `${config.name} is no longer connected. Press Reconnect.`);
+                }
+                throw error;
+              }
               // Secrets out first: what is kept below must be as clean as what is shown.
               const text = this.scrub(
                 (result.content ?? [])
@@ -557,24 +653,26 @@ export function registerConnectorRoutes(app: FastifyInstance, manager: Connector
    * Where the user's browser comes back after signing in. Outside /api and without the app's token (the browser
    * has none): what makes it safe is the state, which works once, for one sign-in, for ten minutes.
    */
-  app.get<{ Querystring: Record<string, string | undefined> }>(
-    OAUTH_CALLBACK_PATH,
-    async (request, reply) => {
-      const { code, state, error, error_description: description } = request.query;
-      const page = (status: number, title: string, detail: string) =>
-        reply.code(status).headers(SIGN_IN_PAGE_HEADERS).send(signInPage(title, detail));
-      if (error) {
-        // Still used up, so the same link can't be tried again.
-        manager.pendingSignIns.take(state);
-        return page(400, "Sign-in didn't finish", description ? `${error}: ${description}` : error);
-      }
-      if (!code) return page(400, "Sign-in didn't finish", "The app didn't send back a sign-in code.");
-      const outcome = await manager.finishSignIn(state, code);
-      return "error" in outcome
-        ? page(400, "Sign-in didn't finish", outcome.error)
-        : page(200, `Signed in to ${outcome.name}`, "You can close this tab and go back to FreeBird.");
-    },
-  );
+  app.get<{ Querystring: Record<string, unknown> }>(OAUTH_CALLBACK_PATH, async (request, reply) => {
+    // A repeated query parameter arrives as a list: only a single value counts.
+    const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+    const code = text(request.query.code);
+    const state = text(request.query.state);
+    const error = text(request.query.error);
+    const description = text(request.query.error_description);
+    const page = (status: number, title: string, detail: string) =>
+      reply.code(status).headers(SIGN_IN_PAGE_HEADERS).send(signInPage(title, detail));
+    if (error) {
+      // Still used up, so the same link can't be tried again.
+      manager.pendingSignIns.take(state);
+      return page(400, "Sign-in didn't finish", description ? `${error}: ${description}` : error);
+    }
+    if (!code) return page(400, "Sign-in didn't finish", "The app didn't send back a sign-in code.");
+    const outcome = await manager.finishSignIn(state, code);
+    return "error" in outcome
+      ? page(400, "Sign-in didn't finish", outcome.error)
+      : page(200, `Signed in to ${outcome.name}`, "You can close this tab and go back to FreeBird.");
+  });
 
   app.delete<{ Params: { id: string } }>("/api/connectors/:id", async (request, reply) => {
     return (await manager.remove(request.params.id))

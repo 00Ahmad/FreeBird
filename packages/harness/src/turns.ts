@@ -14,6 +14,7 @@ import type { ModelRuntime, Priority } from "@mrog/model-runtime";
 import { ProviderError, type ChatMessage, type ChatProvider, type ProviderRegistry } from "@mrog/providers";
 import {
   messageText,
+  parallelInstructions,
   parseModelRef,
   type Bot,
   type Message,
@@ -42,6 +43,8 @@ export interface TurnInfo {
   /** Working on a task another bot handed over: no delegation tools, so chains can't form. */
   delegated: boolean;
   surface?: Surface;
+  /** Nobody is watching to answer an approval card (a racer): a call that needs one is refused at once. */
+  unattended?: boolean;
 }
 
 interface TurnOptions {
@@ -60,6 +63,11 @@ interface TurnOptions {
    * steps.
    */
   wholeTurn?: boolean;
+  /**
+   * Works on its own with nobody to answer an approval card (racers, whose chats the user isn't looking at). A call
+   * that would need one is refused instead of waiting for an answer that can't come, while this turn holds the model.
+   */
+  unattended?: boolean;
 }
 
 /** Supplies per-turn tools and prompt additions (Phase 2+); the chat MVP runs without any. */
@@ -105,17 +113,32 @@ interface ActiveTurn {
   botId: string;
   /** The reply it is writing; known once the turn has started. */
   messageId?: string;
+  /** Answering a Parallel Bots message: one request with no tools, nothing steered in. */
+  parallel: boolean;
   steer: ChatMessage[];
   info: TurnInfo;
   /** How it was started, so a follow-up turn for a late message runs the same way. */
   options: TurnOptions;
   /** Settles when the turn has finished (however it ended). */
   done: Promise<void>;
-  /** The user's next turn, queued while this stopped one winds down; more messages join it. */
-  next?: Promise<Message>;
+  /**
+   * The user's next turn, queued while this one runs or winds down; every message sent meanwhile joins it. `stops` is
+   * the thread's Stop count when it was queued: a Stop since then cancels it, so a later message needs a turn of its own.
+   */
+  next?: { turn: Promise<Message>; stops: number };
 }
 
-const logStartFailure = (error: unknown) => console.error("[turns] a turn failed to run", error);
+/** A queued turn that never started: Stop or Clear chat came first, or its bot or chat was deleted meanwhile. */
+export class TurnCancelled extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "TurnCancelled";
+  }
+}
+
+const logStartFailure = (error: unknown) => {
+  if (!(error instanceof TurnCancelled)) console.error("[turns] a turn failed to run", error);
+};
 
 /** Tool arguments as a plain object: models sometimes send an array or a bare value. */
 const asArgs = (value: unknown): Record<string, unknown> =>
@@ -171,6 +194,8 @@ export class TurnManager {
   /** Counts Stops (and Clear chat, delete) per thread, so a group's round of answers ends with the first. */
   private readonly stops = new Map<string, number>();
   extensions: TurnExtensions = {};
+  /** How long preparing a turn may take, once the model is free (tests shorten it). */
+  beforeTurnTimeoutMs = BEFORE_TURN_TIMEOUT_MS;
 
   constructor(
     private readonly deps: {
@@ -213,6 +238,7 @@ export class TurnManager {
       role: "user",
       parts,
       replyToId: input.replyToId,
+      parallel: input.parallel === true,
     });
     bus.publish({ type: "message.created", message });
 
@@ -243,8 +269,10 @@ export class TurnManager {
     for (const bot of responders) {
       const running = this.active.get(`${thread.id}:${bot.id}`);
       // A bot that's mid-turn gets the new message between steps instead of starting over. A turn that was
-      // stopped never reads it, so the message starts a new turn (which waits for the stopped one to end).
-      if (running && !running.controller.signal.aborted) {
+      // stopped never reads it, so the message starts a new turn (which waits for the stopped one to end). A
+      // Parallel Bots message, or a turn answering one, takes no part in that: the reply is one request, and a
+      // step that read another message would be a second one.
+      if (running && !running.controller.signal.aborted && !message.parallel && !running.parallel) {
         running.steer.push(toChatMessage(message));
       } else fresh.push(bot);
     }
@@ -292,17 +320,33 @@ export class TurnManager {
     // One turn per bot per thread: a second one (a routine firing mid-reply, a message after Stop) waits its turn.
     const existing = this.active.get(key);
     if (existing) {
-      // Every message sent while a stopped turn winds down is answered by one new turn, not one turn each.
-      const joins = priority === "user" && !options.delegated && existing.controller.signal.aborted;
-      if (joins && existing.next) return existing.next;
-      const next = existing.done.then(() => this.start(thread, bot, priority, options));
-      if (joins) existing.next = next;
+      // Every message sent while a turn is running or winding down is answered by one new turn, not one turn each:
+      // it reads the whole conversation, so the first of them to start answers the rest too.
+      const joins = priority === "user" && !options.delegated;
+      const stops = this.stops.get(thread.id) ?? 0;
+      if (joins && existing.next?.stops === stops) return existing.next.turn;
+      const next = existing.done.then(() => {
+        // Stop or Clear chat since it was queued ends it too: the user doesn't want it answered any more.
+        if ((this.stops.get(thread.id) ?? 0) !== stops) throw new TurnCancelled("Stopped before it started.");
+        // The bot and the chat as they are now: the user may have changed its tools or instructions while it waited.
+        const freshBot = this.deps.store.bots.get(bot.id);
+        const freshThread = this.deps.store.threads.get(thread.id);
+        if (!freshBot || !freshThread) throw new TurnCancelled("The bot or its chat was deleted.");
+        return this.start(freshThread, freshBot, priority, options);
+      });
+      if (joins) existing.next = { turn: next, stops };
       return next;
     }
-    const info: TurnInfo = { delegated: options.delegated ?? false, surface: options.surface };
+    const info: TurnInfo = {
+      delegated: options.delegated ?? false,
+      surface: options.surface,
+      ...(options.unattended ? { unattended: true } : {}),
+    };
     const turn: ActiveTurn = {
       controller: new AbortController(),
       botId: bot.id,
+      // Only a turn answering the user's own message can be parallel: a routine or a handed-over task never answers it.
+      parallel: priority === "user" && !options.delegated && this.asksParallel(thread, bot, options.retryOf),
       steer: [],
       info,
       options,
@@ -336,6 +380,25 @@ export class TurnManager {
       () => {},
     );
     return running;
+  }
+
+  /**
+   * Whether the user's newest message asked for Parallel Bots and this bot hasn't answered it yet (a reply being
+   * tried again doesn't count as an answer). Decided from the message rather than from how the turn started, so a
+   * turn that waited, a retry and a model switch all answer it the same way. Only a reply of that kind answers it: a
+   * routine that replied in between is not the answer.
+   */
+  private asksParallel(thread: Thread, bot: Bot, retryOf?: string): boolean {
+    if (thread.kind === "group") return false;
+    const recent = this.deps.store.messages.list(thread.id, { limit: 30 });
+    const asked = recent.findLastIndex((message) => message.role === "user");
+    if (asked === -1 || !recent[asked]!.parallel) return false;
+    return !recent
+      .slice(asked + 1)
+      .some(
+        (message) =>
+          message.role === "bot" && message.botId === bot.id && message.parallel && message.id !== retryOf,
+      );
   }
 
   /**
@@ -398,6 +461,7 @@ export class TurnManager {
       threadId: thread.id,
       role: "bot",
       botId: bot.id,
+      parallel: turn.parallel,
       parts: [],
       status: "streaming",
       model: ref,
@@ -569,9 +633,12 @@ export class TurnManager {
         thread,
         teammates: thread.memberIds.filter((id) => id !== bot.id).flatMap((id) => store.bots.get(id) ?? []),
         now: new Date(),
-        ...extras,
+        // One request with no tools: guidance about using them would only make a model write tool calls into its reply.
+        ...(turn.parallel ? { memory: extras.memory } : extras),
       });
-      const host = this.extensions.tools?.(bot, thread, message.id, signal, turn.info);
+      const host = turn.parallel
+        ? undefined
+        : this.extensions.tools?.(bot, thread, message.id, signal, turn.info);
       // The same definitions on every step, so they are built and measured once per turn.
       const definitions = host?.definitions() ?? [];
       const tools: ToolHost | undefined = host && {
@@ -584,45 +651,67 @@ export class TurnManager {
       const budget = contextWindow - Math.ceil(system.length / 3.5) - toolTokens - 1024;
       const summaryKey = `summary:${thread.id}:${bot.id}`;
       const chatHistory = toChatHistory(history, bot.id, names);
-      const compacted = await compactHistory(
-        chatHistory,
-        budget,
-        (text) => summarizeWith(provider, model, text, { signal, local }),
-        store.settings.get<CompactCache>(summaryKey),
-      ).catch((error: unknown) => {
-        // A failed summary shouldn't fail every turn from now on: the turn trims old history instead.
-        if (signal.aborted) throw error;
-        console.warn("[turns] summarizing history failed", error);
-        return { messages: chatHistory, cache: undefined };
-      });
+      // Parallel Bots is one request, so a long chat isn't summarized first (that would be a second one): the turn
+      // keeps the newest messages that fit instead.
+      const compacted = turn.parallel
+        ? { messages: chatHistory, cache: undefined }
+        : await compactHistory(
+            chatHistory,
+            budget,
+            (text) => summarizeWith(provider, model, text, { signal, local }),
+            store.settings.get<CompactCache>(summaryKey),
+          ).catch((error: unknown) => {
+            // A failed summary shouldn't fail every turn from now on: the turn trims old history instead.
+            if (signal.aborted) throw error;
+            console.warn("[turns] summarizing history failed", error);
+            return { messages: chatHistory, cache: undefined };
+          });
       if (compacted.cache) store.settings.set(summaryKey, compacted.cache);
-      const thinks = info.capabilities.includes("thinking");
-      const note = await this.extensions
-        .beforeTurn?.({
-          bot,
-          thread,
-          info: turn.info,
-          latest: history.at(-1),
-          tools: definitions.map((definition) => definition.name),
-          ask: (question, text) =>
-            askWith(provider, model, question, text, {
-              signal: AbortSignal.any([signal, AbortSignal.timeout(BEFORE_TURN_TIMEOUT_MS)]),
-              local,
-              maxTokens: 300,
-              ...(thinks ? { think: false } : {}),
-            }),
-        })
-        .catch((error: unknown) => {
-          if (signal.aborted) throw error;
-          console.warn("[turns] preparing the turn failed", error);
-          return null;
-        });
+      // Ollama is always told: its model list leaves thinking out for some models that do think (Ornith 1.5, MiMo
+      // v2.6), and the planner's few tokens would all go on thinking. Ollama accepts it from any model.
+      const thinksAnyway = resolved.provider.kind === "ollama" || info.capabilities.includes("thinking");
+      const note = turn.parallel
+        ? null
+        : await this.extensions
+            .beforeTurn?.({
+              bot,
+              thread,
+              info: turn.info,
+              latest: history.at(-1),
+              tools: definitions.map((definition) => definition.name),
+              ask: async (question, text) => {
+                // The time limit is for the model's own work: the slot on the shared model is waited for first, with
+                // only the turn's signal, so other bots holding it for a while don't use the time up.
+                const release =
+                  resolved.provider.local && !releaseTurnSlot
+                    ? await this.acquireSlot(priority, thread.id, bot.id, signal)
+                    : undefined;
+                try {
+                  return await askWith(guarded, model, question, text, {
+                    signal: AbortSignal.any([signal, AbortSignal.timeout(this.beforeTurnTimeoutMs)]),
+                    local,
+                    maxTokens: 300,
+                    ...(thinksAnyway ? { think: false } : {}),
+                  });
+                } finally {
+                  release?.();
+                }
+              },
+            })
+            .catch((error: unknown) => {
+              if (signal.aborted) throw error;
+              console.warn("[turns] preparing the turn failed", error);
+              return null;
+            });
+      // What is added to the newest user message for this one request: the plan a coordinator made, or the form
+      // Parallel Bots asks the reply to take.
+      const added = turn.parallel ? parallelInstructions() : note;
       const result = await runTurn({
         provider,
         model,
         capabilities: info.capabilities,
         system,
-        history: note ? withNote(compacted.messages, note) : compacted.messages,
+        history: added ? withNote(compacted.messages, added) : compacted.messages,
         contextWindow,
         tools,
         think: settings.think,

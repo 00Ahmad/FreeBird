@@ -54,7 +54,7 @@ Add these in **Settings → Models & Providers**. They're marked as local, so th
 
 ## Cloud providers
 
-Bring your own API key. Keys are stored in your operating system's keychain, never in a file, and the app only ever shows their names.
+Bring your own API key. Keys are stored in your operating system's keychain, never in a file, and the app only ever shows their names. A key can be up to 1,280 characters. A server that needs no key (LM Studio, vLLM, another computer running Ollama) never gets one: a key typed for it is ignored.
 
 | Provider                 | Notes                                       |
 | ------------------------ | ------------------------------------------- |

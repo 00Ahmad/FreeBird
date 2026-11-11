@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import {
@@ -49,6 +49,30 @@ function moveDataFromPreviousName() {
   } catch (error) {
     // Still in use (the old app is open): start fresh rather than fail; the old folder stays as it was.
     console.warn(`[desktop] couldn't move ${previous}: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * The port the harness used last time. The app's address (and so a routine's webhook address copied into another
+ * service) only stays the same from one launch to the next if the harness gets the same port again.
+ */
+const lastPortFile = () => join(app.getPath("userData"), "last-port");
+
+function readLastPort(): string | null {
+  try {
+    const port = Number(readFileSync(lastPortFile(), "utf8").trim());
+    return Number.isInteger(port) && port > 0 && port <= 65_535 ? String(port) : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberPort(url: string) {
+  try {
+    const port = new URL(url).port;
+    if (port && port !== readLastPort()) writeFileSync(lastPortFile(), port);
+  } catch {
+    // Without it the next launch just picks a new port.
   }
 }
 
@@ -161,6 +185,8 @@ function spawnHarness(): Promise<HarnessInfo> {
       ...process.env,
       MROG_TOKEN: token,
       MROG_PORT: "0",
+      // The harness takes this one if it is free, and any other if not.
+      ...(readLastPort() ? { MROG_PREFERRED_PORT: readLastPort()! } : {}),
       MROG_DATA_DIR: join(app.getPath("userData"), "data"),
       MROG_UI_DIST: uiDist,
       MROG_KEYRING_SERVICE: APP_NAME,
@@ -185,6 +211,7 @@ function spawnHarness(): Promise<HarnessInfo> {
         if (!line.startsWith(READY_PREFIX)) continue;
         const ready = ReadyLine.parse(JSON.parse(line.slice(READY_PREFIX.length)));
         clearTimeout(timeout);
+        rememberPort(ready.url);
         resolve({ url: ready.url, token });
       }
     });

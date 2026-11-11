@@ -152,12 +152,15 @@ const HAND_OFFS = new Set(["delegate", "message_bot"]);
 
 const NO_CARDS_IN_GROUPS =
   "Not available in group chats: this needs the user's approval, and approval cards can't be shown here. Do without it, or tell the user to ask you in your own chat.";
+const NO_CARDS_UNATTENDED =
+  "Not available to a racer: this needs the user's approval, and racers work on their own with nobody to ask. Do without it, and say in your result what you couldn't do.";
 
 /**
- * Group chats can't show approval cards. An action that would need one (and isn't already allowed by a rule or
- * the command policy) is answered with the reason, instead of looking like the user denied it.
+ * Group chats (and racers, whose chats nobody is watching) can't show approval cards. An action that would need one
+ * (and isn't already allowed by a rule or the command policy) is answered with the reason, instead of looking like
+ * the user denied it.
  */
-function withoutCards(spec: ToolSpec, approvals: ApprovalBroker): ToolSpec {
+function withoutCards(spec: ToolSpec, approvals: ApprovalBroker, reason = NO_CARDS_IN_GROUPS): ToolSpec {
   const needsCard = (risk: Risk) => risk.level === "ask" && approvals.settled(spec.name, risk) === undefined;
   return {
     ...spec,
@@ -165,8 +168,7 @@ function withoutCards(spec: ToolSpec, approvals: ApprovalBroker): ToolSpec {
       const risk = await spec.risk(args, ctx);
       return needsCard(risk) ? { ...risk, level: "safe" } : risk;
     },
-    run: async (args, ctx) =>
-      needsCard(await spec.risk(args, ctx)) ? NO_CARDS_IN_GROUPS : spec.run(args, ctx),
+    run: async (args, ctx) => (needsCard(await spec.risk(args, ctx)) ? reason : spec.run(args, ctx)),
   };
 }
 
@@ -299,7 +301,8 @@ export function installAgent(services: Services): Agent {
       threadId: surface?.threadId ?? thread.id,
       messageId: surface?.messageId ?? messageId,
       botId: bot.id,
-      groupChat: surface ? false : thread.kind === "group",
+      // Nowhere to show a card in a group chat, or to a racer: both are refused the same way.
+      groupChat: surface ? false : thread.kind === "group" || info.unattended === true,
       signal,
       ...(surface ? { asBot: bot.name } : {}),
     };
@@ -308,7 +311,11 @@ export function installAgent(services: Services): Agent {
     // from what is left: a tool that is off isn't just hidden, a call to it by name finds nothing to run.
     const specs = assemble(bot, thread, scope.messageId, info)
       .filter((spec) => agent.allows(bot, spec.name))
-      .map((spec) => (scope.groupChat ? withoutCards(spec, approvals) : spec));
+      .map((spec) =>
+        scope.groupChat
+          ? withoutCards(spec, approvals, info.unattended ? NO_CARDS_UNATTENDED : NO_CARDS_IN_GROUPS)
+          : spec,
+      );
     return createToolHost(
       specs,
       {
@@ -317,7 +324,11 @@ export function installAgent(services: Services): Agent {
         botName: bot.name,
         threadId: thread.id,
         ask: (question, choices) => questions.ask(question, scope, choices),
-        env: agent.envFor?.(bot),
+        // A getter, so every call sees the secrets granted so far: the owner can hand one over in the middle of this
+        // very turn (request_secret, use_login) and the command that follows needs it.
+        get env() {
+          return agent.envFor?.(bot);
+        },
       },
       (request) => approvals.decide(request, scope),
       {

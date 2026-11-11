@@ -6,6 +6,7 @@ Everything FreeBird can do, by area. New here? Start with [Getting started](gett
 - [Group chats](#group-chats)
 - [Coordinators and helpers](#coordinators-and-helpers)
 - [Races and Clusters](#races-and-clusters)
+- [Parallel Bots](#parallel-bots)
 - [Tools and approvals](#tools-and-approvals)
 - [The bots' web browser](#the-bots-web-browser)
 - [Visual Bots](#visual-bots)
@@ -48,7 +49,7 @@ Long chats draw only the newest messages and add earlier ones as you scroll up, 
 
 Make a group with 2–6 bots from **+ → New group chat**. Address bots with `@Name`, or everyone with `@everyone`. If you don't mention anyone, the shared model picks who should answer. Bots reply one after another so each sees what the previous one said.
 
-Bots can also message each other with `message_bot`. Those conversations appear as readable **"A ↔ B" threads** you can open any time.
+Bots can also message each other with `message_bot`. Those conversations appear as readable **"A ↔ B" threads** you can open any time, in their own **Bot conversations** section of the sidebar. They are not group chats: you aren't in them, and a coordinator never makes a group chat of its own. Group chats are the ones you start.
 
 Group chats can't show approval cards, so actions that need your approval aren't available there: bots say so instead of trying.
 
@@ -56,11 +57,11 @@ Group chats can't show approval cards, so actions that need your approval aren't
 
 Your Primary Bot, and any bot you mark as a coordinator, can build a team on the fly:
 
-| Tool          | Does                                                                                                                    |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `spawn_bot`   | Creates a helper with its own instructions (and optionally its own model or as a Visual Bot).                           |
-| `delegate`    | Gives up to 5 helpers or teammates a task each; they work at the same time, and the coordinator gets every answer back. |
-| `dismiss_bot` | Removes a helper that's no longer needed.                                                                               |
+| Tool          | Does                                                                                                                                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spawn_bot`   | Creates a helper with its own instructions (and optionally its own model or as a Visual Bot).                                                                                                     |
+| `delegate`    | Gives up to 5 helpers or teammates a task each; they work at the same time, and the coordinator gets every answer back. A name nobody has gets a new helper, so skipping `spawn_bot` still works. |
+| `dismiss_bot` | Removes a helper that's no longer needed.                                                                                                                                                         |
 
 **Coordinators decide on their own when to use helpers.** Before starting a real job, FreeBird asks the model one short question: does this split into independent parts (one per product, option, source or site)? If it does, the coordinator creates a helper for each part, hands out the tasks in one go and combines the answers. Quick questions, step-by-step work and work on its own files it does itself. You can also just ask: _"use three helpers for this"_.
 
@@ -69,6 +70,7 @@ Your Primary Bot, and any bot you mark as a coordinator, can build a team on the
 - **Stop** on the coordinator stops all its helpers.
 - Helpers can't make helpers of their own: one level only, so there are no chains or loops.
 - For a step that builds on earlier answers (checking, auditing, a report), the coordinator passes earlier helpers' results along with `include_results_from`.
+- **Every helper has its own thread with the coordinator** ("Boss ↔ Helper", under **Bot conversations** in the sidebar). It exists from the moment the helper is created, empty until the coordinator gives it work, and every later task for that helper goes on in the same thread. A helper that was created but never given work shows up there as an empty thread.
 - Temporary helpers hide when the coordinator's turn ends and are deleted when dismissed or with their coordinator.
 
 ## Races and Clusters
@@ -79,6 +81,19 @@ Two multi-bot modes that FreeBird adds:
 - **Cluster**: 3–5 bots discuss a topic under a moderator, backing every claim with sources.
 
 They have their own page: [Races & Clusters](races-and-clusters.md).
+
+## Parallel Bots
+
+One question, three answers, **one request**. In a chat with one bot, switch on **Parallel Bots** with the columns button next to the message box, then ask as usual. FreeBird adds a short instruction to your message and sends it to the model once. The model picks three roles that fit _that_ question (say a cost analyst, a security engineer and a skeptic) and answers as each of them in a single reply, which FreeBird shows as three cards that fill in as the reply is written.
+
+- **One request, not three at once.** The reply is written one section after another. What you save is the overhead: the model reads the chat and the bot's instructions once, the request takes one place in the queue instead of three, no second model loads and memory stays at one slot. It works with **Bots at once** set to 1, on any GPU.
+- **New roles every time.** The model chooses them from your question, so there is nothing to set up. The bot's own name, instructions and memory still apply.
+- **No tools.** In this mode a bot doesn't browse, touch files, run commands or create helpers: it answers from what the model knows and what you wrote. Switch it off for a question that needs tools.
+- **The sections aren't independent.** Later ones are written after the earlier ones, so the roles can influence each other, and a small model sometimes writes fewer than three sections. A reply that didn't come out in sections is shown as written, with a note: send your question again for a fresh reply. (If a reply fails or stalls, **Try again** keeps the mode.)
+- **One bot only.** It isn't offered in group chats, clusters or races.
+- **What is saved.** Your question and the reply are saved as written (your message gets a small **Parallel Bots** mark); the instruction isn't. The next message you send with the switch off is answered the ordinary way. A long chat isn't summarised first in this mode, since that would be a second request: the model keeps the newest messages that fit.
+
+To see how a model does with it, run the eval on a 9B model, and later on larger ones: `pnpm --filter @mrog/harness exec tsx evals/parallel.eval.ts qwen3.5:9b` (see [Development](development.md#evals)).
 
 ## Tools and approvals
 
@@ -102,7 +117,7 @@ Plus browser, computer, vault and connected-app tools, described below.
 **Approval cards** show exactly what the bot wants to do, with warning badges such as _"This can't be undone"_, _"This may buy, send or change something on the site"_ or _"Outside the bot's folder"_. Choose:
 
 - **Allow once**,
-- **Always allow**: saves a rule for that exact action. Not offered for terminal commands, purchases, sending, or anything touching sign-ins,
+- **Always allow**: saves a rule for that exact action (the whole call, not just its start). Not offered for terminal commands, purchases, sending, an irreversible call to a connected app, a card that was too long to show in full, or anything touching sign-ins,
 - **Deny**: the bot is told not to retry.
 
 In **Settings → General** you can set **Execution on this computer** (ask / always allow / never allow commands), manage **Custom Rules**, and tune **How bots work**: steps per reply (default 25), a plan checklist for multi-step tasks, and a self-check before the final answer of tool-heavy tasks.
@@ -139,7 +154,7 @@ Choose the search engine in **Settings → Browser & search**.
 
 **+ → New Visual Bot** makes a bot that uses the web **only by looking**: screenshot, decide, act, screenshot. It sees numbered boxes on everything it can click or type into, and works with `screen_look`, `screen_click`, `screen_click_at`, `screen_type`, `screen_press`, `screen_scroll`, `screen_back`, `screen_go_to` and `screen_watch` (a short clip to follow videos and pages that change).
 
-A red dot shows where it's about to click. The same safety rules apply: consequential clicks and Enter in forms ask first, and it never types passwords. A click that would land on something covering the box it chose (a pop-up, a cookie banner) is refused when that something would ask first. Use a model that can see, such as `qwen3.5:9b`; with an Ollama model that can't, the reply says so and offers **Switch model**.
+A red dot shows where it's about to click. The same safety rules apply: consequential clicks and Enter in forms ask first (text with a line break in it counts as Enter), it types only into a real text box (never into a button or a tick box, so a space can't press one), and it never types passwords. Card numbers, security codes and "show password" boxes are covered in every picture the bot gets. A click that would land on something covering the box it chose (a pop-up, a cookie banner) is refused when that something would ask first. Use a model that can see, such as `qwen3.5:9b`; with an Ollama model that can't, the reply says so and offers **Switch model**.
 
 ## A computer for each bot
 
@@ -159,7 +174,7 @@ Routines make bots work on their own, and report in their chat:
 | **Webhook**  | When something calls its secret URL (`/hooks/<id>`) |
 | **Manual**   | Only when you press Run                             |
 
-See all routines on a weekly calendar in **Settings → Routines**, and pause, resume, test, edit or delete them. Runs missed while the app was closed catch up on the next start. **Teach a task** turns written steps into a routine you can run on demand.
+See all routines on a weekly calendar in **Settings → Routines**, and pause, resume, test, edit or delete them. Runs missed while the app was closed catch up on the next start, but a run that had already started when the app closed is not started again. FreeBird keeps the same local port from one launch to the next, so a webhook address you copied keeps working (if another program has taken that port, FreeBird uses a different one and the address changes). **Teach a task** turns written steps into a routine you can run on demand.
 
 ## Connect apps (MCP)
 
@@ -167,7 +182,7 @@ Connect any [Model Context Protocol](https://modelcontextprotocol.io) server, lo
 
 **Apps that need a sign-in.** A remote app that asks you to sign in shows **Needs you to sign in** with a **Sign in** button. It opens the app's sign-in page in your own browser, and after you sign in you're sent back to FreeBird (OAuth with PKCE). The sign-in is kept in your keychain as `MCP_OAUTH_<APP>` and refreshed by itself. Changing the app's address or removing the app deletes it. An app you gave an `Authorization` header (a token you pasted in) keeps using that token and is never offered a sign-in.
 
-**What each bot may do with an app.** In **Details → Tools**, each connected app has **Can make changes**, **Read only** or **No access**. With **Read only**, the bot gets only the tools that just read. FreeBird tells them apart by what the app says about each tool (`readOnlyHint`, `destructiveHint`) and by the tool's name. When the two disagree, the stricter wins, and a tool it can't place counts as one that makes changes. A tool that can't be undone asks you every time, even from an app set not to ask. A helper never gets more than the bot that made it.
+**What each bot may do with an app.** In **Details → Tools**, each connected app has **Can make changes**, **Read only** or **No access**. With **Read only**, the bot gets only the tools that just read. FreeBird tells them apart by what the app says about each tool (`readOnlyHint`, `destructiveHint`) and by the tool's name. When the two disagree, the stricter wins, and a tool it can't place counts as one that makes changes. A tool that can't be undone asks you every time, even from an app set not to ask. The card shows the whole call; if it is too long to show (over 2,000 characters), it says how much is hidden and doesn't offer **Always allow**. Tools whose names would collide get a short suffix so each one stays separate, and an app whose program quits is shown as an error instead of staying connected. A helper never gets more than the bot that made it.
 
 **Big results.** When an app sends back more than about 4,000 characters, the bot gets the result's shape and a preview. It then picks out what it needs with `query_result`: a path such as `messages[0:5].subject` or `items[?status==open]`, a search, or a range of lines.
 

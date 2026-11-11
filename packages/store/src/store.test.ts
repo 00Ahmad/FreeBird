@@ -314,6 +314,34 @@ describe("messages", () => {
     expect(store.messages.list(bot.threadId)[0]?.parts).toEqual([{ type: "text", text: "changed" }]);
   });
 
+  it("keeps a message's marks through the updates a streaming reply gets", () => {
+    store = openStore(":memory:");
+    const bot = store.bots.create({ name: "Ada" });
+    const marked = store.messages.create({
+      threadId: bot.threadId,
+      role: "bot",
+      botId: bot.id,
+      moderator: true,
+      parallel: true,
+      status: "streaming",
+      parts: [],
+    });
+    const plain = store.messages.create({ threadId: bot.threadId, role: "bot", botId: bot.id, parts: [] });
+    expect(marked).toMatchObject({ moderator: true, parallel: true });
+    expect(plain).toMatchObject({ moderator: false, parallel: false });
+
+    // Both kinds of update (the one that writes parts reads fewer columns than the one that doesn't).
+    const streamed = store.messages.update(marked.id, { parts: [{ type: "text", text: "## 1. A" }] });
+    expect(streamed).toMatchObject({ moderator: true, parallel: true });
+    const finished = store.messages.update(marked.id, { status: "done" });
+    expect(finished).toMatchObject({ moderator: true, parallel: true });
+    expect(store.messages.get(marked.id)).toMatchObject({ moderator: true, parallel: true });
+    expect(store.messages.update(plain.id, { parts: [{ type: "text", text: "x" }] })).toMatchObject({
+      moderator: false,
+      parallel: false,
+    });
+  });
+
   it("keeps the moderator mark, which a deleted bot's messages don't get", () => {
     store = openStore(":memory:");
     const ada = store.bots.create({ name: "Ada" });

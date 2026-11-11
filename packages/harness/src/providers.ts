@@ -4,10 +4,12 @@ import { z } from "zod";
 import { createProvider, isLocalUrl } from "@mrog/providers";
 import {
   AddProviderInput,
+  isSecretTooLong,
   PROVIDER_PRESETS,
   presetFor,
   ProviderConfig,
   providerKeyName,
+  SECRET_TOO_LONG,
   UpdateProviderInput,
   type ProviderView,
 } from "@mrog/shared";
@@ -16,6 +18,15 @@ import { attempt, fail, parse } from "./http";
 import type { Services } from "./services";
 
 const KEY = "providers";
+
+/**
+ * Whether a key is ever kept or sent for this kind of provider. A server on the user's own network (LM Studio, vLLM,
+ * another Ollama) takes none, so a key typed for one is dropped rather than sent to that address on every request.
+ */
+const takesKey = (presetId: string): boolean => {
+  const preset = presetFor(presetId);
+  return !preset || preset.needsKey || preset.group === "custom";
+};
 
 /** Saved cloud/local providers beyond the built-in Ollama: registered live, keys in the keychain. */
 export class ProviderManager {
@@ -35,8 +46,9 @@ export class ProviderManager {
     this.services.bus.publish({ type: "data.changed", keys: ["providers", "models"] });
   }
 
-  private apiKey(id: string): () => string | null {
+  private apiKey(id: string, presetId: string): () => string | null {
     return () => {
+      if (!takesKey(presetId)) return null;
       try {
         return this.services.vault.get(providerKeyName(id));
       } catch {
@@ -48,7 +60,9 @@ export class ProviderManager {
   private register(config: ProviderConfig) {
     this.services.registry.unregister(config.id);
     if (config.enabled)
-      this.services.registry.register(createProvider(config, this.apiKey(config.id), this.fetchImpl));
+      this.services.registry.register(
+        createProvider(config, this.apiKey(config.id, config.preset), this.fetchImpl),
+      );
   }
 
   /** Registers every saved provider (at startup). */
@@ -66,7 +80,7 @@ export class ProviderManager {
     const preset = presetFor(config.preset);
     return {
       ...config,
-      hasKey: this.services.vault.has(providerKeyName(config.id)),
+      hasKey: takesKey(config.preset) && this.services.vault.has(providerKeyName(config.id)),
       local: (preset?.local ?? false) || isLocalUrl(config.baseUrl),
       kind: preset?.kind ?? "openai",
     };
@@ -87,7 +101,7 @@ export class ProviderManager {
       baseUrl: input.baseUrl ?? "",
       enabled: true,
     };
-    if (input.apiKey) this.services.vault.set(providerKeyName(id), input.apiKey);
+    if (input.apiKey && takesKey(preset.preset)) this.services.vault.set(providerKeyName(id), input.apiKey);
     this.register(config);
     this.save([...this.configs(), config]);
     return config;
@@ -99,7 +113,7 @@ export class ProviderManager {
     if (!current) return null;
     const { apiKey, ...rest } = patch;
     const next = { ...current, ...rest };
-    if (apiKey) this.services.vault.set(providerKeyName(id), apiKey);
+    if (apiKey && takesKey(current.preset)) this.services.vault.set(providerKeyName(id), apiKey);
     this.register(next);
     this.save(configs.map((config) => (config.id === id ? next : config)));
     return next;
@@ -134,7 +148,13 @@ export function registerProviderRoutes(app: FastifyInstance, services: Services,
     presets: PROVIDER_PRESETS,
   }));
 
+  // Said in plain words here; the schema would only report an invalid request.
+  const keyTooLong = (body: unknown) =>
+    typeof (body as { apiKey?: unknown } | null)?.apiKey === "string" &&
+    isSecretTooLong((body as { apiKey: string }).apiKey.trim());
+
   app.post("/api/providers", async (request, reply) => {
+    if (keyTooLong(request.body)) return fail(reply, 400, "secret_too_long", SECRET_TOO_LONG);
     const input = parse(AddProviderInput, request.body, reply);
     if (!input) return reply;
     const config = await attempt(reply, () => manager.add(input), 400, "invalid_request");
@@ -143,6 +163,7 @@ export function registerProviderRoutes(app: FastifyInstance, services: Services,
   });
 
   app.patch<{ Params: { id: string } }>("/api/providers/:id", async (request, reply) => {
+    if (keyTooLong(request.body)) return fail(reply, 400, "secret_too_long", SECRET_TOO_LONG);
     const input = parse(UpdateProviderInput, request.body, reply);
     if (!input) return reply;
     const config = manager.update(request.params.id, input);

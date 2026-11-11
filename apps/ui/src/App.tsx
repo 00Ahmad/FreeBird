@@ -12,6 +12,7 @@ import { useThreads } from "./hooks/threads";
 import { useNewBot } from "./hooks/useNewBot";
 import { isMac } from "./lib/harness";
 import { layerOpen } from "./lib/layers";
+import { globalShortcut } from "./lib/shortcuts";
 import { useUi } from "./state";
 
 // Loaded when first opened, to keep the startup bundle small.
@@ -62,19 +63,21 @@ function useShortcuts(query: string) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const mod = event.metaKey || event.ctrlKey;
-      const key = event.key.toLowerCase();
       const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
+      const shortcut = globalShortcut(event, { mac: isMac(), typing });
+      if (!shortcut) return;
       const ui = useUi.getState();
       const handled = () => event.preventDefault();
 
       // These two close what they opened; everything else leaves the keyboard to an open dialog or menu.
-      if (mod && key === "k" && (!layerOpen() || ui.overlay === "palette")) {
+      if (shortcut.type === "palette") {
+        if (layerOpen() && ui.overlay !== "palette") return;
         handled();
         ui.setOverlay(ui.overlay === "palette" ? null : "palette");
         return;
       }
-      if (mod && !event.shiftKey && event.key === "," && (!layerOpen() || ui.settingsOpen)) {
+      if (shortcut.type === "settings") {
+        if (layerOpen() && !ui.settingsOpen) return;
         handled();
         ui.openSettings(ui.settingsOpen ? null : "general");
         return;
@@ -83,56 +86,70 @@ function useShortcuts(query: string) {
 
       const list = visibleBots(bots, query);
       const at = list.findIndex((bot) => bot.threadId === ui.selectedThreadId);
-      // event.code for Alt combinations: on a Mac, Option turns the key into another character ("∫" for B).
-      const details = isMac()
-        ? event.metaKey && ((event.shiftKey && key === "i") || (event.altKey && event.code === "KeyB"))
-        : event.ctrlKey && event.altKey && event.code === "KeyB";
 
-      if (details) {
-        handled();
-        ui.setPanel("details");
-      } else if (event.ctrlKey && event.key === "Tab") {
-        handled();
-        const next = event.shiftKey ? (at <= 0 ? list.length : at) - 1 : (at + 1) % Math.max(1, list.length);
-        const bot = list[next];
-        if (bot) ui.select(bot.threadId);
-      } else if (mod && !event.shiftKey && (event.key === "[" || event.key === "]")) {
-        handled();
-        ui.go(event.key === "[" ? "back" : "forward", (id) => !!threads?.some((thread) => thread.id === id));
-      } else if (mod && !event.shiftKey && key === "n") {
-        handled();
-        void newBot();
-      } else if (mod && event.shiftKey && key === "n") {
-        handled();
-        ui.setOverlay("newGroup");
-      } else if (mod && event.shiftKey && key === "m") {
-        handled();
-        ui.openSettings("apps");
-      } else if (mod && event.key === "/") {
-        handled();
-        ui.setOverlay("shortcuts");
-      } else if (mod && !event.shiftKey && key === "b") {
-        handled();
-        ui.toggleCompact();
-      } else if (mod && event.shiftKey && key === "f") {
-        handled();
-        if (ui.compactSidebar) ui.toggleCompact();
-        setTimeout(() => document.getElementById(BOT_SEARCH_ID)?.focus(), 0);
-      } else if (mod && !event.shiftKey && !event.altKey && key === "i") {
-        // Not with Shift: Ctrl+Shift+I opens the developer tools.
-        handled();
-        document.getElementById(COMPOSER_ID)?.focus();
-      } else if (mod && /^[1-9]$/.test(event.key)) {
-        const bot = list[Number(event.key) - 1];
-        if (bot) {
+      switch (shortcut.type) {
+        case "details":
           handled();
-          ui.select(bot.threadId);
+          ui.setPanel("details");
+          break;
+        case "cycle": {
+          handled();
+          const next = shortcut.backwards
+            ? (at <= 0 ? list.length : at) - 1
+            : (at + 1) % Math.max(1, list.length);
+          const bot = list[next];
+          if (bot) ui.select(bot.threadId);
+          break;
         }
-      } else if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && !typing) {
-        handled();
-        const next = event.key === "ArrowDown" ? Math.min(at + 1, list.length - 1) : Math.max(at - 1, 0);
-        const bot = list[next];
-        if (bot) ui.select(bot.threadId);
+        case "back":
+        case "forward":
+          handled();
+          ui.go(shortcut.type, (id) => !!threads?.some((thread) => thread.id === id));
+          break;
+        case "newBot":
+          handled();
+          void newBot();
+          break;
+        case "newGroup":
+          handled();
+          ui.setOverlay("newGroup");
+          break;
+        case "apps":
+          handled();
+          ui.openSettings("apps");
+          break;
+        case "shortcuts":
+          handled();
+          ui.setOverlay("shortcuts");
+          break;
+        case "compact":
+          handled();
+          ui.toggleCompact();
+          break;
+        case "findBot":
+          handled();
+          if (ui.compactSidebar) ui.toggleCompact();
+          setTimeout(() => document.getElementById(BOT_SEARCH_ID)?.focus(), 0);
+          break;
+        case "composer":
+          handled();
+          document.getElementById(COMPOSER_ID)?.focus();
+          break;
+        case "select": {
+          const bot = list[shortcut.number - 1];
+          if (bot) {
+            handled();
+            ui.select(bot.threadId);
+          }
+          break;
+        }
+        case "step": {
+          handled();
+          const next = shortcut.delta === 1 ? Math.min(at + 1, list.length - 1) : Math.max(at - 1, 0);
+          const bot = list[next];
+          if (bot) ui.select(bot.threadId);
+          break;
+        }
       }
     };
     window.addEventListener("keydown", onKey);

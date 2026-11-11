@@ -62,6 +62,8 @@ Try a few things:
 
 ## 5. Grow your team
 
+Your sidebar lists your bots, then **Races**, **Clusters** and **Group chats** (the ones you start), and **Bot conversations**: what a coordinator and its helpers say to each other, which you can open and read but are not part of.
+
 From the **+** button in the sidebar:
 
 | Item                     | What it makes                                                                                                           |
@@ -73,11 +75,11 @@ From the **+** button in the sidebar:
 | **New race**             | 3–5 bots compete on one task and a judge compiles the best result. See [Races & Clusters](races-and-clusters.md#races). |
 | **Import bot template…** | A bot someone shared with **Share as template**.                                                                        |
 
-Open a bot's **Details** panel (Ctrl+Alt+B, or Cmd+Shift+I on a Mac) to change its avatar, instructions and model, read and edit its memory, add skills and browse its files.
+Open a bot's **Details** panel (the button in the chat header, Ctrl+Alt+B, or Cmd+Shift+I on a Mac) to change its avatar, instructions and model, read and edit its memory, add skills and browse its files.
 
 ## 6. Learn the shortcuts
 
-Press **Ctrl+/** (Cmd+/ on a Mac) for the full list. The most useful:
+Press **Ctrl+/** (Cmd+/ on a Mac) for the full list. On keyboards with an AltGr key (German, Nordic, Portuguese and others), AltGr counts as Ctrl+Alt and is never taken as a shortcut, so typing `[`, `]` or `{` always works; that also means Ctrl+Alt+B doesn't open Details there, so use the header button. The most useful:
 
 | Shortcut              | Does                                    |
 | --------------------- | --------------------------------------- |

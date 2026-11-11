@@ -9,6 +9,7 @@ import { useDiscussion, useStopDiscussion } from "../../hooks/discussion";
 import { useRuntime } from "../../hooks/runtime";
 import { useSkills } from "../../hooks/team";
 import { useMessageHistory, useSendMessage, useStopThread } from "../../hooks/threads";
+import { noModelFor } from "../../lib/groups";
 import { isMac } from "../../lib/harness";
 import { layerOpen } from "../../lib/layers";
 import { quoteInto } from "../../lib/quote";
@@ -20,6 +21,7 @@ import { ComputerPanel } from "../computer/ComputerPanel";
 import { DetailsPanel } from "../details/DetailsPanel";
 import { groupTitle } from "../Sidebar";
 import { VoiceButton } from "../voice/VoiceButton";
+import { ParallelToggle } from "./ParallelToggle";
 import { Composer, COMPOSER_ID } from "./Composer";
 import { DiscussDialog } from "./DiscussDialog";
 import { useComposerAssist } from "./ComposerAssist";
@@ -44,6 +46,8 @@ export function ChatView({ thread }: { thread: Thread }) {
   const { messages, hasOlder, loadingOlder, loadOlder } = useMessageHistory(thread.id);
   const { data: runtime } = useRuntime();
   const send = useSendMessage(thread.id);
+  // Parallel Bots: while on, each message goes out as one request answered in three sections.
+  const [parallel, setParallel] = useState(false);
   const stop = useStopThread(thread.id);
   const activity = useUi((state) => state.activity[thread.id]);
   const panel = useUi((state) => state.panel);
@@ -72,7 +76,7 @@ export function ChatView({ thread }: { thread: Thread }) {
   const bot: Bot | undefined = thread.kind === "direct" ? members[0] : undefined;
   const { data: skills } = useSkills(bot?.id);
   const title = bot?.name ?? groupTitle(thread, botMap);
-  const noModel = !runtime?.settings.sharedModel && !bot?.model;
+  const noModel = noModelFor(runtime?.settings.sharedModel, members);
   const activeBot = activity?.botId ? botMap.get(activity.botId) : undefined;
   const assist = useComposerAssist({
     members: thread.kind === "group" ? members : [],
@@ -290,7 +294,9 @@ export function ChatView({ thread }: { thread: Thread }) {
                   ? "Pick a model in Settings to start"
                   : discussing
                     ? "Add to the discussion: the next speaker answers you"
-                    : `Message ${title}`
+                    : parallel && thread.kind === "direct"
+                      ? `Ask ${title} once: three roles answer`
+                      : `Message ${title}`
               }
               disabled={noModel}
               busy={Boolean(activity)}
@@ -299,12 +305,21 @@ export function ChatView({ thread }: { thread: Thread }) {
               onKeyDown={assist.onKeyDown}
               above={assist.above}
               tools={
-                <VoiceButton
-                  onTranscript={(text) => setText((current) => (current ? `${current} ${text}` : text))}
-                />
+                <>
+                  {thread.kind === "direct" && (
+                    <ParallelToggle on={parallel} onToggle={() => setParallel((on) => !on)} />
+                  )}
+                  <VoiceButton
+                    onTranscript={(text) => setText((current) => (current ? `${current} ${text}` : text))}
+                  />
+                </>
               }
               onSend={async (input) => {
-                await send.mutateAsync({ ...input, ...(replyTo ? { replyToId: replyTo.id } : {}) });
+                await send.mutateAsync({
+                  ...input,
+                  ...(replyTo ? { replyToId: replyTo.id } : {}),
+                  ...(parallel && thread.kind === "direct" ? { parallel: true } : {}),
+                });
                 setReplyTo(null);
                 setNewFromId(null);
               }}

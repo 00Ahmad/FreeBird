@@ -75,7 +75,9 @@ export function DiscussionView({
     : discussion.status === "summarizing"
       ? "The moderator is writing the final report…"
       : discussion.status === "done"
-        ? "Finished · the final report is in the debate"
+        ? discussion.error
+          ? `Ended early (${discussion.error}) · the final report is in the debate`
+          : "Finished · the final report is in the debate"
         : discussion.status === "stopped"
           ? "Stopped"
           : discussion.status === "error"

@@ -4,9 +4,15 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DEFAULT_RUNTIME_SETTINGS, type Bot, type Message, type MessagePart } from "@mrog/shared";
+import {
+  DEFAULT_RUNTIME_SETTINGS,
+  PARTLY_HIDDEN_BADGE,
+  type Bot,
+  type Message,
+  type MessagePart,
+} from "@mrog/shared";
 
-import type { ApprovalRequest } from "@mrog/tools";
+import { BADGES, type ApprovalRequest } from "@mrog/tools";
 
 import { auth, fakeOllama, makeHarness, ndjson, nextEvent, type TestHarness } from "./testing";
 
@@ -294,6 +300,87 @@ describe("always allow", () => {
     expect(part.approval?.canAlways).toBe(false);
     expect(approvals.respond(part.approval!.id, "always")).toBe(true);
     expect(await decided).toBe("allow");
+    expect(approvals.permissions().rules).toEqual([]);
+  });
+});
+
+describe("always allow, exactly that action", () => {
+  /** Asks about a call and returns the card shown and what the user's answer decided. */
+  async function ask(
+    summary: string,
+    badges: string[],
+    answer?: "always" | "allow_once",
+    tool = "fetch_url",
+  ) {
+    const { approvals } = h!.services.agent;
+    const parts: MessagePart[] = [{ type: "tool", callId: "c1", name: tool, args: {}, status: "running" }];
+    h!.services.turns.partHooks.set("msg_x", { parts, publish: () => {} });
+    const scope = {
+      threadId: "thr_x",
+      messageId: "msg_x",
+      botId: "bot_x",
+      groupChat: false,
+      signal: new AbortController().signal,
+    };
+    const request = {
+      call: { id: "c1", name: tool, arguments: {} },
+      risk: { level: "ask", kind: "general", badges, summary },
+    } as unknown as ApprovalRequest;
+    const decided = approvals.decide(request, scope);
+    const part = parts[0] as Extract<MessagePart, { type: "tool" }>;
+    const approval = part.approval;
+    if (answer && approval) approvals.respond(approval.id, answer);
+    else if (approval) approvals.respond(approval.id, "deny");
+    await decided;
+    return approval;
+  }
+  const risk = (summary: string) =>
+    ({ level: "ask", kind: "general", badges: [], summary }) as unknown as ApprovalRequest["risk"];
+
+  it("does not let one 'Always' on an address settle a longer one that starts the same way", async () => {
+    await setup([]);
+    const { approvals } = h!.services.agent;
+    await ask("Fetch http://192.168.1.1", [], "always");
+    expect(approvals.permissions().rules).toMatchObject([
+      { tool: "fetch_url", match: "Fetch http://192.168.1.1", exact: true, decision: "allow" },
+    ]);
+    expect(approvals.settled("fetch_url", risk("Fetch http://192.168.1.1"))).toBe("allow");
+    expect(approvals.settled("fetch_url", risk("Fetch http://192.168.1.10/admin"))).toBeUndefined();
+    expect(approvals.settled("fetch_url", risk("Fetch http://192.168.1.1:8080/x"))).toBeUndefined();
+  });
+
+  it("still lets a rule the user typed match by its start, and an old saved rule keep doing so", async () => {
+    await setup([]);
+    const { approvals } = h!.services.agent;
+    approvals.addRule({ tool: "run_command", match: "git status", decision: "allow" });
+    expect(approvals.settled("run_command", risk("git status --short"))).toBe("allow");
+    expect(approvals.settled("run_command", risk("git push"))).toBeUndefined();
+    // Saved before rules could be exact: no `exact` at all.
+    approvals.savePermissions({
+      localExecution: "ask",
+      rules: [
+        {
+          id: "old",
+          tool: "fetch_url",
+          match: "Fetch https://a.test/",
+          decision: "allow",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+    expect(approvals.settled("fetch_url", risk("Fetch https://a.test/page"))).toBe("allow");
+  });
+
+  it("offers no 'Always' for something that can't be undone or that the card cuts short", async () => {
+    await setup([]);
+    const { approvals } = h!.services.agent;
+    const plain = await ask("Mail → send(a)", [BADGES.shares]);
+    expect(plain?.canAlways).toBe(true);
+    const destructive = await ask("Mail → delete(a)", [BADGES.irreversible, BADGES.shares], "always");
+    expect(destructive?.canAlways).toBe(false);
+    const hidden = await ask("Mail → send(…)", [BADGES.shares, PARTLY_HIDDEN_BADGE], "always");
+    expect(hidden?.canAlways).toBe(false);
+    // Answering 'Always' where it isn't offered allowed once and saved nothing.
     expect(approvals.permissions().rules).toEqual([]);
   });
 });

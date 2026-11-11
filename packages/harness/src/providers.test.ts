@@ -175,4 +175,53 @@ describe("providers", () => {
     expect(h.services.vault.has("PROVIDER_GROQ_KEY")).toBe(false);
     expect(h.services.registry.get("groq")).toBeUndefined();
   });
+
+  it("keeps no key for a server on the user's network, and never sends one to it", async () => {
+    h = await makeHarness({
+      handlers: {
+        ...fakeOllama(),
+        "127.0.0.1:1234/v1/models": () => Response.json({ data: [{ id: "qwen" }] }),
+      },
+    });
+    const added = await h.app.inject({
+      method: "POST",
+      url: "/api/providers",
+      headers: auth,
+      payload: { preset: "lmstudio", apiKey: "typed-by-mistake" },
+    });
+    expect(added.statusCode).toBe(201);
+    expect(added.json().provider.hasKey).toBe(false);
+    expect(h.services.vault.has("PROVIDER_LMSTUDIO_KEY")).toBe(false);
+
+    const patched = await h.app.inject({
+      method: "PATCH",
+      url: "/api/providers/lmstudio",
+      headers: auth,
+      payload: { apiKey: "typed-again" },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(h.services.vault.has("PROVIDER_LMSTUDIO_KEY")).toBe(false);
+
+    // A key saved by an older version is not sent either.
+    h.services.vault.set("PROVIDER_LMSTUDIO_KEY", "left-from-before");
+    const view = await h.app.inject({ url: "/api/providers", headers: auth });
+    expect(view.json().providers[0].hasKey).toBe(false);
+    const test = await h.app.inject({ method: "POST", url: "/api/providers/lmstudio/test", headers: auth });
+    expect(test.json()).toEqual({ models: 1 });
+    const sent = h.calls.filter((call) => call.url.includes("127.0.0.1:1234"));
+    expect(sent.length).toBeGreaterThan(0);
+    for (const call of sent) expect(call.headers.get("authorization")).toBeNull();
+  });
+
+  it("still keeps the key for a custom OpenAI-compatible server", async () => {
+    h = await makeHarness();
+    const added = await h.app.inject({
+      method: "POST",
+      url: "/api/providers",
+      headers: auth,
+      payload: { preset: "openai-compatible", baseUrl: "https://llm.example.com/v1", apiKey: "k-custom" },
+    });
+    expect(added.json().provider.hasKey).toBe(true);
+    expect(h.services.vault.get("PROVIDER_OPENAI_COMPATIBLE_KEY")).toBe("k-custom");
+  });
 });

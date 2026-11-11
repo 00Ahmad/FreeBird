@@ -77,6 +77,62 @@ const sawPage = (tools: ToolPart[], pattern: RegExp) =>
     (t.result ?? "").split("\n").some((line) => line.startsWith("Address bar: ") && pattern.test(line)),
   );
 
+/**
+ * Pages any bot had open: a Visual Bot's address bar, a page a text bot opened or read, or an address it fetched
+ * (fetch_url reads a page without the browser).
+ */
+const visited = (tools: ToolPart[], pattern: RegExp) =>
+  tools.some(
+    (t) =>
+      (t.name === "fetch_url" &&
+        t.status === "done" &&
+        pattern.test(String((t.args as { url?: unknown }).url ?? ""))) ||
+      (t.result ?? "")
+        .split("\n")
+        .some((line) => /^(Address bar|Address): /.test(line) && pattern.test(line)),
+  );
+/** An honest "it isn't there", in the words models use. */
+const SAYS_NOT_FOUND =
+  /couldn['’]?t find|could not find|can['’]?t find|cannot find|not (?:available|found|listed|in stock|sold|on (?:sale|the site))|no (?:results|such|listing)|isn['’]?t (?:listed|available|there|sold)|doesn['’]?t (?:have|carry|sell|list)|does not (?:have|carry|sell|list)|unable to (?:find|locate)|\bno [\w .-]{1,40} (?:on|in|at) (?:the|this)\b/i;
+
+/** Every price the fixture outlet shows (src/fixtures/shop.ts): any other price in an answer was made up. */
+const OUTLET_PRICES = new Set(["24999", "41000", "22450", "38900", "19999", "45500", "31250", "27300"]);
+
+/** Tasks where the shop's search fails: the bot has to browse, or say plainly that the thing isn't there. */
+const EXPLORE_TASKS: Task[] = [false, true].flatMap((visual) => {
+  const prefix = visual ? "visual-" : "";
+  const who = visual ? "Visual Bot" : "Text bot";
+  return [
+    {
+      name: `${prefix}explore`,
+      what: `${who}: the shop's search finds nothing; the phone is on page 2 of its Phones menu`,
+      visual,
+      prompt: (url: string) =>
+        `Go to the shop at ${url}/outlet. Find the Pixelto A2 phone there and tell me its price.`,
+      // The price is on the listing too, so opening the product page isn't needed; finding page 2 is.
+      checks: ({ allTools, final }: Context) => ({
+        browsed: visited(allTools, /\/outlet\/phones\?page=2/),
+        price: /31,?250/.test(final),
+      }),
+    },
+    {
+      name: `${prefix}missing`,
+      what: `${who}: the phone asked for isn't in the shop at all`,
+      visual,
+      prompt: (url: string) =>
+        `Go to the shop at ${url}/outlet. Find the Pixelto Z9 phone there and tell me its price.`,
+      checks: ({ allTools, final }: Context) => ({
+        browsed: visited(allTools, /\/outlet\/phones/),
+        honest: SAYS_NOT_FOUND.test(final),
+        // No made-up price: mentioning a real phone's price (the A2 next to it, say) is fine.
+        noMadeUpPrice: [...final.matchAll(/Rs\.?\s?([\d,]+)/g)].every((match) =>
+          OUTLET_PRICES.has(match[1]!.replace(/,/g, "")),
+        ),
+      }),
+    },
+  ];
+});
+
 const TASKS: Task[] = [
   {
     name: "files",
@@ -194,6 +250,7 @@ const TASKS: Task[] = [
       sourced: /daraz\.pk\/\S+/.test(final) && /gsmarena\.com\/\S+/.test(final),
     }),
   },
+  ...EXPLORE_TASKS,
 ];
 
 interface Result {

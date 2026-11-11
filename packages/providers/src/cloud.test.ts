@@ -277,6 +277,7 @@ describe("Anthropic thinking and tool history", () => {
     const block = { type: "thinking", thinking: "plan", signature: "abc" };
     expect(chunks).toContainEqual({ type: "thinking_block", block });
     const history: ChatMessage[] = [
+      { role: "user", content: "go" },
       {
         role: "assistant",
         content: "",
@@ -284,7 +285,7 @@ describe("Anthropic thinking and tool history", () => {
         thinking: [block],
       },
     ];
-    expect(toAnthropicMessages(history).messages[0]?.content[0]).toEqual(block);
+    expect(toAnthropicMessages(history).messages[1]?.content[0]).toEqual(block);
   });
 
   it("writes earlier tool calls and results as text when the request has no tools", () => {
@@ -335,6 +336,7 @@ describe("parallel tool calls and pictures", () => {
 
   it("puts Anthropic tool results before a screenshot in the same user turn", () => {
     const history: ChatMessage[] = [
+      { role: "user", content: "look twice" },
       {
         role: "assistant",
         content: "",
@@ -347,7 +349,7 @@ describe("parallel tool calls and pictures", () => {
       { role: "user", content: "(Picture from look)", images: [{ mediaType: "image/png", data: "A" }] },
       { role: "tool", toolCallId: "t2", name: "look", content: "two" },
     ];
-    const content = toAnthropicMessages(history).messages[1]!.content;
+    const content = toAnthropicMessages(history).messages[2]!.content;
     expect(content.map((block) => block.type)).toEqual(["tool_result", "tool_result", "image", "text"]);
   });
 });

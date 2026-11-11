@@ -1,10 +1,11 @@
-import { Brain, ChevronRight, Gavel } from "lucide-react";
+import { Brain, ChevronRight, Columns3, Gavel } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { messageText, type Bot, type Message, type MessagePart } from "@mrog/shared";
 import { BotAvatar, cn } from "@mrog/ui-kit";
 
 import { Markdown } from "./Markdown";
+import { ParallelCards } from "./ParallelCards";
 import { PlanCard } from "./PlanCard";
 import { ToolCard } from "./ToolCard";
 import { QuestionCard } from "./QuestionCard";
@@ -43,6 +44,11 @@ export function MessageItem({ message, bot, grouped, actions, latest = false }: 
     return (
       <div className={cn("group flex justify-end", grouped ? "mt-1" : "mt-4")}>
         <div className="flex max-w-[78%] flex-col items-end gap-1">
+          {message.parallel && (
+            <span className="flex items-center gap-1 text-[11px] text-ink-3">
+              <Columns3 size={11} /> Parallel Bots
+            </span>
+          )}
           {message.parts.map((part, index) => (
             <UserPart key={index} part={part} />
           ))}
@@ -125,6 +131,8 @@ function BotPart({
   const streaming = message.status === "streaming" && last;
   switch (part.type) {
     case "text":
+      if (message.parallel)
+        return <ParallelCards text={part.text} streaming={streaming} done={message.status === "done"} />;
       return (
         <div className={cn("select-text", streaming && "streaming-caret")}>
           <Markdown text={part.text} />

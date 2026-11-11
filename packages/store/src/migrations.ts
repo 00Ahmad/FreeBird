@@ -215,4 +215,10 @@ export const MIGRATIONS: readonly Migration[] = [
     // JSON {"allow": [...] | null, "exclude": [...]}; NULL = no restriction, which is every bot made before this.
     sql: `ALTER TABLE bots ADD COLUMN tools TEXT;`,
   },
+  {
+    id: 14,
+    name: "parallel-bots",
+    // A message sent in Parallel Bots mode, and the reply to one (a single reply written in three sections).
+    sql: `ALTER TABLE messages ADD COLUMN parallel INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];

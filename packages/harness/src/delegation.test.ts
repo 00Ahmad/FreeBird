@@ -156,11 +156,13 @@ describe("coordinators and helpers", () => {
 
   it("plans a job that splits into parts, so the coordinator hands them to helpers unasked", async () => {
     const asked: string[] = [];
+    let plannerThink: unknown = "not sent";
     let seen = "";
     const { make, requests } = await start({
       // The planning question has no "You are …" line, so the fake routes it as "?".
       "?": [
         (body) => {
+          plannerThink = body.think;
           asked.push(body.messages.at(-1).content);
           return say(
             "- Find Flask's latest version\n- Find FastAPI's latest version\n- Find Django's latest version",
@@ -181,6 +183,8 @@ describe("coordinators and helpers", () => {
     await send(boss, "Compare Flask, FastAPI and Django: latest version and async support for each.");
     await done;
     expect(asked).toEqual(["Compare Flask, FastAPI and Django: latest version and async support for each."]);
+    // An Ollama model may think without its model list saying so; the planner never spends its room on that.
+    expect(plannerThink).toBe(false);
     expect(seen).toContain(
       "(Plan from the app: this job has 3 independent parts:\n1. Find Flask's latest version",
     );
@@ -194,6 +198,29 @@ describe("coordinators and helpers", () => {
     await send(boss, "Use two helpers to list fruits and vegetables for me, please.");
     await done;
     expect(requests.filter((r) => r.bot === "?")).toHaveLength(1);
+  });
+
+  it("doesn't count the wait for the shared model against the time the plan may take", async () => {
+    let seen = "";
+    const { make } = await start({
+      "?": [() => say("- Find Flask's latest version\n- Find FastAPI's latest version")],
+      Boss: [
+        (body) => {
+          seen = body.messages.at(-1).content;
+          return say("ok");
+        },
+      ],
+    });
+    h!.services.turns.beforeTurnTimeoutMs = 150;
+    const boss = await make("Boss", { isPrimary: true });
+    // Another bot has the model for longer than the plan is allowed to take.
+    const held = await h!.services.runtime.acquire("user");
+    const done = finalOf(boss);
+    await send(boss, "Compare Flask and FastAPI: latest version and async support for each.");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    held();
+    await done;
+    expect(seen).toContain("(Plan from the app: this job has 2 independent parts:");
   });
 
   it("reads a plan's parts and nothing from a reply that keeps the job whole", () => {
@@ -325,6 +352,213 @@ describe("coordinators and helpers", () => {
     expect(result).toContain("## Veg\nCarrot");
     expect(most).toBe(1);
     expect(h!.services.runtime.queueState()).toEqual({ running: 0, waiting: 0 });
+  });
+
+  it("makes the helpers delegate names, so skipping spawn_bot doesn't leave a coordinator with nobody", async () => {
+    let scoutSystem = "";
+    const { make } = await start({
+      Boss: [
+        () =>
+          call("delegate", {
+            tasks: [
+              { bot_name: "Scout", task: "Find the first fact" },
+              { bot_name: "archer_two", task: "Find the second fact" },
+            ],
+          }),
+        () => say("Combined."),
+      ],
+      Scout: [
+        (body) => {
+          scoutSystem = body.messages[0].content;
+          return say("fact one");
+        },
+      ],
+    });
+    const boss = await make("Boss", { isPrimary: true });
+    const done = finalOf(boss);
+    await send(boss, "go");
+    const reply = await done;
+
+    // No approval card was needed, and both helpers answered.
+    const result = toolParts(reply).find((part) => part.name === "delegate")!;
+    expect(result).toMatchObject({ status: "done" });
+    expect(result.result).toContain("(Created helpers Scout, archer_two for this.)");
+    expect(result.result).toContain("## Scout\nfact one");
+    expect(result.result).toContain("## archer_two\narcher_two done");
+    const helpers = h!.store.bots.list().filter((bot) => bot.parentId === boss.id);
+    expect(helpers.map((bot) => bot.name).toSorted()).toEqual(["Scout", "archer_two"]);
+    expect(helpers.every((bot) => bot.temporary)).toBe(true);
+
+    // The helper is told what it's doing; the thread it works in isn't a group chat with a user in it.
+    expect(scoutSystem).toContain("You're working on a task Boss handed you");
+    expect(scoutSystem).not.toContain("group chat");
+  });
+
+  it("takes a name with other spacing or case for the bot it names, and still stops at the helper limit", async () => {
+    const { make } = await start({
+      Boss: [
+        () => call("delegate", { tasks: [{ bot_name: "research_bot", task: "Look it up" }] }),
+        () => say("ok"),
+        () => call("delegate", { tasks: [{ bot_name: "Seventh", task: "One more" }] }),
+        () => say("ok"),
+      ],
+    });
+    const boss = await make("Boss", { isPrimary: true });
+    const researcher = await make("Research Bot");
+
+    let done = finalOf(boss);
+    await send(boss, "first");
+    const first = toolParts(await done)[0]!;
+    expect(first.result).toContain("## Research Bot");
+    expect(first.result).not.toContain("Created");
+    expect(h!.store.bots.list().filter((bot) => bot.parentId === boss.id)).toHaveLength(0);
+    expect(researcher.name).toBe("Research Bot");
+
+    for (let i = 1; i <= 6; i++)
+      h!.store.bots.create(
+        { name: `Helper ${i}` },
+        { parentId: boss.id, temporary: true, section: "Helpers" },
+      );
+    done = finalOf(boss);
+    await send(boss, "second");
+    expect(toolParts(await done)[0]!.result).toContain("You already have 6 helpers");
+    expect(h!.store.bots.list().some((bot) => bot.name === "Seventh")).toBe(false);
+  });
+
+  it("gives every helper its own thread with the coordinator, and keeps using it for later tasks", async () => {
+    const { make } = await start({
+      Boss: [
+        () =>
+          call("delegate", {
+            tasks: [
+              { bot_name: "Scout", task: "Find the first fact" },
+              { bot_name: "Archer", task: "Find the second fact" },
+            ],
+          }),
+        () => say("Combined."),
+        () => call("delegate", { tasks: [{ bot_name: "Scout", task: "Check the first fact" }] }),
+        () => say("Checked."),
+      ],
+      Scout: [() => say("fact one"), () => say("fact one is right")],
+      Archer: [() => say("fact two")],
+    });
+    const boss = await make("Boss", { isPrimary: true });
+    let done = finalOf(boss);
+    await send(boss, "go");
+    await done;
+
+    const talks = () => h!.store.threads.list().filter((thread) => thread.pair);
+    const names = new Map(h!.store.bots.list().map((bot) => [bot.id, bot.name]));
+    const said = (title: string) =>
+      h!.store.messages
+        .list(talks().find((thread) => thread.title === title)!.id)
+        .map((message) => `${names.get(message.botId!)}: ${messageText(message)}`);
+
+    // One thread per helper, each with just the coordinator and that helper, holding the task and the answer.
+    expect(
+      talks()
+        .map((thread) => thread.title)
+        .toSorted(),
+    ).toEqual(["Boss ↔ Archer", "Boss ↔ Scout"]);
+    for (const talk of talks()) {
+      expect(talk.memberIds).toHaveLength(2);
+      expect(talk.memberIds).toContain(boss.id);
+    }
+    expect(said("Boss ↔ Scout")).toEqual(["Boss: Find the first fact", "Scout: fact one"]);
+    expect(said("Boss ↔ Archer")).toEqual(["Boss: Find the second fact", "Archer: fact two"]);
+
+    // A later task for the same helper goes on in that thread; it doesn't start another.
+    done = finalOf(boss);
+    await send(boss, "again");
+    await done;
+    expect(talks()).toHaveLength(2);
+    expect(said("Boss ↔ Scout")).toEqual([
+      "Boss: Find the first fact",
+      "Scout: fact one",
+      "Boss: Check the first fact",
+      "Scout: fact one is right",
+    ]);
+    expect(said("Boss ↔ Archer")).toHaveLength(2);
+  });
+
+  it("gives a helper its thread with the coordinator as soon as it is created, before any work", async () => {
+    const { make } = await start({
+      Boss: [
+        () => call("spawn_bot", { name: "Researcher", instructions: "Find facts." }),
+        () => say("Made it."),
+      ],
+    });
+    const boss = await make("Boss", { isPrimary: true });
+    const done = finalOf(boss);
+    await send(boss, "set up a researcher");
+    const reply = await done;
+
+    // The reply tells the model what to do next, and the conversation already exists, empty.
+    expect(toolParts(reply)[0]!.result).toContain("give it its task with delegate");
+    const talks = h!.store.threads.list().filter((thread) => thread.pair);
+    expect(talks.map((thread) => thread.title)).toEqual(["Boss ↔ Researcher"]);
+    expect(talks[0]!.memberIds).toHaveLength(2);
+    expect(h!.store.messages.list(talks[0]!.id)).toEqual([]);
+  });
+
+  it("never makes a helper in a group chat, where nobody could answer its approval cards", async () => {
+    const { make, toolsOf } = await start({
+      Boss: [() => call("delegate", { tasks: [{ bot_name: "Ghost", task: "Do it" }] }), () => say("ok")],
+    });
+    const boss = await make("Boss", { isPrimary: true });
+    const mate = await make("Mate");
+    const group = h!.store.threads.createGroup(null, [boss.id, mate.id]);
+    const done = nextEvent<Message>(
+      h!.bus,
+      (e) =>
+        e.type === "message.updated" &&
+        e.message.botId === boss.id &&
+        e.message.threadId === group.id &&
+        e.message.status !== "streaming" &&
+        e.message,
+      8000,
+    );
+    await h!.app.inject({
+      method: "POST",
+      url: `/api/threads/${group.id}/messages`,
+      headers: auth,
+      payload: { text: "@Boss please get this done" },
+    });
+    const reply = await done;
+    expect(toolParts(reply)[0]!.result).toBe('No teammate is called "Ghost". Teammates: Mate.');
+    expect(h!.store.bots.list().some((bot) => bot.name === "Ghost")).toBe(false);
+    expect(toolsOf("Boss")[0]).not.toContain("spawn_bot");
+  });
+
+  it("doesn't make a helper for a delegate name when spawn_bot is switched off for the coordinator", async () => {
+    const { make, toolsOf } = await start({
+      Boss: [() => call("delegate", { tasks: [{ bot_name: "Ghost", task: "Do it" }] }), () => say("ok")],
+    });
+    const boss = await make("Boss", {
+      isPrimary: true,
+      tools: { allow: null, exclude: ["spawn_bot"] },
+    });
+    const mate = await make("Mate");
+    const done = finalOf(boss);
+    await send(boss, "get this done");
+    const reply = await done;
+    expect(toolParts(reply)[0]!.result).toBe(`No teammate is called "Ghost". Teammates: ${mate.name}.`);
+    expect(h!.store.bots.list().some((bot) => bot.name === "Ghost")).toBe(false);
+    expect(toolsOf("Boss")[0]).toContain("delegate");
+    expect(toolsOf("Boss")[0]).not.toContain("spawn_bot");
+  });
+
+  it("doesn't guess between two bots whose names differ only in spacing or punctuation", async () => {
+    const { make } = await start({
+      Boss: [() => call("delegate", { tasks: [{ bot_name: "researchbot", task: "Look" }] }), () => say("ok")],
+    });
+    const boss = await make("Boss", { isPrimary: true });
+    await make("Research Bot");
+    await make("Research-Bot");
+    const done = finalOf(boss);
+    await send(boss, "go");
+    expect(toolParts(await done)[0]!.result).toContain('More than one teammate is called "researchbot"');
+    expect(h!.store.bots.list().filter((bot) => bot.parentId === boss.id)).toHaveLength(0);
   });
 
   it("refuses unknown, ambiguous or repeated targets with a message the model can use", async () => {

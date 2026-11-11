@@ -160,6 +160,9 @@ const searchFiles = defineTool({
   },
 });
 
+/** The folder a command runs in: asked about and run from the same place, so the card shows what really happens. */
+const commandFolder = (ctx: ToolContext, cwd: string | undefined) => resolvePath(ctx.workspace, cwd || ".");
+
 const runCommand = defineTool({
   name: "run_command",
   description:
@@ -188,15 +191,21 @@ const runCommand = defineTool({
         "Names of secrets you were given (with request_secret or use_login) to pass to this command as environment variables. Only the ones named here reach it.",
       ),
   }),
-  risk(args) {
+  risk(args, ctx) {
     const badges: string[] = [];
     if (looksDestructive(args.command)) badges.push(BADGES.irreversible);
     if (looksSecuritySensitive(args.command)) badges.push(BADGES.security);
     // A command that is given secrets is always shown with them, so the user sees where each one goes.
     if (args.secrets?.length) badges.push(BADGES.secrets);
-    const summary = args.secrets?.length
-      ? `${args.command}\n(with your secrets: ${args.secrets.join(", ")})`
-      : args.command;
+    let summary = args.command;
+    // Without a folder the command runs in the bot's own, as the description says. Any other folder is spelled out,
+    // since approving "delete everything" means something different in Documents than in the bot's folder.
+    if (args.cwd) {
+      const { abs, inside } = commandFolder(ctx, args.cwd);
+      if (!inside) badges.push(BADGES.outside);
+      summary += `\n(in ${abs})`;
+    }
+    if (args.secrets?.length) summary += `\n(with your secrets: ${args.secrets.join(", ")})`;
     return { level: "ask", kind: "terminal", badges, summary };
   },
   async run(args, ctx) {
@@ -210,7 +219,7 @@ const runCommand = defineTool({
       );
     }
     const env = Object.fromEntries((args.secrets ?? []).map((name) => [name, granted[name]!]));
-    const cwd = resolvePath(ctx.workspace, args.cwd ?? ".").abs;
+    const cwd = commandFolder(ctx, args.cwd).abs;
     await mkdir(cwd, { recursive: true });
     const result = await runShell(args.command, {
       cwd,

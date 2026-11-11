@@ -7,6 +7,11 @@ export interface HarnessConfig {
   host: string;
   /** 0 picks a free port. */
   port: number;
+  /**
+   * Only with `port` 0: the port to take if it is free (the one the last run used, so a webhook address stays the
+   * same); a random free port otherwise.
+   */
+  preferredPort?: number;
   /** Bearer token every /api request except /api/health must carry. */
   token: string;
   dataDir: string;
@@ -39,6 +44,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HarnessConfig 
   if (!Number.isInteger(port) || port < 0 || port > 65_535)
     throw new Error(`Invalid MROG_PORT: ${env.MROG_PORT}`);
 
+  // A hint, never an error: a bad value is ignored and the app starts on a random port.
+  const preferred = Number(env.MROG_PREFERRED_PORT);
+  const preferredPort =
+    Number.isInteger(preferred) && preferred > 0 && preferred <= 65_535 ? preferred : undefined;
+
   let token = env.MROG_TOKEN ?? "";
   if (!token) {
     token = randomBytes(32).toString("hex");
@@ -48,6 +58,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HarnessConfig 
   return {
     host,
     port,
+    ...(preferredPort ? { preferredPort } : {}),
     token,
     dataDir: resolve(env.MROG_DATA_DIR ?? defaultDataDir()),
     uiOrigins: (env.MROG_UI_ORIGINS ?? "")

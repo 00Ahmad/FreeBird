@@ -65,6 +65,12 @@ const CONSEQUENTIAL = new RegExp(
   "iu",
 );
 
+/**
+ * What can hold typed text: text and search boxes, and focused things the page doesn't describe (inside a
+ * rich-text editor, say). Anything else (a link, a button, a dropdown) refuses typing.
+ */
+const TYPED_INTO = /(?:^|\s)box$|^other$/;
+
 /** Controls that do something when clicked (as opposed to links and text boxes). */
 const BUTTON_KINDS = /^(?:button|menuitem|input:(?:submit|button|image))$/;
 /** Controls that Space presses, like a click. */
@@ -107,6 +113,22 @@ export function enterRisk(focused: PageElement | undefined, summary: string): Ri
   if (focused && (focused.kind.endsWith("link") || PRESSED_BY_SPACE.test(focused.kind)))
     return clickRisk(focused, `${summary}${where}`);
   return acts(`${summary}${where} (Enter may send or submit it)`);
+}
+
+/** Typed text with a line break in it: the browser types each break as an Enter press. */
+const LINE_BREAK = /[\r\n]/;
+
+/**
+ * Typing is free, except for the Enter it ends with, or one inside the text (a line break is an Enter press, so
+ * it is judged exactly like `enter`). With nothing to type into selected the typing is refused before any key is
+ * pressed, so there's nothing to ask about: asking would only hold the bot on a card about a key never pressed.
+ */
+export function typeRisk(focused: PageElement | undefined, text: string, enter: boolean): Risk {
+  const summary = `Type “${text.slice(0, 60)}”`;
+  if (!enter && !LINE_BREAK.test(text)) return safe(summary);
+  if (!focused || !TYPED_INTO.test(focused.kind))
+    return safe(`${summary} (nothing to type into is selected)`);
+  return enterRisk(focused, `${summary} and press Enter${enter ? "" : " at its line break"}`);
 }
 
 /** Space presses a focused button or ticks a checkbox, like a click; anywhere else it types a space or scrolls. */
@@ -182,7 +204,11 @@ export function visualTools(browser: BrowserManager, bot: Bot, sites: string[]):
       prepare: (args) => ({ box: args.box ?? args.ref ?? args.mark ?? args.number }),
       risk: (args) => {
         const element = mark(args.box);
-        return clickRisk(element, `Click box ${args.box}${element?.label ? ` (“${element.label}”)` : ""}`);
+        return browser.clickApproval(
+          id,
+          args.box,
+          `Click box ${args.box}${element?.label ? ` (“${element.label}”)` : ""}`,
+        );
       },
       run: (args) => browser.clickMark(id, args.box),
     }),
@@ -216,15 +242,15 @@ export function visualTools(browser: BrowserManager, bot: Bot, sites: string[]):
     defineTool({
       name: "screen_type",
       description:
-        "Type text into the box you clicked last (click it first). enter presses Enter afterwards, e.g. to search.",
+        "Type text into the box you clicked last (click it first). What was in the box is replaced, so give the whole text. enter presses Enter afterwards, e.g. to search.",
       args: z.object({ text: z.string().max(2000), enter: z.boolean().default(false) }),
       // Enter is judged by what really has focus now, not by what was clicked last.
-      risk: async (args) => {
-        const summary = `Type “${args.text.slice(0, 60)}”`;
-        return args.enter
-          ? enterRisk(await browser.focused(id), `${summary} and press Enter`)
-          : safe(summary);
-      },
+      risk: async (args) =>
+        typeRisk(
+          args.enter || LINE_BREAK.test(args.text) ? await browser.focused(id) : undefined,
+          args.text,
+          args.enter,
+        ),
       run: (args) => browser.typeText(id, args.text, args.enter),
     }),
     defineTool({

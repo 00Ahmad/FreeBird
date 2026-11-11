@@ -4,13 +4,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_BOT_TOOLS,
   DEFAULT_RUNTIME_SETTINGS,
+  PARTLY_HIDDEN_BADGE,
   type Bot,
   type ConnectorView,
   type Message,
   type MessagePart,
 } from "@mrog/shared";
 
+import { classifyTool, exposedNames } from "./connectors";
 import { auth, fakeOllama, makeHarness, ndjson, nextEvent, type TestHarness } from "./testing";
 
 let h: TestHarness | undefined;
@@ -169,4 +172,206 @@ describe("connected apps (MCP)", () => {
     expect(opened.mock.calls.length).toBeGreaterThan(2);
     expect(closed).toHaveBeenCalledTimes(opened.mock.calls.length + 1);
   }, 30_000);
+});
+
+const rawFixture = fileURLToPath(new URL("./fixtures/raw-mcp.mjs", import.meta.url));
+
+/** The raw fixture, answering tools/list the way RAW_MODE says. */
+async function addRaw(mode: "paged" | "collide") {
+  const res = await h!.app.inject({
+    method: "POST",
+    url: "/api/connectors",
+    headers: auth,
+    payload: {
+      name: "Raw App",
+      transport: { type: "stdio", command: process.execPath, args: [rawFixture], env: { RAW_MODE: mode } },
+      askBeforeUse: true,
+    },
+  });
+  return res.json().connector as ConnectorView;
+}
+
+const readOnlyBot = {
+  id: "bot_r",
+  tools: { ...DEFAULT_BOT_TOOLS, apps: { "raw-app": "read" } },
+} as unknown as Bot;
+
+const callContext = { signal: new AbortController().signal, botId: "bot_r", threadId: "thr_r" } as never;
+
+describe("what a tool's name says it does", () => {
+  const kind = (name: string) => classifyTool({ name });
+
+  it("counts verbs that change things as changes, not reads", () => {
+    expect(kind("resolve_incident")).toBe("write");
+    expect(kind("check_out")).toBe("write");
+    expect(kind("list_and_trash")).toBe("destructive");
+  });
+
+  it("knows more ways to destroy: trash, discard, rm, del, prune, flush, revert, withdraw, refund", () => {
+    for (const name of [
+      "trash_message",
+      "rm_file",
+      "discard_draft",
+      "deleteitem",
+      "del_row",
+      "prune_branches",
+      "flush_cache",
+      "revert_commit",
+      "withdraw_offer",
+      "refund_order",
+    ])
+      expect(kind(name), name).toBe("destructive");
+  });
+
+  it("still reads what only looks, and does not mistake a word for a longer one", () => {
+    for (const name of ["get_file", "list_messages", "search", "get_archived_items", "list_delivery_status"])
+      expect(kind(name), name).toBe("read");
+  });
+});
+
+describe("tools an app lists", () => {
+  it("follows the app's pages of tools", async () => {
+    h = await makeHarness();
+    const connector = await addRaw("paged");
+    expect(connector.tools.map((tool) => tool.name)).toEqual([
+      "alpha_one",
+      "alpha_two",
+      "beta_one",
+      "gamma_one",
+      "gamma_two",
+    ]);
+  }, 20_000);
+
+  it("gives tools whose cleaned-up names collide different names, and checks each by its own", async () => {
+    h = await makeHarness();
+    await addRaw("collide");
+    const manager = h.services.connectors;
+    const specs = manager.toolSpecs().filter((spec) => spec.name !== "query_result");
+    expect(specs).toHaveLength(2);
+    const [first, second] = specs.map((spec) => spec.name);
+    expect(first).not.toBe(second);
+    expect(first!.length).toBeLessThanOrEqual(64);
+    expect(manager.describe(first!)).toMatchObject({ tool: "list_items", kind: "read" });
+    expect(manager.describe(second!)).toMatchObject({ tool: "list.items", kind: "destructive" });
+    // A read-only grant lets the read through and blocks the one that changes things.
+    expect(manager.gate(readOnlyBot, first!)).toBeNull();
+    expect(manager.gate(readOnlyBot, second!)).toContain("read-only access");
+    // And the one that runs is the one that was checked.
+    expect(await specs[1]!.run({}, callContext)).toBe("ran list.items");
+  }, 20_000);
+
+  it("names colliding tools the same way whatever order the app lists them in, within 64 characters", () => {
+    const tool = (name: string) => ({ name, inputSchema: {} });
+    const forward = exposedNames("app", [tool("list_items"), tool("list.items"), tool("other")]);
+    const backward = exposedNames("app", [tool("other"), tool("list.items"), tool("list_items")]);
+    expect(Object.fromEntries(backward)).toEqual(Object.fromEntries(forward));
+    expect(new Set(forward.values()).size).toBe(3);
+    expect(forward.get("other")).toBe("app__other");
+
+    // The same long prefix cut at 64 characters.
+    const long = "x".repeat(60);
+    const cut = exposedNames("app", [tool(`${long}_a`), tool(`${long}_b`)]);
+    expect(new Set(cut.values()).size).toBe(2);
+    for (const name of cut.values()) expect(name.length).toBeLessThanOrEqual(64);
+  });
+});
+
+describe("an app that goes away", () => {
+  it("is marked as an error with its tools withdrawn when its server exits", async () => {
+    h = await makeHarness();
+    await addEcho();
+    const manager = h.services.connectors;
+    const changes: string[] = [];
+    h.bus.subscribe((event) => {
+      if (event.type === "data.changed") changes.push(event.keys.join());
+    });
+    expect(manager.toolSpecs().length).toBeGreaterThan(0);
+    const pid = (manager as any).live.get("echo-app").client.transport.pid as number;
+    const before = changes.length;
+    process.kill(pid);
+    await vi.waitFor(() => expect(manager.view(manager.configs()[0]!).state).toBe("error"), {
+      timeout: 10_000,
+    });
+    expect(manager.view(manager.configs()[0]!)).toMatchObject({
+      error: expect.stringContaining("Echo App"),
+      tools: [],
+    });
+    expect(manager.toolSpecs()).toEqual([]);
+    expect(changes.length).toBeGreaterThan(before);
+  }, 30_000);
+
+  it("is not an error when switched off, and a newer connection is not undone by the old one closing", async () => {
+    h = await makeHarness();
+    await addEcho();
+    const manager = h.services.connectors;
+    await manager.update("echo-app", { enabled: false });
+    expect(manager.view(manager.configs()[0]!)).toMatchObject({ state: "off", error: null });
+
+    await manager.update("echo-app", { enabled: true });
+    const old = (manager as any).live.get("echo-app").client as Client;
+    // Keep the old connection's close handler from before the reconnect.
+    const onclose = old.onclose!;
+    await manager.connect(manager.configs()[0]!);
+    expect((manager as any).live.get("echo-app").client).not.toBe(old);
+    onclose();
+    expect(manager.view(manager.configs()[0]!)).toMatchObject({ state: "connected", error: null });
+  }, 30_000);
+
+  it("is marked as gone when a call finds its web session ended", async () => {
+    h = await makeHarness();
+    await addEcho();
+    const manager = h.services.connectors;
+    const echo = manager.toolSpecs().find((spec) => spec.name === "echo_app__echo")!;
+    vi.spyOn(Client.prototype, "callTool").mockRejectedValue(
+      Object.assign(new Error("Error POSTing to endpoint"), { code: 404 }),
+    );
+    await expect(echo.run({ text: "x" }, callContext)).rejects.toThrow("Error POSTing");
+    expect(manager.view(manager.configs()[0]!)).toMatchObject({ state: "error", tools: [] });
+  }, 20_000);
+});
+
+describe("the approval card for an app's tool", () => {
+  const riskOf = async (args: Record<string, unknown>) => {
+    h = await makeHarness();
+    await addEcho();
+    const spec = h.services.connectors.toolSpecs().find((candidate) => candidate.name === "echo_app__echo")!;
+    return (await spec.risk(args, {} as never)) as { summary: string; badges: string[] };
+  };
+
+  it("shows everything the bot sent, including what comes after the first 200 characters", async () => {
+    const risk = await riskOf({ text: "x".repeat(300), bcc: "attacker@evil.com" });
+    expect(risk.summary).toContain("attacker@evil.com");
+    expect(risk.summary).not.toContain("not shown");
+    expect(risk.badges).not.toContain(PARTLY_HIDDEN_BADGE);
+  }, 20_000);
+
+  it("says how much it left out of a very long call, and marks the card", async () => {
+    const risk = await riskOf({ text: "y".repeat(5_000), bcc: "attacker@evil.com" });
+    expect(risk.summary).toMatch(/\(\d+ more characters not shown\)\)$/);
+    expect(risk.summary).not.toContain("attacker@evil.com");
+    expect(risk.summary.length).toBeLessThan(2_200);
+    expect(risk.badges).toContain(PARTLY_HIDDEN_BADGE);
+  }, 20_000);
+});
+
+describe("removing and signing in", () => {
+  it("keeps an app added while another one was being removed", async () => {
+    h = await makeHarness();
+    await addEcho();
+    const manager = h.services.connectors;
+    const disconnect = manager.disconnect.bind(manager);
+    vi.spyOn(manager, "disconnect").mockImplementation(async (id) => {
+      await disconnect(id);
+      const other = { ...manager.configs()[0]!, id: "other", name: "Other", enabled: false };
+      h!.store.settings.set("connectors", [...manager.configs(), other]);
+    });
+    expect(await manager.remove("echo-app")).toBe(true);
+    expect(manager.configs().map((config) => config.id)).toEqual(["other"]);
+  }, 20_000);
+
+  it("answers a sign-in return with a repeated parameter instead of failing", async () => {
+    h = await makeHarness();
+    const res = await h.app.inject({ url: "/oauth/callback?error=a&error=b&code=x&code=y&state=s&state=t" });
+    expect(res.statusCode).toBe(400);
+  });
 });

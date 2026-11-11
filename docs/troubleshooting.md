@@ -8,6 +8,10 @@
 - If Ollama runs on another computer or port, set the address in **Settings → Local model → Ollama address**.
 - Check it yourself: open <http://127.0.0.1:11434> in a browser; it should say "Ollama is running".
 
+### Ollama is running but lists no models
+
+Ollama may be looking in the wrong folder, so FreeBird shows no models even though they are still on disk. Check the **`OLLAMA_MODELS`** environment variable and **Model location** in Ollama's own settings: it must be your models folder (by default `%USERPROFILE%\.ollama\models` on Windows, `~/.ollama/models` elsewhere), not its parent. After fixing it, restart Ollama. `ollama list` in a terminal shows what Ollama sees; if it's empty there too, the problem is in Ollama's setup, not in FreeBird.
+
 ### "No model is selected"
 
 Pick a shared model in **Settings → Local model**, or give the bot its own model in its **Details** panel.
@@ -50,6 +54,14 @@ Dictation needs an OpenAI-compatible transcription endpoint. Set it up in **Sett
 ### An approval card or question shows "No longer waiting"
 
 The turn that asked was stopped. Send your message again.
+
+### "A secret can be at most 1,280 characters long"
+
+The Windows keychain can't hold more, so FreeBird applies the same limit everywhere. API keys and passwords are far shorter; if you are pasting a very long token, check that you copied only the token. Sign-ins to connected apps may be longer and are handled for you.
+
+### A routine's webhook address stopped working
+
+FreeBird tries to reuse the same local port at every start. If another program was using it, FreeBird picked a different one; copy the address again from the routine.
 
 ### `pnpm install` fails
 
