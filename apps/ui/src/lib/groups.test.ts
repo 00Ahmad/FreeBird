@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Thread } from "@mrog/shared";
 
-import { noModelFor, splitGroups } from "./groups";
+import { chatFor, noModelFor, splitGroups } from "./groups";
 
 const thread = (id: string, over: Partial<Thread> = {}) =>
   ({ id, kind: "group", cluster: false, race: false, pair: false, ...over }) as unknown as Thread;
@@ -32,6 +32,32 @@ describe("sidebar groups", () => {
     const listed = [...lists.races, ...lists.clusters, ...lists.groupChats, ...lists.botTalks];
     expect(listed.map((t) => t.id).toSorted()).toEqual(all.map((t) => t.id).toSorted());
     expect(lists.groupChats.map((t) => t.id)).toEqual(["group", "later"]);
+  });
+});
+
+describe("the chat a bot opens", () => {
+  const talk = (id: string, ...memberIds: string[]) =>
+    thread(id, { pair: true, memberIds } as Partial<Thread>);
+  const chief = { id: "chief", threadId: "chief-dm", parentId: null };
+  const scout = { id: "scout", threadId: "scout-dm", parentId: "chief" };
+  const threads = [talk("chief-scout", "chief", "scout"), talk("chief-archer", "chief", "archer")];
+
+  it("is its own chat for a bot that isn't a helper", () => {
+    expect(chatFor(chief, threads)).toBe("chief-dm");
+  });
+
+  it("is the conversation with its maker for a helper", () => {
+    expect(chatFor(scout, threads)).toBe("chief-scout");
+  });
+
+  it("is the helper's own chat until that conversation exists", () => {
+    expect(chatFor(scout, [])).toBe("scout-dm");
+    expect(chatFor(scout, [talk("other", "chief", "archer")])).toBe("scout-dm");
+  });
+
+  it("ignores a group chat the two happen to share", () => {
+    const group = thread("team", { memberIds: ["chief", "scout", "archer"] } as Partial<Thread>);
+    expect(chatFor(scout, [group])).toBe("scout-dm");
   });
 });
 

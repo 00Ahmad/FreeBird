@@ -15,6 +15,8 @@ import {
   useSkills,
   useUpdateGroup,
 } from "../../hooks/team";
+import { useThreads } from "../../hooks/threads";
+import { chatFor } from "../../lib/groups";
 import { exportTemplate } from "../../lib/templates";
 import { useUi } from "../../state";
 import { ModelMenu } from "../chat/ModelMenu";
@@ -194,6 +196,7 @@ function BotDetails({ bot }: { bot: Bot }) {
 /** Coordinator role and helpers: who can create helper bots and hand out work. */
 function TeamBlock({ bot }: { bot: Bot }) {
   const { data: bots } = useBots();
+  const { data: threads } = useThreads();
   const update = useUpdateBot();
   const remove = useDeleteBot();
   const select = useUi((state) => state.select);
@@ -258,7 +261,7 @@ function TeamBlock({ bot }: { bot: Bot }) {
               <BotAvatar avatar={helper.avatar} size={18} />
               <button
                 type="button"
-                onClick={() => select(helper.threadId)}
+                onClick={() => select(chatFor(helper, threads ?? []))}
                 className="min-w-0 flex-1 truncate text-left hover:underline"
               >
                 {helper.name}

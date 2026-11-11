@@ -2,6 +2,12 @@
 
 All notable changes to FreeBird. The format follows [Keep a Changelog](https://keepachangelog.com), and the project uses [semantic versioning](https://semver.org).
 
+## 0.0.6 - 2026-11-12
+
+### Fixed
+
+- **Clicking a helper bot opened a blank chat.** A helper's own chat with you has nothing in it, because its work comes from the coordinator, and the conversation was only in **Bot conversations** or inside the coordinator's chat, so it looked as if helpers never had a thread. Clicking a helper in the sidebar (or in the coordinator's **Details**) now opens its thread with the coordinator: the task it was given and its answer.
+
 ## 0.0.5 - 2026-11-11
 
 ### Security

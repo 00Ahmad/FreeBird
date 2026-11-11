@@ -11,13 +11,15 @@ import { useUnread } from "../unread";
 
 interface BotRowProps {
   bot: Bot;
+  /** The chat a click opens: the bot's own, or for a helper its conversation with the bot that made it. */
+  chatId: string;
   selected: boolean;
   /** Avatar only (compact sidebar, Ctrl+B). */
   compact?: boolean;
   onContextMenu(event: MouseEvent, bot: Bot): void;
 }
 
-export function BotRow({ bot, selected, compact, onContextMenu }: BotRowProps) {
+export function BotRow({ bot, chatId, selected, compact, onContextMenu }: BotRowProps) {
   const select = useUi((state) => state.select);
   const startRename = useUi((state) => state.startRename);
   const busy = useUi((state) => Boolean(state.activity[bot.threadId]));
@@ -30,7 +32,7 @@ export function BotRow({ bot, selected, compact, onContextMenu }: BotRowProps) {
     return (
       <button
         type="button"
-        onClick={() => select(bot.threadId)}
+        onClick={() => select(chatId)}
         onContextMenu={(event) => onContextMenu(event, bot)}
         aria-current={selected ? "page" : undefined}
         aria-label={unread > 0 ? `${bot.name}, ${unread} unread` : bot.name}
@@ -57,7 +59,7 @@ export function BotRow({ bot, selected, compact, onContextMenu }: BotRowProps) {
   return (
     <button
       type="button"
-      onClick={() => select(bot.threadId)}
+      onClick={() => select(chatId)}
       onDoubleClick={() => startRename(bot.id)}
       onContextMenu={(event) => onContextMenu(event, bot)}
       aria-current={selected ? "page" : undefined}

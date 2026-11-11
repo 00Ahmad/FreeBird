@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const APP_NAME = "FreeBird";
-export const APP_VERSION = "0.0.5";
+export const APP_VERSION = "0.0.6";
 
 export const HealthResponse = z.object({
   ok: z.literal(true),

@@ -1,6 +1,6 @@
 {
   "name": "freebird",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "A team of AI bots you chat with like coworkers, on local models (Ollama, LM Studio, llama.cpp…) or any API provider.",
   "license": "MIT",
   "repository": {

@@ -42,7 +42,7 @@ import { useDeleteGroup, useDuplicateBot, useUpdateGroup } from "../hooks/team";
 import { messagesKey, useThreads } from "../hooks/threads";
 import { useNewBot, useNewVisualBot } from "../hooks/useNewBot";
 import { api } from "../lib/api";
-import { splitGroups } from "../lib/groups";
+import { chatFor, splitGroups } from "../lib/groups";
 import { isMac } from "../lib/harness";
 import { importTemplate } from "../lib/templates";
 import { titleWithUnread, totalUnread } from "../lib/unread";
@@ -302,7 +302,8 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
       key={bot.id}
       bot={bot}
       compact={compactSidebar}
-      selected={bot.threadId === selectedThreadId}
+      chatId={chatFor(bot, groups)}
+      selected={bot.threadId === selectedThreadId || chatFor(bot, groups) === selectedThreadId}
       onContextMenu={(event) => open(event, botEntries(bot))}
     />
   );

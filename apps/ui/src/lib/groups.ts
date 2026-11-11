@@ -13,6 +13,20 @@ export function splitGroups(groups: Thread[]) {
 }
 
 /**
+ * The chat to open for a bot. A helper's own chat with you stays empty, because its work comes from the bot that made
+ * it, so a helper opens the conversation between the two. Any other bot (and a helper that has no such conversation
+ * yet) opens its own chat.
+ */
+export function chatFor(bot: Pick<Bot, "id" | "threadId" | "parentId">, threads: readonly Thread[]): string {
+  const maker = bot.parentId;
+  if (!maker) return bot.threadId;
+  const talk = threads.find(
+    (thread) => thread.pair && thread.memberIds.includes(bot.id) && thread.memberIds.includes(maker),
+  );
+  return talk?.id ?? bot.threadId;
+}
+
+/**
  * Whether a chat has no model to answer with: none shared by all bots, and none of its members has their own. A group
  * is usable when any member can answer, as a direct chat is when its one bot can.
  */

@@ -70,7 +70,7 @@ Your Primary Bot, and any bot you mark as a coordinator, can build a team on the
 - **Stop** on the coordinator stops all its helpers.
 - Helpers can't make helpers of their own: one level only, so there are no chains or loops.
 - For a step that builds on earlier answers (checking, auditing, a report), the coordinator passes earlier helpers' results along with `include_results_from`.
-- **Every helper has its own thread with the coordinator** ("Boss ↔ Helper", under **Bot conversations** in the sidebar). It exists from the moment the helper is created, empty until the coordinator gives it work, and every later task for that helper goes on in the same thread. A helper that was created but never given work shows up there as an empty thread.
+- **Every helper has its own thread with the coordinator** ("Boss ↔ Helper", under **Bot conversations** in the sidebar). It exists from the moment the helper is created, empty until the coordinator gives it work, and every later task for that helper goes on in the same thread. A helper that was created but never given work shows up there as an empty thread. Clicking a helper (in the sidebar, under **Hidden Bots** once the coordinator's turn is over, or in the coordinator's **Details**) opens that thread, not an empty chat of the helper's own.
 - Temporary helpers hide when the coordinator's turn ends and are deleted when dismissed or with their coordinator.
 
 ## Races and Clusters
