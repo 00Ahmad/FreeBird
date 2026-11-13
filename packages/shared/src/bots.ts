@@ -3,7 +3,7 @@ import { z } from "zod";
 import { BotId, ThreadId } from "./ids";
 import { ModelRef } from "./models";
 
-/** Our own avatar shapes: deliberately not Grok Bot's set. */
+/** The avatar shapes a bot can have. */
 export const AVATAR_SHAPES = [
   "circle",
   "squircle",
@@ -155,6 +155,8 @@ export const Bot = z.object({
   temporary: z.boolean(),
   /** A Visual Bot: uses the web only by looking at screenshots and clicking what it sees. */
   visual: z.boolean(),
+  /** A Coding Bot: a team of planner, developer and QA roles that builds a project in an output folder. */
+  coding: z.boolean().default(false),
   /** The cluster (group discussion) this bot was made for; it lives only there. */
   clusterId: ThreadId.nullable().default(null),
   /** Which tools it may use (all by default). Fewer tools means a shorter prompt, which small models need. */

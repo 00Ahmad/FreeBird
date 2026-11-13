@@ -5,7 +5,7 @@ import { BotId, CreateBotInput, UpdateBotInput, type Bot } from "@mrog/shared";
 import { fail, parse } from "../http";
 import type { Services } from "../services";
 
-export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation, agent }: Services) {
+export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation, agent, coding }: Services) {
   /** Making a bot primary demotes the old one; tell the UI about both. */
   const publishDemotedPrimary = (previous: Bot | undefined, current: Bot) => {
     if (!previous || previous.id === current.id || !current.isPrimary) return;
@@ -55,6 +55,9 @@ export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation
     if (!id) return reply;
     const bot = store.bots.get(id);
     if (!bot) return fail(reply, 404, "not_found", "No bot has this id.");
+    // A Coding Bot's team goes with the Coding Bot, never alone.
+    if (!bot.coding && coding.isTeamBot(bot))
+      return fail(reply, 409, "team_member", "Delete the Coding Bot instead: this bot is part of its team.");
     // Its temporary helpers go with it.
     for (const helper of store.bots.list())
       if (helper.parentId === id && helper.temporary) delegation.removeBot(helper);

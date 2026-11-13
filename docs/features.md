@@ -82,6 +82,10 @@ Two multi-bot modes that FreeBird adds:
 
 They have their own page: [Races & Clusters](races-and-clusters.md).
 
+## Coding Bot
+
+**+ → New Coding Bot** makes a bot that is really a team of three roles (Planner, Developer, QA), each on its own model, building a project in an output folder you choose. The Planner draws the files and connections, you approve the plan, the Developer writes it card by card, and QA checks every file and connection until it all passes or the round limit is reached. A panel beside the chat shows the **Diagram**, the **Board** and a **Checklist**, and you can export the plan or import one. See the [Coding Bot guide](coding-bot.md).
+
 ## Parallel Bots
 
 One question, three answers, **one request**. In a chat with one bot, switch on **Parallel Bots** with the columns button next to the message box, then ask as usual. FreeBird adds a short instruction to your message and sends it to the model once. The model picks three roles that fit _that_ question (say a cost analyst, a security engineer and a skeptic) and answers as each of them in a single reply, which FreeBird shows as three cards that fill in as the reply is written.

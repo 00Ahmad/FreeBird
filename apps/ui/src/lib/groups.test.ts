@@ -55,6 +55,25 @@ describe("the chat a bot opens", () => {
     expect(chatFor(scout, [talk("other", "chief", "archer")])).toBe("scout-dm");
   });
 
+  it("opens the conversation with the Coding Bot for each of its three role bots", () => {
+    const coder = { id: "coder", threadId: "coder-dm", parentId: null };
+    const roles = ["planner", "developer", "qa"].map((role) => ({
+      id: role,
+      threadId: `${role}-dm`,
+      parentId: "coder",
+    }));
+    const talks = roles.map((role) => talk(`coder-${role.id}`, "coder", role.id));
+    expect(chatFor(coder, talks)).toBe("coder-dm");
+    expect(roles.map((role) => chatFor(role, talks))).toEqual([
+      "coder-planner",
+      "coder-developer",
+      "coder-qa",
+    ]);
+    // Their threads are bot conversations, not group chats.
+    expect(splitGroups(talks).botTalks).toHaveLength(3);
+    expect(splitGroups(talks).groupChats).toHaveLength(0);
+  });
+
   it("ignores a group chat the two happen to share", () => {
     const group = thread("team", { memberIds: ["chief", "scout", "archer"] } as Partial<Thread>);
     expect(chatFor(scout, [group])).toBe("scout-dm");

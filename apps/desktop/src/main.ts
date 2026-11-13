@@ -106,6 +106,16 @@ async function start() {
     event.returnValue = isAppUrl(event.senderFrame?.url ?? "") ? harness : null;
   });
 
+  // The Coding Bot's output folder: the system dialog, for our own UI only.
+  ipcMain.handle("mrog:pick-folder", async (event) => {
+    if (!isAppUrl(event.senderFrame?.url ?? "") || !mainWindow) return null;
+    const chosen = await dialog.showOpenDialog(mainWindow, {
+      title: "Choose the output folder",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    return chosen.canceled ? null : (chosen.filePaths[0] ?? null);
+  });
+
   createWindow();
 }
 

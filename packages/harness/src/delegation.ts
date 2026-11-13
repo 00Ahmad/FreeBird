@@ -77,12 +77,19 @@ export function installDelegation(services: Services) {
     return created;
   };
 
-  /** Teammates a bot can hand work to: visible bots, plus its own helpers even when hidden; never a cluster's experts. */
+  /**
+   * Teammates a bot can hand work to: visible bots, plus its own helpers even when hidden; never a cluster's experts,
+   * and never a Coding Bot (it runs no model turn: it is spoken to in its own chat).
+   */
   const teammatesOf = (bot: Bot) =>
     store.bots
       .list()
       .filter(
-        (other) => other.id !== bot.id && !other.clusterId && (!other.hidden || other.parentId === bot.id),
+        (other) =>
+          other.id !== bot.id &&
+          !other.clusterId &&
+          !other.coding &&
+          (!other.hidden || other.parentId === bot.id),
       );
 
   /** A name without case, spacing or punctuation, so "research_bot" is the bot called "Research Bot". */

@@ -7,6 +7,7 @@ import {
   BellOff,
   ChevronDown,
   ChevronRight,
+  CodeXml,
   Copy,
   Eraser,
   Eye,
@@ -290,6 +291,7 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
   const plusEntries: MenuEntry[] = [
     { label: "Create a Bot", icon: <UserPlus size={14} />, onSelect: () => void newBot() },
     { label: "New Visual Bot", icon: <ScanEye size={14} />, onSelect: () => void newVisualBot() },
+    { label: "New Coding Bot", icon: <CodeXml size={14} />, onSelect: () => setOverlay("newCodingBot") },
     { label: "New group chat", icon: <Users size={14} />, onSelect: () => setOverlay("newGroup") },
     { label: "New cluster", icon: <Network size={14} />, onSelect: () => setOverlay("newCluster") },
     { label: "New race", icon: <Flag size={14} />, onSelect: () => setOverlay("newRace") },

@@ -260,3 +260,36 @@ textarea,
     animation: none;
   }
 }
+
+/* The Coding panel: a moving ring on the node being worked on, and a flash on a card that just moved. */
+@keyframes coding-dash {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+.coding-ring {
+  stroke-dasharray: 8 6;
+  animation: coding-dash 1.2s linear infinite;
+}
+@keyframes coding-flash {
+  from {
+    box-shadow:
+      0 0 0 3px var(--flash),
+      0 0 16px var(--flash);
+  }
+  to {
+    box-shadow:
+      0 0 0 0 transparent,
+      0 0 0 transparent;
+  }
+}
+.coding-flash {
+  animation: coding-flash 1.8s ease-out 1;
+}
+/* With reduced motion there is no animation: the labels and badges still say what changed. */
+@media (prefers-reduced-motion: reduce) {
+  .coding-ring,
+  .coding-flash {
+    animation: none;
+  }
+}

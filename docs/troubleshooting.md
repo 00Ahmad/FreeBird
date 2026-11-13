@@ -73,7 +73,7 @@ Use **Node.js 24 or newer** and **pnpm 10** (`node --version`, `pnpm --version`)
 
 **Does it work offline?** Yes, with a local model: chats, files, memory and routines all work without internet. Web search and browsing need a connection, of course.
 
-**Is it affiliated with xAI or Grok Bot?** No. FreeBird is an independent open-source project modelled on how Grok Bot works, with its own code, name and design.
+**Is it affiliated with an AI company?** No. FreeBird is an independent open-source project with its own code, name and design.
 
 **Can I use xAI's Grok models?** Yes: add the **xAI** provider with your API key.
 

@@ -4,9 +4,9 @@
 
 # FreeBird
 
-**A team of AI bots you chat with like coworkers, running on your own computer.**
+**A local-first workspace for teams of AI bots.**
 
-Local models through Ollama (or any local runtime) · any API provider with your own key · no account, no subscription
+Run bots on Ollama or any local runtime, or connect any API provider with your own key · no account, no subscription
 
 [![CI](https://github.com/00Ahmad/FreeBird/actions/workflows/ci.yml/badge.svg)](https://github.com/00Ahmad/FreeBird/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -19,30 +19,23 @@ Local models through Ollama (or any local runtime) · any API provider with your
 
 ---
 
-FreeBird is a free, open-source desktop app in the style of xAI's **Grok Bot**: a messaging app where every contact is an AI bot with its own tools, files, browser, computer, memory and routines. Bots work in parallel, hand work to each other, and ask before they do anything risky.
+FreeBird is a free, open-source desktop application for working with a team of AI bots. Every bot is a contact with its own tools, files, browser, computer, memory and routines. Bots work in parallel, hand work to one another, and ask for your approval before doing anything risky.
 
-The difference: **FreeBird runs on your machine.** Point it at [Ollama](https://ollama.com) and every bot shares one local model, with nothing leaving your computer. Or give any bot a cloud model from OpenAI, Anthropic, Google, Groq, xAI, Mistral, DeepSeek, OpenRouter and more, using your own API key.
+FreeBird runs on your machine. Connect it to [Ollama](https://ollama.com) and every bot can share one local model, with nothing leaving your computer. Or give any bot a model from OpenAI, Anthropic, Google, Groq, xAI, Mistral, DeepSeek, OpenRouter and more, using your own API key.
 
-On top of that, FreeBird adds things Grok Bot doesn't have, like **Races** (several bots compete on the same task and a judge builds the best answer) and **Clusters** (a moderated, source-checked debate between bots).
+Beyond chat, FreeBird has several ways to put bots to work on one problem: **Races** (bots compete on the same task and a judge compiles the best answer), **Clusters** (a moderated, source-checked debate), **Parallel Bots** (one question, three answers, one request) and a **Coding Bot** (a planner, a developer and QA that build a project in a folder you choose).
 
 > ⭐ **If FreeBird is useful to you, please star the repo.** It helps other people find it. Forks, issues and pull requests are very welcome: see [Contributing](CONTRIBUTING.md).
 
 ## Why FreeBird
 
-|                                                                             | FreeBird | Grok Bot |
-| --------------------------------------------------------------------------- | :------: | :------: |
-| Bots as contacts, group chats, bots handing work to each other              |    ✅    |    ✅    |
-| Approval cards before risky actions, a vault for logins                     |    ✅    |    ✅    |
-| Routines (schedules, webhooks), connected apps, a computer per bot          |    ✅    |    ✅    |
-| **Runs on local models** (Ollama, LM Studio, vLLM, llama.cpp, Jan, LocalAI) |    ✅    |    ❌    |
-| **Any API provider** with your own key, a different model per bot           |    ✅    |    ❌    |
-| **No account or subscription**; works offline with a local model            |    ✅    |    ❌    |
-| **Races**: bots compete, a judge scores them and compiles the best result   |    ✅    |    ❌    |
-| **Clusters**: a moderated debate where every claim needs a source           |    ✅    |    ❌    |
-| **Memory you can read, edit and import**                                    |    ✅    |    ❌    |
-| Open source (MIT)                                                           |    ✅    |    ❌    |
-
-<sub>Grok Bot column based on xAI's public documentation at the time of writing. FreeBird is an independent project, not affiliated with or endorsed by xAI.</sub>
+- **Local-first.** Runs on Ollama, LM Studio, vLLM, llama.cpp, Jan and LocalAI, so nothing has to leave your machine.
+- **Any provider, any model per bot.** Use your own API keys, and give each bot its own model.
+- **No account and no subscription.** It works offline with a local model.
+- **A team, not a single chat.** Group chats, bots that delegate to each other, approval cards before risky actions, a vault for logins, routines, connected apps and a computer per bot.
+- **Multi-bot workflows.** Races, Clusters, Parallel Bots and the Coding Bot.
+- **Memory you control.** Read, edit and import what every bot remembers.
+- **Open source** under the MIT license.
 
 ## What you can do with it
 
@@ -53,6 +46,10 @@ Give one task to 3–5 bots. Each picks its own strategy and works alone, on the
 ### 🕸️ Clusters: a debate that checks its sources
 
 Describe a topic and a goal (**explore ideas**, **reach a decision** or **research a question**). FreeBird proposes a team of 3–5 bots with different roles, or you pick them. A moderator chooses who speaks next; every claim must be backed by a page the bot actually opened, or by reasoning someone could check, and links the bots never opened are flagged. You can pause, step, steer or stop at any time, and you get a structured summary at the end. [Read more](docs/races-and-clusters.md#clusters)
+
+### 🧑‍💻 Coding Bot: a planner, a developer and QA
+
+Create a **Coding Bot**, choose an output folder and a model for each role, and describe what you want. The **Planner** draws the files and how they connect, you approve the plan, the **Developer** writes it one card at a time, and **QA** checks every file and every connection and sends anything wrong back with a comment. It repeats until everything passes or the round limit (5 by default) is reached. You watch it on a diagram, a progress board and a checklist, and you can export the plan or import one written by a stronger model. [Read more](docs/coding-bot.md)
 
 ### 🧩 Parallel Bots: one question, three answers, one request
 
@@ -138,4 +135,4 @@ FreeBird is young and there's lots to do: new providers, macOS and Linux install
 
 ## License
 
-[MIT](LICENSE). FreeBird is an independent project and is not affiliated with xAI. "Grok" is a trademark of its owner and is used here only to describe the app FreeBird is modelled on.
+[MIT](LICENSE). FreeBird is an independent project and is not affiliated with any AI company. The providers it can connect to are used with your own API keys.

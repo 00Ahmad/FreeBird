@@ -221,4 +221,10 @@ export const MIGRATIONS: readonly Migration[] = [
     // A message sent in Parallel Bots mode, and the reply to one (a single reply written in three sections).
     sql: `ALTER TABLE messages ADD COLUMN parallel INTEGER NOT NULL DEFAULT 0;`,
   },
+  {
+    id: 15,
+    name: "coding-bots",
+    // A Coding Bot: a team of planner, developer and QA roles that builds a project in a folder.
+    sql: `ALTER TABLE bots ADD COLUMN coding INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];

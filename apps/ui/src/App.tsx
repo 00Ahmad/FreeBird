@@ -22,6 +22,9 @@ const SettingsDialog = lazy(() =>
 const NewClusterDialog = lazy(() =>
   import("./components/NewClusterDialog").then((module) => ({ default: module.NewClusterDialog })),
 );
+const NewCodingBotDialog = lazy(() =>
+  import("./components/NewCodingBotDialog").then((module) => ({ default: module.NewCodingBotDialog })),
+);
 const NewRaceDialog = lazy(() =>
   import("./components/NewRaceDialog").then((module) => ({ default: module.NewRaceDialog })),
 );
@@ -46,6 +49,7 @@ export function App() {
         {settingsOpen && <SettingsDialog />}
         {overlay === "newCluster" && <NewClusterDialog />}
         {overlay === "newRace" && <NewRaceDialog />}
+        {overlay === "newCodingBot" && <NewCodingBotDialog />}
       </Suspense>
       {overlay === "newGroup" && <NewGroupDialog />}
       {overlay === "palette" && <CommandPalette />}

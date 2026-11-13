@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import type { ThreadActivity } from "@mrog/shared";
 
+import type { CodingTab } from "./lib/coding";
 import { step, visit, type History } from "./lib/history";
 import type { StreamStatus } from "./lib/sse";
 
@@ -44,7 +45,15 @@ interface PullState {
 }
 
 /** Dialogs that sit over the whole app. */
-type Overlay = "newGroup" | "newCluster" | "newRace" | "palette" | "shortcuts" | { avatarFor: string } | null;
+type Overlay =
+  | "newGroup"
+  | "newCluster"
+  | "newRace"
+  | "newCodingBot"
+  | "palette"
+  | "shortcuts"
+  | { avatarFor: string }
+  | null;
 
 interface UiState {
   /** The open conversation: a bot's direct thread or a group chat. */
@@ -55,7 +64,10 @@ interface UiState {
   renamingBotId: string | null;
   settingsOpen: SettingsSection | null;
   /** Right-hand panel of the chat. */
-  panel: "details" | "computer" | "browser" | null;
+  panel: "details" | "computer" | "browser" | "coding" | null;
+  /** Whether the Coding panel is wanted in a Coding Bot's chat (it is, until the user closes it), and its tab. */
+  codingOpen: boolean;
+  codingTab: CodingTab;
   compactSidebar: boolean;
   overlay: Overlay;
   activity: Record<string, { botId: string | null; activity: ThreadActivity }>;
@@ -78,6 +90,9 @@ interface UiState {
   startRename(id: string | null): void;
   openSettings(section: SettingsSection | null): void;
   setPanel(panel: UiState["panel"]): void;
+  /** Opens the Coding panel, or closes it (and remembers that) when it is showing. */
+  toggleCoding(): void;
+  setCodingTab(tab: CodingTab): void;
   toggleCompact(): void;
   setOverlay(overlay: Overlay): void;
   setActivity(threadId: string, botId: string | null, activity: ThreadActivity): void;
@@ -103,6 +118,8 @@ export const useUi = create<UiState>((set) => ({
   renamingBotId: null,
   settingsOpen: null,
   panel: null,
+  codingOpen: true,
+  codingTab: "diagram",
   compactSidebar: readCompact(),
   overlay: null,
   activity: {},
@@ -127,6 +144,11 @@ export const useUi = create<UiState>((set) => ({
   startRename: (renamingBotId) => set({ renamingBotId }),
   openSettings: (settingsOpen) => set({ settingsOpen }),
   setPanel: (panel) => set((state) => ({ panel: state.panel === panel ? null : panel })),
+  toggleCoding: () =>
+    set((state) =>
+      state.panel === "coding" ? { panel: null, codingOpen: false } : { panel: "coding", codingOpen: true },
+    ),
+  setCodingTab: (codingTab) => set({ codingTab }),
   toggleCompact: () =>
     set((state) => {
       try {

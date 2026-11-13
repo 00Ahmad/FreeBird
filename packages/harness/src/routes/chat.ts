@@ -11,7 +11,10 @@ const ListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
-export function registerChatRoutes(app: FastifyInstance, { store, turns, bus, discussions }: Services) {
+export function registerChatRoutes(
+  app: FastifyInstance,
+  { store, turns, bus, discussions, coding }: Services,
+) {
   app.get("/api/threads", async () => ({ threads: store.threads.list() }));
 
   app.get("/api/activity", async () => ({ activity: turns.activities() }));
@@ -58,6 +61,14 @@ export function registerChatRoutes(app: FastifyInstance, { store, turns, bus, di
     const bot = store.bots.get(body.botId);
     if (!bot || !thread.memberIds.includes(bot.id))
       return fail(reply, 400, "not_a_member", "That bot isn't in this chat.");
+    // A Coding Bot's team is run by its project, which has its own Resume.
+    if (coding.isTeamBot(bot))
+      return fail(
+        reply,
+        409,
+        "not_retryable",
+        "The Coding Bot's team is run from its own chat: use Resume there.",
+      );
     const target = store.messages.get(body.messageId);
     if (!target || target.threadId !== id || target.role !== "bot" || target.botId !== bot.id)
       return fail(reply, 404, "not_found", "That isn't a reply from this bot in this chat.");

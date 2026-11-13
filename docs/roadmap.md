@@ -4,11 +4,10 @@ Built from scratch, no fork. `[ ]` = open, `[x]` = done.
 
 ## Research & decisions
 
-- [x] Research Grok Bot (xAI): features and interface
+- [x] Research how a bot messenger should look and work
 - [x] Research the Ollama API
 - [x] Decide fork vs greenfield → **greenfield**
 - [ ] Decide Electron vs Tauri for the long term, mobile, and how much must work offline
-- [ ] Get Grok Bot screenshots or a recording for visual details
 - [x] Benchmark tool-capable Ollama models with `pnpm --filter @mrog/harness eval`: qwen3.5:9b and nemotron-3-nano:4b pass 3/3 file tasks; llama3.2:1b is unreliable (recommend ≥ 4B)
 - [ ] Run the eval's shell task (`--allow-commands`) on a spare machine: it lets a model run commands unattended, so it isn't part of the regular runs
 
@@ -52,7 +51,7 @@ Built from scratch, no fork. `[ ]` = open, `[x]` = done.
 - [ ] Cloud prices in the usage page (shows tokens; local = $0)
 - [ ] Verify against real cloud keys (verified against Ollama's real OpenAI-compatible API; cloud adapters are unit-tested only)
 
-## Phase 4 — Grok Bot UI parity ✅ (mostly)
+## Phase 4 — Bot messenger interface ✅ (mostly)
 
 - [x] Sidebar: + menu, sections, group chats, Hidden Bots, compact mode (Ctrl+B), full right-click menus, Duplicate, notifications toggle
 - [x] Group chats (2–6 bots, "To:" field, @mentions, @everyone, routing by the shared model, one-after-another replies), rename/members/delete
@@ -240,6 +239,18 @@ Built from scratch, no fork. `[ ]` = open, `[x]` = done.
 ## Fixes from the code audit
 
 - [x] Fix what a November 2026 code audit found; three items are only partly done
+
+## Coding Bot
+
+- [x] A bot made of a Planner, a Developer and QA, each on its own model, building into a chosen output folder
+- [x] The plan as a diagram (files and connections of any size), a progress board (Todo, In progress, QA, Done) and a checklist
+- [x] Approval of the plan before any code is written, with an auto-approve switch; QA rounds (5 by default, up to 20) before it asks you
+- [x] QA checks files and connections and comments on the card; a file sent back sends its finished connections back to QA
+- [x] Live visual feedback: who is working, node colours and marks, progress, notifications, activity list
+- [x] Export the plan (JSON, Markdown, Mermaid, SVG, project snapshot) and import a plan from another model
+- [ ] Run end to end with real local models and tune the prompts from what small models do
+- [ ] A Coding Bot that edits an existing project (today the Developer may change existing files, but the plan starts from a brief)
+- [ ] Running the finished project's tests as part of QA by default
 
 ## Second code audit (0.0.5)
 

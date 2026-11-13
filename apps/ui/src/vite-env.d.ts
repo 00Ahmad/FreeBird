@@ -16,5 +16,7 @@ interface Window {
   mrog?: {
     harness: { url: string; token: string };
     platform: string;
+    /** The system folder dialog: the chosen path, or null when cancelled. Only the desktop shell has it. */
+    pickFolder?: () => Promise<string | null>;
   };
 }

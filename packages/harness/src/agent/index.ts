@@ -43,6 +43,8 @@ export interface Agent {
   promptSources: ((bot: Bot, thread: Thread, info: TurnInfo) => { memory?: string[]; extra?: string[] })[];
   /** Environment variables (granted secrets) for commands a bot runs. */
   envFor?(bot: Bot): Record<string, string>;
+  /** Where a bot's files live. Asked of these first; the first folder named wins (a Coding Bot's team works in its output folder). */
+  workspaceSources: ((botId: string) => string | undefined)[];
   workspaceFor(botId: string): string;
   settings(): AgentSettings;
   saveSettings(next: AgentSettings): AgentSettings;
@@ -183,7 +185,14 @@ export function installAgent(services: Services): Agent {
     toolSources: [],
     toolFilters: [],
     promptSources: [],
-    workspaceFor: (botId) => join(config.dataDir, "workspaces", botId),
+    workspaceSources: [],
+    workspaceFor: (botId) => {
+      for (const source of agent.workspaceSources) {
+        const folder = source(botId);
+        if (folder) return folder;
+      }
+      return join(config.dataDir, "workspaces", botId);
+    },
     settings: () =>
       store.settings.cached(SETTINGS_KEY, (saved) => {
         const parsed = AgentSettings.safeParse({

@@ -10,6 +10,8 @@ import { connectEvents } from "../lib/sse";
 import { useConnection, useUi } from "../state";
 import { isWatching, useUnread } from "../unread";
 import { BOTS_KEY, removeBot, upsertBot } from "./bots";
+import { setCodingProject } from "./coding";
+import { noticeCoding } from "./codingNotice";
 import { setDiscussion } from "./discussion";
 import { setRace } from "./race";
 import { MODELS_KEY, RUNTIME_KEY } from "./runtime";
@@ -23,6 +25,8 @@ function notifyIfAway(client: QueryClient, message: Message) {
     return;
   notified.add(message.id);
   const bot = client.getQueryData<Bot[]>(BOTS_KEY)?.find((candidate) => candidate.id === message.botId);
+  // A Coding Bot posts a message for every step; it tells you when it needs you instead (see noticeCoding).
+  if (bot?.coding) return;
   const watching = document.hasFocus() && useUi.getState().selectedThreadId === message.threadId;
   if (!bot?.notifications || watching || typeof Notification === "undefined") return;
   const text = messageText(message).replace(/\s+/g, " ").trim();
@@ -173,6 +177,11 @@ export function useHarnessEvents() {
             break;
           case "discussion.updated":
             setDiscussion(client, event.discussion);
+            break;
+          case "coding.updated":
+            // Before the cache is replaced, so the old status is still there to compare with.
+            noticeCoding(client, event.project);
+            setCodingProject(client, event.project);
             break;
           case "race.updated":
             setRace(client, event.race);

@@ -1,0 +1,481 @@
+import { statSync } from "node:fs";
+
+import { z } from "zod";
+
+import {
+  MAX_PLAN_FILES,
+  type CardComment,
+  type CodingCard,
+  type CodingProject,
+  type CodingRole,
+} from "@mrog/shared";
+import { defineTool, resolvePath, safe, type ToolSpec } from "@mrog/tools";
+
+import { validatePlan } from "./coding-plan";
+
+/** Tools every role may use to look around; `update_plan` is the checklist the base prompt tells every bot to keep. */
+const LOOK = ["list_files", "read_file", "search_files", "update_plan"];
+
+/**
+ * The tools each role has, and nothing else: no `spawn_bot`, `delegate`, `message_bot`, `dismiss_bot`, no web, no
+ * browser. The planner cannot write files or run commands. The Developer writes files but runs nothing: QA runs and tests
+ * the code (each command still asks the user) and changes no files itself.
+ */
+export const ROLE_TOOLS: Record<CodingRole, string[]> = {
+  planner: [...LOOK, "propose_plan"],
+  developer: [...LOOK, "write_file", "edit_file", "finish_card"],
+  qa: [...LOOK, "run_command", "review_card", "finish_check"],
+};
+
+/** The most tool calls a Developer turn gets: one card is one file, so a turn that needs more is going round in circles. */
+export const DEVELOPER_MAX_STEPS = 15;
+
+/** What a role's turn handed back, filled in by its own tools and read by the loop when the turn ends. */
+export interface TurnCapture {
+  /** The card being worked on (for the Developer's check that the file is there). */
+  card?: { id: string; kind: "file" | "connector"; path?: string };
+  plan?: Extract<ReturnType<typeof validatePlan>, { ok: true }>;
+  /** What was wrong with the last plan the tool turned down, for the retry. */
+  rejected?: string[];
+  finished?: { note: string };
+  review?: { pass: boolean; comment: string };
+  /** QA's verdict on the whole project, once every card has passed. */
+  check?: { ok: boolean; problems: { file: string; comment: string }[] };
+}
+
+const PLAN_SCHEMA = {
+  type: "object",
+  properties: {
+    nodes: {
+      type: "array",
+      description:
+        "One entry per file of the project, in the order they should be built (files other files use first).",
+      items: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path relative to the output folder, like src/main.py" },
+          purpose: { type: "string", description: "What the code in this file should do" },
+        },
+        required: ["path", "purpose"],
+      },
+    },
+    edges: {
+      type: "array",
+      description:
+        "Connections between files. One connection can link two or more files. Leave the list empty if there are none.",
+      items: {
+        type: "object",
+        properties: {
+          files: {
+            type: "array",
+            items: { type: "string" },
+            description: "The paths of the files it links (at least 2, each one of the nodes)",
+          },
+          description: { type: "string", description: "What connects them" },
+        },
+        required: ["files", "description"],
+      },
+    },
+  },
+  required: ["nodes"],
+} as const;
+
+/** `propose_plan`: the Planner hands in the files and connections. A plan that doesn't hold up is answered with why. */
+export const proposePlanTool = (capture: TurnCapture): ToolSpec =>
+  defineTool({
+    name: "propose_plan",
+    description:
+      "Send the project plan: nodes (a file each, with its path and what its code should do) and edges (connections between two or more files, with what connects them). Call it once with the whole plan.",
+    jsonSchema: PLAN_SCHEMA,
+    args: z.object({ nodes: z.any(), edges: z.any().optional() }),
+    risk: () => safe("Send the plan"),
+    run: async (args) => {
+      const result = validatePlan({ nodes: args.nodes, edges: args.edges ?? [] });
+      if (!result.ok) {
+        capture.rejected = result.errors;
+        return `The plan was not accepted:\n${result.errors.map((error) => `- ${error}`).join("\n")}\nFix these and call propose_plan again with the whole plan.`;
+      }
+      capture.plan = result;
+      return `Plan accepted: ${result.nodes.length} files, ${result.edges.length} connections. Reply with one short sentence and stop; don't write the plan out again.`;
+    },
+  });
+
+/** `finish_card`: the Developer says the card is ready for QA. A file that isn't there yet is not ready. */
+export const finishCardTool = (capture: TurnCapture): ToolSpec =>
+  defineTool({
+    name: "finish_card",
+    description:
+      "Say that your card is finished and ready for QA, with a one-sentence note on what you did. Call it when the work is done, not before.",
+    args: z.object({ note: z.string().trim().max(1000).optional() }),
+    risk: () => safe("Hand the card to QA"),
+    run: async (args, ctx) => {
+      const card = capture.card;
+      if (card?.kind === "file" && card.path) {
+        const { abs } = resolvePath(ctx.workspace, card.path);
+        const size = (() => {
+          try {
+            return statSync(abs).isFile() ? statSync(abs).size : -1;
+          } catch {
+            return -1;
+          }
+        })();
+        if (size < 0)
+          return `The file ${card.path} doesn't exist yet. Write it with write_file first, then call finish_card.`;
+        if (size === 0) return `The file ${card.path} is empty. Write its code first, then call finish_card.`;
+      }
+      capture.finished = { note: args.note ?? "" };
+      return "The card is with QA now. Reply with one short sentence and stop.";
+    },
+  });
+
+const PASS = /^(pass|passed|passes|ok|approve|approved|accept|accepted|good|true)$/i;
+const FAIL = /^(fail|failed|fails|reject|rejected|no|bad|false)$/i;
+
+/** `review_card`: QA's verdict. A fail must say what is wrong, because the Developer gets nothing else. */
+export const reviewCardTool = (capture: TurnCapture): ToolSpec =>
+  defineTool({
+    name: "review_card",
+    description:
+      "Give your verdict on the card: verdict is pass or fail. A fail needs a comment saying exactly what is wrong and how to fix it. Call it once, after you have looked at the code.",
+    jsonSchema: {
+      type: "object",
+      properties: {
+        verdict: { type: "string", enum: ["pass", "fail"] },
+        comment: { type: "string", description: "Required for a fail: what is wrong and how to fix it" },
+      },
+      required: ["verdict"],
+    },
+    // Models send the verdict under other names, and as a boolean.
+    prepare: (args) => {
+      const verdict = args.verdict ?? args.result ?? args.status ?? args.passed ?? args.pass;
+      return {
+        verdict: typeof verdict === "boolean" ? (verdict ? "pass" : "fail") : verdict,
+        comment: args.comment ?? args.reason ?? args.feedback ?? args.notes ?? args.note,
+      };
+    },
+    args: z.object({
+      verdict: z.string().refine((value) => PASS.test(value.trim()) || FAIL.test(value.trim()), {
+        message: 'must be "pass" or "fail"',
+      }),
+      comment: z.string().trim().max(4000).optional(),
+    }),
+    risk: () => safe("Review the card"),
+    run: async (args) => {
+      const pass = PASS.test(args.verdict.trim());
+      const comment = args.comment ?? "";
+      if (!pass && !comment)
+        return "A fail needs a comment: say exactly what is wrong and how to fix it. Call review_card again with verdict fail and a comment.";
+      capture.review = { pass, comment };
+      return `Verdict recorded: ${pass ? "pass" : "fail"}. Reply with one short sentence and stop.`;
+    },
+  });
+
+const BSN = "\n";
+
+/**
+ * `finish_check`: QA's verdict on the whole project once every card has passed. A problem must name a planned file and say
+ * what is wrong, because that file's card goes back to the Developer with the comment and nothing else.
+ */
+export const finishCheckTool = (capture: TurnCapture, planned: () => string[]): ToolSpec =>
+  defineTool({
+    name: "finish_check",
+    description:
+      "Give your verdict on the whole project after the final check: ok true if it would work when opened or run, or ok false with problems (each one a planned file path and a comment saying what is wrong and how to fix it). Call it once.",
+    jsonSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean", description: "True when nothing would stop the project working" },
+        problems: {
+          type: "array",
+          description: "What is wrong; required when ok is false",
+          items: {
+            type: "object",
+            properties: {
+              file: { type: "string", description: "The planned file the problem is in" },
+              comment: { type: "string", description: "What is wrong and how to fix it" },
+            },
+            required: ["file", "comment"],
+          },
+        },
+      },
+      required: ["ok"],
+    },
+    // Small models send the list as a string of JSON, or one problem alone.
+    prepare: (args) => {
+      let problems: unknown = args.problems;
+      if (typeof problems === "string") {
+        try {
+          problems = JSON.parse(problems);
+        } catch {
+          // left as is: validation says what is wrong
+        }
+      }
+      if (problems && !Array.isArray(problems) && typeof problems === "object") problems = [problems];
+      return { ok: args.ok ?? args.pass ?? args.passed, problems };
+    },
+    args: z.object({
+      ok: z.boolean(),
+      problems: z.array(z.object({ file: z.string(), comment: z.string() })).optional(),
+    }),
+    risk: () => safe("Give the final verdict"),
+    run: async (args) => {
+      const known = planned();
+      const given = args.problems ?? [];
+      if (args.ok && given.length > 0)
+        return "ok is true but you listed problems. Call finish_check again: ok false with the problems, or ok true with none.";
+      if (!args.ok && given.length === 0)
+        return "ok is false but you listed no problems. Call finish_check again with each problem (a planned file and a comment saying what is wrong).";
+      const problems: { file: string; comment: string }[] = [];
+      for (const problem of given) {
+        const file = known.find(
+          (path) => path.toLowerCase() === problem.file.trim().replaceAll("\\", "/").toLowerCase(),
+        );
+        if (!file)
+          return `"${problem.file}" is not one of the project's files. Files: ${known.join(", ")}. Call finish_check again.`;
+        if (!problem.comment.trim())
+          return `The problem in ${file} has no comment. Say exactly what is wrong and how to fix it, and call finish_check again.`;
+        problems.push({ file, comment: problem.comment.trim() });
+      }
+      capture.check = { ok: args.ok, problems };
+      return `Verdict recorded: ${args.ok ? "ok" : `${problems.length} problem${problems.length === 1 ? "" : "s"}`}. Reply with one short sentence and stop.`;
+    },
+  });
+
+// ---- what each role is told -------------------------------------------------------------------------------
+
+export const ROLE_NAMES: Record<CodingRole, string> = {
+  planner: "Planner",
+  developer: "Developer",
+  qa: "QA",
+};
+
+/** The standing rules of a role: added to its prompt on every turn. */
+export function roleRules(role: CodingRole, outputFolder: string): string {
+  const common = `You are on a small software team (Planner, Developer, QA) that builds one project in the output folder ${outputFolder}. Your working folder is that folder: use paths relative to it. Nobody is available to answer questions in this chat, so make sensible choices instead of asking. Each message you get stands on its own.`;
+  if (role === "planner")
+    return `${common} You are the Planner: you plan, you never write code or run commands. Look at the folder with list_files first (it may already hold files). Then call propose_plan with every file the project needs (a path and what its code should do, in build order) and the connections between files (what one file uses from another).`;
+  if (role === "developer")
+    return `${common} You are the Developer: you get one card at a time, a file to write or a connection between files to make work. Write only what the card is about, complete and working, once, with write_file (or edit_file to fix it), then call finish_card straight away. Other files belong to other cards. Never make helper, scratch, test, backup or temporary files or scripts. You cannot run commands: QA runs and tests the work. Never invent an API key, token, password or any other secret: if a file needs one only the user can supply, write a clearly marked placeholder such as YOUR_API_KEY_HERE and a comment saying where to get a real one.`;
+  return `${common} You are QA: you get one card at a time and review it. You run and test the code: read it with read_file, install the packages it needs and run the project or its tests with run_command (each command asks the user first), then call review_card with pass or fail. You don't change files. A clearly marked placeholder (YOUR_API_KEY_HERE) for a secret only the user can provide is correct: accept it and never ask for a real key. Fail a file that contains what looks like a real secret someone made up. A fail needs a comment saying exactly what is wrong and how to fix it, because the Developer sees nothing else.`;
+}
+
+const COMMENT_LABEL: Record<CardComment["author"], string> = {
+  planner: "Planner",
+  developer: "Developer",
+  qa: "QA",
+  user: "You",
+};
+
+const notes = (comments: CardComment[]) =>
+  comments
+    .map((comment) => `- ${COMMENT_LABEL[comment.author]} (round ${comment.round}): ${comment.text}`)
+    .join("\n");
+
+const FORMAT_EXAMPLE = [
+  "```json",
+  '{"nodes": [{"path": "src/main.py", "purpose": "what the code in it does"}, {"path": "src/util.py", "purpose": "…"}], "edges": [{"files": ["src/main.py", "src/util.py"], "description": "what connects them"}]}',
+  "```",
+].join("\n");
+
+/** The Planner's job for one turn: the brief, and for a retry or a revision what was wrong or asked for. */
+export function plannerMessage(
+  project: CodingProject,
+  extra: { problems?: string[]; revision?: string } = {},
+): string {
+  const parts = [
+    `The user's brief:\n${project.brief}`,
+    `Plan the project. List every file it needs (a path relative to ${project.outputFolder}, with forward slashes, and what the code in that file should do) in the order they should be built, files others use first. Then list the connections: each links two or more of those files and says what connects them (a function one calls from the other, a type they share, a file both read). At most ${MAX_PLAN_FILES} files. Plan only what the brief needs.`,
+    "Send it by calling propose_plan. If you can't call tools, reply with the plan as one JSON code block like this and nothing else:",
+    FORMAT_EXAMPLE,
+  ];
+  if (project.nodes.length > 0 && extra.revision) {
+    const current = {
+      nodes: project.nodes.map(({ path, purpose }) => ({ path, purpose })),
+      edges: project.edges.map((edge) => ({
+        files: edge.files.map((id) => project.nodes.find((node) => node.id === id)?.path ?? id),
+        description: edge.description,
+      })),
+    };
+    parts.push(
+      `Your current plan:\n\`\`\`json\n${JSON.stringify(current, null, 1)}\n\`\`\``,
+      `The user looked at it and asks for changes:\n${extra.revision}\nSend the whole updated plan, not only the changes.`,
+    );
+  } else if (extra.revision) parts.push(`The user asks for:\n${extra.revision}`);
+  if (extra.problems?.length)
+    parts.push(
+      `Your last plan was not accepted:\n${extra.problems.map((problem) => `- ${problem}`).join("\n")}\nSend the corrected whole plan.`,
+    );
+  return parts.join("\n\n");
+}
+
+const overview = (project: CodingProject) =>
+  `The project's files:\n${project.nodes.map((node) => `- ${node.path}: ${node.purpose}`).join("\n")}`;
+
+/** The card as the Developer and QA read it: the file or the connection, with the files it concerns. */
+export function cardSpec(project: CodingProject, card: CodingCard): string {
+  if (card.kind === "file") {
+    const node = project.nodes.find((candidate) => candidate.id === card.ref);
+    const links = project.edges
+      .filter((edge) => edge.files.includes(card.ref))
+      .map(
+        (edge) =>
+          `- ${edge.description} (links ${edge.files.map((id) => project.nodes.find((n) => n.id === id)?.path ?? id).join(", ")})`,
+      );
+    return [
+      `File: ${node?.path ?? card.title}`,
+      `What the code in it should do: ${node?.purpose ?? ""}`,
+      ...(links.length > 0 ? [`Connections this file takes part in:\n${links.join("\n")}`] : []),
+    ].join("\n");
+  }
+  const edge = project.edges.find((candidate) => candidate.id === card.ref);
+  const files = (edge?.files ?? []).flatMap((id) => project.nodes.find((node) => node.id === id) ?? []);
+  return [
+    `Connection: ${edge?.description ?? card.title}`,
+    `The files it links:\n${files.map((node) => `- ${node.path}: ${node.purpose}`).join("\n")}`,
+  ].join("\n");
+}
+
+const position = (project: CodingProject, card: CodingCard) =>
+  `card ${project.cards.indexOf(card) + 1} of ${project.cards.length}`;
+
+/**
+ * The files a card connects to, by path: for a file, the other files its connections link; for a connection, the
+ * files it links. These are the only files the Developer is told to read.
+ */
+export function linkedPaths(project: CodingProject, card: CodingCard): string[] {
+  const pathOf = (id: string) => project.nodes.find((node) => node.id === id)?.path;
+  const ids =
+    card.kind === "file"
+      ? project.edges.filter((edge) => edge.files.includes(card.ref)).flatMap((edge) => edge.files)
+      : (project.edges.find((edge) => edge.id === card.ref)?.files ?? []);
+  return [...new Set(ids.filter((id) => id !== card.ref || card.kind === "connector"))].flatMap(
+    (id) => pathOf(id) ?? [],
+  );
+}
+
+/** The Developer's job for one card. It carries everything needed: the Developer reads no earlier chat. */
+export function developerMessage(project: CodingProject, card: CodingCard, retry = false): string {
+  const history = card.comments.length > 0 ? `Earlier notes on this card:\n${notes(card.comments)}` : "";
+  const linked = linkedPaths(project, card);
+  const own = project.nodes.find((node) => node.id === card.ref)?.path ?? card.title;
+  const readList =
+    linked.length > 0
+      ? `Files this card connects to (read these if you need them, and no others): ${linked.join(", ")}.`
+      : "This card connects to no other file, so you don't need to read anything else.";
+  const rules =
+    card.kind === "file"
+      ? [
+          `Write only this file: ${own}. Write it once, in full, with write_file (if it exists and QA found problems, fix it with edit_file or write it again).`,
+          "Do not write any other file: the other files are other cards, done in other turns.",
+          "Make no helper, scratch, verification, duplicate, backup or temporary files or scripts. You can't run commands: QA runs and tests the work.",
+          readList,
+          "Call finish_card straight after writing, with a one-sentence note.",
+        ]
+      : [
+          `Make this connection work by editing only the files it links (${linked.join(", ")}): add the missing calls, imports or shared parts, and don't rewrite what already works.`,
+          "Make no helper, scratch, verification, duplicate, backup or temporary files or scripts. You can't run commands: QA runs and tests the work.",
+          "Read only those files and don't re-read the rest of the project.",
+          "Call finish_card straight after the edits, with a one-sentence note.",
+        ];
+  return [
+    `Project brief: ${project.brief}`,
+    `Output folder (your working folder): ${project.outputFolder}`,
+    overview(project),
+    `YOUR CARD (${position(project, card)}, round ${project.round + 1}):\n${cardSpec(project, card)}`,
+    history,
+    `Rules for this card:\n${rules.map((rule) => `- ${rule}`).join("\n")}`,
+    retry
+      ? "Your last try ended without calling finish_card. If the work isn't done, do it now; then call finish_card."
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** What commands run in on this computer, so QA writes ones that work. */
+export function shellNote(platform: string = process.platform): string {
+  return platform === "win32"
+    ? "Commands run in Windows PowerShell 5.1 on Windows: there is no && (join commands with ;), no grep (use Select-String), no head or cat -n. Prefer checking things for real over only reading, for example node --check file.js for a syntax check, or listing files with Get-ChildItem."
+    : "Commands run in sh on this computer. Prefer checking things for real over only reading, for example node --check file.js for a syntax check, or listing files with ls.";
+}
+
+/** What was said on the cards next to this one: a file's connections, or the files a connection links. */
+function aroundCard(project: CodingProject, card: CodingCard): string {
+  const related =
+    card.kind === "file"
+      ? connectorCards(project, card)
+      : (project.edges.find((edge) => edge.id === card.ref)?.files ?? []).flatMap(
+          (id) => project.cards.find((candidate) => candidate.ref === id && candidate.kind === "file") ?? [],
+        );
+  const lines = related.flatMap((other) =>
+    other.comments
+      .slice(-3)
+      .map(
+        (comment) =>
+          `- ${other.title}: ${COMMENT_LABEL[comment.author]} (round ${comment.round}): ${comment.text}`,
+      ),
+  );
+  return lines.length > 0 ? `What was said about the files around this card:${BSN}${lines.join(BSN)}` : "";
+}
+
+const connectorCards = (project: CodingProject, card: CodingCard) => {
+  const edges = new Set(project.edges.filter((edge) => edge.files.includes(card.ref)).map((edge) => edge.id));
+  return project.cards.filter((candidate) => candidate.kind === "connector" && edges.has(candidate.ref));
+};
+
+/** QA's job for one card, with the Developer's note and every comment on it and on the cards around it. */
+export function qaMessage(
+  project: CodingProject,
+  card: CodingCard,
+  retry = false,
+  platform: string = process.platform,
+): string {
+  const history = card.comments.length > 0 ? `Notes on this card so far:${BSN}${notes(card.comments)}` : "";
+  const what =
+    card.kind === "file"
+      ? "Check that the file exists and its code does what the purpose says: complete, no placeholders, no obvious errors. Read it with read_file. You are the one who runs the code: install what it needs and run it or its tests with run_command (each command asks the user first) when that is how to know it works."
+      : "Check that the files really connect the way the connection says: read the files and make sure what one needs from the other is there and fits (names, arguments, imports). Run the project or a test with run_command (it asks the user first) when that is how to know the connection works.";
+  return [
+    `Project brief: ${project.brief}`,
+    `Output folder (your working folder): ${project.outputFolder}`,
+    overview(project),
+    `CARD TO REVIEW (${position(project, card)}, QA round ${project.round + 1}):${BSN}${cardSpec(project, card)}`,
+    history,
+    aroundCard(project, card),
+    what,
+    shellNote(platform),
+    "A clearly marked placeholder (such as YOUR_API_KEY_HERE) for a secret only the user can provide is correct: accept it and never ask for a real key. Fail a file that holds what looks like a real secret someone made up.",
+    "Then call review_card: verdict pass if it is right, or fail with a comment saying exactly what is wrong and how to fix it.",
+    retry ? "Your last try ended without calling review_card. Call it now." : "",
+  ]
+    .filter(Boolean)
+    .join(BSN + BSN);
+}
+
+/** Heading of the project-level check, which the tests (and the model) can recognise. */
+export const FINAL_CHECK_HEADING = "FINAL CHECK OF THE WHOLE PROJECT";
+
+/** QA's one project-level job once every card has passed and the automatic checks found nothing. */
+export function finalCheckMessage(
+  project: CodingProject,
+  report: string,
+  retry = false,
+  platform: string = process.platform,
+): string {
+  const path = (id: string) => project.nodes.find((node) => node.id === id)?.path ?? id;
+  return [
+    `${FINAL_CHECK_HEADING}`,
+    `Project brief: ${project.brief}`,
+    `Output folder (your working folder): ${project.outputFolder}`,
+    overview(project),
+    `The connections:${BSN}${project.edges.map((edge) => `- ${edge.description} (${edge.files.map(path).join(", ")})`).join(BSN) || "(none)"}`,
+    `The automatic checks: ${report}`,
+    "Every card has passed on its own, but each was looked at alone. Now look at the project as a whole: read the files that matter (the entry point first) and look for anything that would stop it working when it is opened or run, especially problems that span files (a page that loads a script the wrong way, a name one file uses that another doesn't provide, a missing file, a setting nobody filled in). Run something for real where that helps.",
+    shellNote(platform),
+    "A clearly marked placeholder (such as YOUR_API_KEY_HERE) for a secret only the user can provide is correct: accept it and never ask for a real key.",
+    "Then call finish_check: ok true if the project would work, or ok false with each problem as a planned file path and a comment saying exactly what is wrong and how to fix it.",
+    retry ? "Your last try ended without calling finish_check. Call it now." : "",
+  ]
+    .filter(Boolean)
+    .join(BSN + BSN);
+}

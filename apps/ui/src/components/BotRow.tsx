@@ -1,10 +1,12 @@
-import { Pin, Star } from "lucide-react";
+import { BellRing, CodeXml, Pin, Star } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import type { Bot } from "@mrog/shared";
 import { BotAvatar, cn } from "@mrog/ui-kit";
 
 import { useUpdateBot } from "../hooks/bots";
+import { useCodingProject } from "../hooks/coding";
+import { attentionBadge } from "../lib/codingAttention";
 import { badgeText } from "../lib/unread";
 import { useUi } from "../state";
 import { useUnread } from "../unread";
@@ -24,6 +26,9 @@ export function BotRow({ bot, chatId, selected, compact, onContextMenu }: BotRow
   const startRename = useUi((state) => state.startRename);
   const busy = useUi((state) => Boolean(state.activity[bot.threadId]));
   const unread = useUnread((store) => store.state.threads[bot.threadId]?.ids.length ?? 0);
+  // A Coding Bot that is waiting for you says so on its row, whatever chat is open.
+  const { data: project } = useCodingProject(bot.id, bot.coding);
+  const attention = bot.coding ? attentionBadge(project?.status) : null;
   const renaming = useUi((state) => state.renamingBotId === bot.id) && !compact;
 
   if (renaming) return <RenameRow bot={bot} onDone={() => startRename(null)} />;
@@ -35,8 +40,8 @@ export function BotRow({ bot, chatId, selected, compact, onContextMenu }: BotRow
         onClick={() => select(chatId)}
         onContextMenu={(event) => onContextMenu(event, bot)}
         aria-current={selected ? "page" : undefined}
-        aria-label={unread > 0 ? `${bot.name}, ${unread} unread` : bot.name}
-        title={bot.name}
+        aria-label={[bot.name, attention, unread > 0 ? `${unread} unread` : null].filter(Boolean).join(", ")}
+        title={attention ? `${bot.name}: ${attention}` : bot.name}
         className={cn(
           "relative flex h-10 w-full items-center justify-center rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent",
           selected ? "bg-selected" : "hover:bg-hover",
@@ -76,6 +81,12 @@ export function BotRow({ bot, chatId, selected, compact, onContextMenu }: BotRow
       >
         {bot.name}
       </span>
+      {bot.coding && <CodeXml size={13} className="shrink-0 text-ink-3" aria-label="Coding Bot" />}
+      {attention && (
+        <span className="flex shrink-0 items-center gap-1 rounded-full bg-hover px-1.5 py-px text-[11px] font-medium text-warning">
+          <BellRing size={10} aria-hidden /> {attention}
+        </span>
+      )}
       {busy && (
         <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent" aria-label="Working" />
       )}

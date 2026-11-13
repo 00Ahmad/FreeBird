@@ -6,7 +6,7 @@ import type { Message, SendMessageInput, Thread } from "@mrog/shared";
 import { api, ApiRequestError } from "../lib/api";
 import { HeldEvents, keepStreamed, mergeDelta, mergeMessage, replayHeld, type Delta } from "../lib/messages";
 
-const THREADS_KEY = ["threads"] as const;
+export const THREADS_KEY = ["threads"] as const;
 export const messagesKey = (threadId: string) => ["messages", threadId] as const;
 const olderMessagesKey = (threadId: string) => [...messagesKey(threadId), "older"] as const;
 

@@ -1,6 +1,6 @@
 # Races & Clusters
 
-Two ways to put several bots on one problem that you won't find in Grok Bot. Both work with an Ollama-only setup, with cloud models, or with a mix where every bot runs on a different model.
+Two ways to put several bots on one problem. Both work with an Ollama-only setup, with cloud models, or with a mix where every bot runs on a different model.
 
 |                             | 🏁 Race                                                          | 🕸️ Cluster                                                             |
 | --------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------- |

@@ -60,6 +60,7 @@ You decide globally in **Settings → General → Execution on this computer** (
 - **A secret can be at most 1,280 characters** (the Windows keychain's limit, applied everywhere so it behaves the same on every system). A longer value gets a clear error; connected-app sign-ins, which can be longer, are stored in pieces.
 - **Images in chat load on request.** A picture a bot's reply points to on the web isn't fetched until you press **Load image**, because the address itself could carry your text to someone else's server.
 - Keys typed for a server that takes none (LM Studio, another computer on your network) are ignored, never stored and never sent.
+- **A Coding Bot writes only inside its output folder** without asking, and the folder can't be a drive root, your home folder, FreeBird's data folder or another bot's folder. Running commands always asks. Deleting a Coding Bot never deletes the output folder. An imported plan is checked like the Planner's own (relative paths only, no `..`), and you approve it before anything is written.
 - Bots never type passwords or card numbers themselves: sign-ins, human checks and payments are handed to you (`browser_handoff`).
 - Saved logins match their exact site by default; subdomains only when you allow it.
 

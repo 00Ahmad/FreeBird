@@ -15,4 +15,5 @@ export * from "./agent";
 export * from "./library";
 export * from "./discussion";
 export * from "./race";
+export * from "./coding";
 export * from "./parallel";

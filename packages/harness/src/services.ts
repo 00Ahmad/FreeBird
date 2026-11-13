@@ -19,6 +19,7 @@ import { installTeam } from "./team";
 import { installDelegation } from "./delegation";
 import { installDiscussions, type Discussions } from "./discussion";
 import { installRaces, type Races } from "./race";
+import { installCoding, type Coding } from "./coding";
 import { TurnManager } from "./turns";
 import { VaultService } from "./vault";
 import type { WatchdogLimits } from "./watchdog";
@@ -45,6 +46,7 @@ export interface Services {
   delegation: ReturnType<typeof installDelegation>;
   discussions: Discussions;
   races: Races;
+  coding: Coding;
   fetchImpl: typeof fetch;
   /** Cleanup hooks run on shutdown, in reverse order. */
   disposers: (() => void | Promise<void>)[];
@@ -140,6 +142,7 @@ export function createServices({
     delegation: undefined as unknown as ReturnType<typeof installDelegation>,
     discussions: undefined as unknown as Discussions,
     races: undefined as unknown as Races,
+    coding: undefined as unknown as Coding,
   } satisfies Services;
   services.scrubber = new SecretScrubber(() => services.vaultService.secretValues());
   services.scrubber.refresh();
@@ -161,6 +164,7 @@ export function createServices({
   services.delegation = installDelegation(services);
   services.discussions = installDiscussions(services);
   services.races = installRaces(services);
+  services.coding = installCoding(services);
   services.agent.toolSources.push(() => services.connectors.toolSpecs());
   // A bot's access to each connected app narrows its tools through the same gates as everything else, so the Details
   // panel and the model always agree about what it has.

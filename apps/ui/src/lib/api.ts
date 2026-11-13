@@ -2,12 +2,19 @@ import { ApiError } from "@mrog/shared";
 
 import { harnessInfo } from "./harness";
 
+const rawMessage = (raw: unknown): string | null =>
+  raw && typeof raw === "object" && typeof (raw as { message?: unknown }).message === "string"
+    ? (raw as { message: string }).message
+    : null;
+
 export class ApiRequestError extends Error {
   constructor(
     readonly status: number,
     readonly body: ApiError | null,
+    /** The answer as the server sent it, for fields ApiError doesn't know (a 409 that says needsReplace, say). */
+    readonly raw: unknown = null,
   ) {
-    super(body?.message ?? `Request failed (${status})`);
+    super(body?.message ?? rawMessage(raw) ?? `Request failed (${status})`);
   }
 }
 
@@ -29,7 +36,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   const json: unknown = text ? JSON.parse(text) : null;
   if (!res.ok) {
     const parsed = ApiError.safeParse(json);
-    throw new ApiRequestError(res.status, parsed.success ? parsed.data : null);
+    throw new ApiRequestError(res.status, parsed.success ? parsed.data : null, json);
   }
   return json as T;
 }

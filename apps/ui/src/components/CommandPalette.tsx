@@ -1,4 +1,14 @@
-import { Flag, Keyboard, MessagesSquare, Network, PanelLeft, Settings, UserPlus, Users } from "lucide-react";
+import {
+  CodeXml,
+  Flag,
+  Keyboard,
+  MessagesSquare,
+  Network,
+  PanelLeft,
+  Settings,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -77,6 +87,12 @@ export function CommandPalette() {
         label: "New cluster",
         icon: <Network size={16} />,
         run: () => setOverlay("newCluster"),
+      },
+      {
+        id: "new-coding-bot",
+        label: "New Coding Bot",
+        icon: <CodeXml size={16} />,
+        run: () => setOverlay("newCodingBot"),
       },
       {
         id: "new-race",

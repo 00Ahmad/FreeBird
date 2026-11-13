@@ -2,6 +2,38 @@
 
 All notable changes to FreeBird. The format follows [Keep a Changelog](https://keepachangelog.com), and the project uses [semantic versioning](https://semver.org).
 
+## 0.0.9 - 2026-11-13
+
+### Fixed
+
+- **A Coding Bot could finish a project that didn't work.** In a real run, a weather app was "done" although its page loaded a file that uses `import` with a plain `<script>`, and its config held an invented API key. Four gaps are closed:
+  - **Stale passes are re-checked.** After every Developer turn, any finished card that touches a changed file goes back to QA (the file's card and every connection linking it), not only when a file card is sent back.
+  - **A whole-project check runs before "done".** Automatic checks look for plain scripts loading `import`/`export` files, missing files and imports, ids no page has, JSON that doesn't parse and key-like literals, and send the right card back with a comment. If they find nothing, QA gets one last turn to look across the files.
+  - **QA remembers.** Its message includes what was said about the files around the card, and it is told which shell its commands run in (PowerShell on Windows, so no `&&`), and to check things for real.
+  - **Nobody invents secrets.** The Developer and QA use a clearly marked placeholder such as `YOUR_API_KEY_HERE`; QA accepts it and fails a made-up key.
+- **The closing message lists what you must do** ("Before you run it": add your own API key, open it through a local web server).
+
+## 0.0.8 - 2026-11-12
+
+### Changed
+
+- **The Coding Bot's Developer is much faster and more focused.** A real run on a reasoning model took about 30 minutes and 1.5 million input tokens per card, because the Developer wrote other cards' files too, made helper and check scripts and re-read the whole project. Now each Developer turn is told to write only its own card's file and read only the files the card connects to, a write to another card's file is refused, it takes at most 15 steps, thinking is off for it on Ollama models, and it can't run commands (QA runs and tests the code, each command still asks you first).
+- **A file the team already wrote in this project is not written again.** After a restart or Resume its card goes straight to QA, unless QA has already sent it back or the file is older than the project.
+
+### Added
+
+- **Time and tokens on every card**, with a live timer, a total in the panel header, and an amber **Slow** warning (with a log line and a note) when a card takes more than 10 minutes.
+
+## 0.0.7 - 2026-11-12
+
+### Added
+
+- **Coding Bot.** **+ → New Coding Bot** makes a team of three roles, each on its own model, that builds a project in an output folder you choose: the **Planner** draws the files and how they connect, you approve the plan (or switch on auto-approve), the **Developer** writes it one card at a time, and **QA** checks every file and every connection, sending anything wrong back to Todo with a comment. It repeats until everything passes or the QA round limit (5 by default, changeable up to 20) is reached, then it stops and asks you.
+- **A diagram, a board and a checklist** beside the chat: files as boxes with what their code should do, connections of any size as junctions, four board columns with QA's comments on the cards, and a checklist of every file and connection.
+- **You can see what is happening:** who is working now, coloured and ringed boxes, a progress bar, a status banner with the next step, a sidebar badge and a desktop notification when it needs you, and an activity list.
+- **Export and import the plan** (JSON, Markdown, Mermaid, SVG, project snapshot). Import a plan written by another model, with a preview and a warning for files that already exist. It still waits for your approval. **Copy planning prompt** gives you text to paste into a flagship model. See [Coding Bot](docs/coding-bot.md).
+- **Choose a folder** in the desktop app with a Browse button.
+
 ## 0.0.6 - 2026-11-12
 
 ### Fixed

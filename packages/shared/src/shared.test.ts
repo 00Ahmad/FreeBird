@@ -36,6 +36,7 @@ const bot = (over: Partial<Bot>): Bot => ({
   parentId: null,
   temporary: false,
   visual: false,
+  coding: false,
   clusterId: null,
   tools: DEFAULT_BOT_TOOLS,
   threadId: newId("thr"),

@@ -12,6 +12,16 @@ afterEach(() => {
   store = undefined;
 });
 
+describe("coding bots", () => {
+  it("remembers the flag and leaves other bots as they were", () => {
+    store = openStore(":memory:");
+    const coder = store.bots.create({ name: "Coder", coding: true });
+    const plain = store.bots.create({ name: "Plain" });
+    expect(store.bots.get(coder.id)?.coding).toBe(true);
+    expect(store.bots.get(plain.id)?.coding).toBe(false);
+  });
+});
+
 describe("migrations", () => {
   it("applies once and is a no-op the second time", () => {
     store = openStore(":memory:");

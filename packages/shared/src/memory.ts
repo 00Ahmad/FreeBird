@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { BotId } from "./ids";
 
-/** One thing a bot remembers. The user can read, edit and delete every note (unlike Grok Bot). */
+/** One thing a bot remembers. The user can read, edit and delete every note. */
 export const MemoryNote = z.object({
   id: z.string(),
   botId: BotId,

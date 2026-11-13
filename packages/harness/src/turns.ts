@@ -68,6 +68,11 @@ interface TurnOptions {
    * that would need one is refused instead of waiting for an answer that can't come, while this turn holds the model.
    */
   unattended?: boolean;
+  /**
+   * The turn answers only the newest message, not the conversation before it: a task that stands on its own (a Coding
+   * Bot's roles get one card at a time), so the chat can grow without the turn's cost growing with it.
+   */
+  standalone?: boolean;
 }
 
 /** Supplies per-turn tools and prompt additions (Phase 2+); the chat MVP runs without any. */
@@ -87,11 +92,28 @@ interface TurnExtensions {
     bot: Bot,
     thread: Thread,
     info: TurnInfo,
-  ): { maxSteps?: number; selfCheck?: boolean; think?: boolean; stepLimitNote?: boolean };
+  ): {
+    maxSteps?: number;
+    selfCheck?: boolean;
+    think?: boolean;
+    stepLimitNote?: boolean;
+    /**
+     * Tell Ollama `think: false` even when its model list doesn't say the model thinks (some do, like MiMo v2.6, and
+     * would otherwise spend most of a turn on it).
+     */
+    thinkOff?: boolean;
+  };
   /** Waits for what a local model needs first, e.g. Ollama that is still starting. */
   beforeModel?(): Promise<void>;
   /** Takes the user's secret values out of text the turn saves that didn't come through the tool host (errors). */
   scrub?(text: string): string;
+  /**
+   * A message the user sent that something other than a model turn answers (a Coding Bot's chat goes to its project
+   * service). True: no bot replies to it.
+   */
+  handles?(thread: Thread, message: Message): boolean;
+  /** Why a bot never runs a model turn (it has no model: a Coding Bot), or null. Every way of starting a turn checks. */
+  refuses?(bot: Bot): string | null;
   /** After any turn ends (e.g. to tidy up the helpers a coordinator made). */
   onTurnEnd?(thread: Thread, bot: Bot, message: Message, info: TurnInfo): void;
   /**
@@ -241,6 +263,7 @@ export class TurnManager {
       parallel: input.parallel === true,
     });
     bus.publish({ type: "message.created", message });
+    if (this.extensions.handles?.(thread, message)) return message;
 
     if (thread.kind === "group") {
       const stops = this.stops.get(thread.id) ?? 0;
@@ -316,6 +339,8 @@ export class TurnManager {
 
   /** Runs one bot's turn in a thread; resolves when it finishes, fails or is stopped. */
   start(thread: Thread, bot: Bot, priority: Priority = "user", options: TurnOptions = {}): Promise<Message> {
+    const refused = this.extensions.refuses?.(bot);
+    if (refused) return Promise.reject(new TurnCancelled(refused));
     const key = `${thread.id}:${bot.id}`;
     // One turn per bot per thread: a second one (a routine firing mid-reply, a message after Stop) waits its turn.
     const existing = this.active.get(key);
@@ -622,11 +647,12 @@ export class TurnManager {
         ? Math.min(settings.numCtx, info.contextWindow ?? settings.numCtx)
         : (info.contextWindow ?? 32_768);
 
-      const history = withoutFailedReplies(
+      const earlier = withoutFailedReplies(
         store.messages.list(thread.id, { limit: 400 }).filter((m) => m.id !== message.id),
         bot.id,
         turn.options.retryOf,
       );
+      const history = turn.options.standalone ? earlier.slice(-1) : earlier;
       const names = new Map(store.bots.list().map((b) => [b.id, b.name]));
       const extras = this.extensions.promptExtras?.(bot, thread, turn.info) ?? {};
       const system = buildSystemPrompt(bot, {
@@ -706,10 +732,14 @@ export class TurnManager {
       // What is added to the newest user message for this one request: the plan a coordinator made, or the form
       // Parallel Bots asks the reply to take.
       const added = turn.parallel ? parallelInstructions() : note;
+      const { thinkOff, ...turnOptions } = this.extensions.turnOptions?.(bot, thread, turn.info) ?? {};
       const result = await runTurn({
         provider,
         model,
-        capabilities: info.capabilities,
+        capabilities:
+          thinkOff && resolved.provider.kind === "ollama" && !info.capabilities.includes("thinking")
+            ? [...info.capabilities, "thinking"]
+            : info.capabilities,
         system,
         history: added ? withNote(compacted.messages, added) : compacted.messages,
         contextWindow,
@@ -719,7 +749,7 @@ export class TurnManager {
         signal,
         sink,
         steer: () => turn.steer.splice(0),
-        ...this.extensions.turnOptions?.(bot, thread, turn.info),
+        ...turnOptions,
       });
 
       save();

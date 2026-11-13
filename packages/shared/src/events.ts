@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { Bot } from "./bots";
+import { CodingProject } from "./coding";
 import { Discussion } from "./discussion";
 import { Race } from "./race";
 import { BotId, EventId, MessageId, ThreadId } from "./ids";
@@ -57,6 +58,8 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("discussion.updated"), discussion: Discussion }),
   /** A race started, a racer finished, the judge started, or it ended. */
   z.object({ ...base, type: z.literal("race.updated"), race: Race }),
+  /** A Coding Bot's project changed: its plan, a card on the board, its status or its round. */
+  z.object({ ...base, type: z.literal("coding.updated"), project: CodingProject }),
   /** Something changed in a collection the UI caches; refetch it. */
   z.object({
     ...base,

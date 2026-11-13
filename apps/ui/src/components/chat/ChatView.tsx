@@ -1,14 +1,16 @@
-import { Globe, MessageCircle, MessagesSquare, Monitor, PanelRight, Square } from "lucide-react";
+import { Globe, MessageCircle, MessagesSquare, Monitor, PanelRight, Square, Workflow } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Bot, Message, Thread } from "@mrog/shared";
 import { BotAvatar, Button, cn, IconButton } from "@mrog/ui-kit";
 
 import { useBots } from "../../hooks/bots";
+import { useCodingProject } from "../../hooks/coding";
 import { useDiscussion, useStopDiscussion } from "../../hooks/discussion";
 import { useRuntime } from "../../hooks/runtime";
 import { useSkills } from "../../hooks/team";
 import { useMessageHistory, useSendMessage, useStopThread } from "../../hooks/threads";
+import { composerCopy, panelOnOpen } from "../../lib/coding";
 import { noModelFor } from "../../lib/groups";
 import { isMac } from "../../lib/harness";
 import { layerOpen } from "../../lib/layers";
@@ -33,6 +35,10 @@ const DiscussionView = lazy(() =>
   import("../discussion/DiscussionView").then((module) => ({ default: module.DiscussionView })),
 );
 const RaceView = lazy(() => import("../race/RaceView").then((module) => ({ default: module.RaceView })));
+// Only a Coding Bot's chat shows this.
+const CodingPanel = lazy(() =>
+  import("../coding/CodingPanel").then((module) => ({ default: module.CodingPanel })),
+);
 
 const ACTIVITY_TEXT = {
   queued: "Waiting for the model…",
@@ -52,6 +58,7 @@ export function ChatView({ thread }: { thread: Thread }) {
   const activity = useUi((state) => state.activity[thread.id]);
   const panel = useUi((state) => state.panel);
   const setPanel = useUi((state) => state.setPanel);
+  const toggleCoding = useUi((state) => state.toggleCoding);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Where what arrived while the user was away begins, taken before the chat counts as read. The line stays until the
   // user sends something. (ChatView is made anew for each chat, so this is read once per chat opened.)
@@ -76,7 +83,11 @@ export function ChatView({ thread }: { thread: Thread }) {
   const bot: Bot | undefined = thread.kind === "direct" ? members[0] : undefined;
   const { data: skills } = useSkills(bot?.id);
   const title = bot?.name ?? groupTitle(thread, botMap);
-  const noModel = noModelFor(runtime?.settings.sharedModel, members);
+  const coding = bot?.coding === true;
+  const { data: project } = useCodingProject(bot?.id ?? "", coding);
+  // A Coding Bot has no model of its own: what you type goes to its team, whose roles have models.
+  const noModel = !coding && noModelFor(runtime?.settings.sharedModel, members);
+  const codingCopy = composerCopy(coding ? project?.status : undefined, title);
   const activeBot = activity?.botId ? botMap.get(activity.botId) : undefined;
   const assist = useComposerAssist({
     members: thread.kind === "group" ? members : [],
@@ -88,6 +99,13 @@ export function ChatView({ thread }: { thread: Thread }) {
   const detailsKey = isMac() ? "⌘⇧I" : "Ctrl+Alt+B";
   const setText = assist.setText;
   const composing = !thread.race && (view === "chat" || thread.kind !== "group");
+
+  // A Coding Bot's chat opens with its Coding panel, unless the user closed it before.
+  useEffect(() => {
+    const ui = useUi.getState();
+    const next = panelOnOpen(coding, ui.codingOpen, ui.panel);
+    if (next !== ui.panel) useUi.setState({ panel: next });
+  }, [coding]);
 
   // Looking at the chat reads it: now, and again whenever this window comes back to the front.
   useEffect(() => {
@@ -150,8 +168,18 @@ export function ChatView({ thread }: { thread: Thread }) {
               </span>
             </span>
           </button>
-          {bot && <ModelMenu bot={bot} />}
-          {bot && (
+          {bot && !coding && <ModelMenu bot={bot} />}
+          {coding && (
+            <IconButton
+              label="Coding panel"
+              onClick={toggleCoding}
+              className={panel === "coding" ? "bg-selected" : ""}
+              aria-pressed={panel === "coding"}
+            >
+              <Workflow size={16} />
+            </IconButton>
+          )}
+          {bot && !coding && (
             <IconButton
               label="Browser"
               onClick={() => setPanel("browser")}
@@ -160,7 +188,7 @@ export function ChatView({ thread }: { thread: Thread }) {
               <Globe size={16} />
             </IconButton>
           )}
-          {bot && (
+          {bot && !coding && (
             <IconButton
               label="Computer"
               onClick={() => setPanel("computer")}
@@ -279,12 +307,14 @@ export function ChatView({ thread }: { thread: Thread }) {
               </p>
             )}
 
-            <div className="mx-auto h-6 w-full max-w-3xl px-5 text-xs text-ink-3" aria-live="polite">
-              {activity && (
+            <div className="mx-auto h-6 w-full max-w-3xl truncate px-5 text-xs text-ink-3" aria-live="polite">
+              {activity ? (
                 <span>
                   {activeBot && thread.kind === "group" ? `${activeBot.name}: ` : ""}
                   {ACTIVITY_TEXT[activity.activity as keyof typeof ACTIVITY_TEXT] ?? ""}
                 </span>
+              ) : (
+                codingCopy.hint && <span>{codingCopy.hint}</span>
               )}
             </div>
 
@@ -292,11 +322,13 @@ export function ChatView({ thread }: { thread: Thread }) {
               placeholder={
                 noModel
                   ? "Pick a model in Settings to start"
-                  : discussing
-                    ? "Add to the discussion: the next speaker answers you"
-                    : parallel && thread.kind === "direct"
-                      ? `Ask ${title} once: three roles answer`
-                      : `Message ${title}`
+                  : coding
+                    ? codingCopy.placeholder
+                    : discussing
+                      ? "Add to the discussion: the next speaker answers you"
+                      : parallel && thread.kind === "direct"
+                        ? `Ask ${title} once: three roles answer`
+                        : `Message ${title}`
               }
               disabled={noModel}
               busy={Boolean(activity)}
@@ -306,7 +338,7 @@ export function ChatView({ thread }: { thread: Thread }) {
               above={assist.above}
               tools={
                 <>
-                  {thread.kind === "direct" && (
+                  {thread.kind === "direct" && !coding && (
                     <ParallelToggle on={parallel} onToggle={() => setParallel((on) => !on)} />
                   )}
                   <VoiceButton
@@ -334,6 +366,11 @@ export function ChatView({ thread }: { thread: Thread }) {
       )}
       {panel === "computer" && bot && <ComputerPanel bot={bot} />}
       {panel === "browser" && bot && <BrowserPanel bot={bot} />}
+      {panel === "coding" && bot && coding && (
+        <Suspense fallback={null}>
+          <CodingPanel bot={bot} />
+        </Suspense>
+      )}
     </div>
   );
 }
