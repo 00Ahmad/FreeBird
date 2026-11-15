@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, parse } from "node:path";
+import { join, parse, sep } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -92,6 +92,54 @@ describe("the output folder rules", () => {
     writeFileSync(file, "x");
     expect(refused(file)).toContain("Couldn't use");
     expect(refused(join(file, "inside"))).toContain("Couldn't use");
+  });
+
+  it("refuses network shares and device paths before touching the disk", () => {
+    const base = tmp("base");
+    const drive = base.slice(0, 2);
+    const rest = base.slice(3);
+    for (const input of [
+      `\\\\localhost\\${drive[0]}$\\${rest}\\app`,
+      `\\\\?\\UNC\\localhost\\${drive[0]}$\\${rest}\\app`,
+      `\\\\?\\${base}\\device-app`,
+      `\\\\.\\${base}\\device-app`,
+      "//server/share/app",
+      "\\\\server\\share",
+    ])
+      expect(refused(input), input).toContain("this computer's own drives");
+    // Not even created: the refusal comes before any folder is made.
+    expect(existsSync(join(base, "device-app"))).toBe(false);
+    expect(readdirSync(base)).toEqual([]);
+  });
+
+  it("refuses a name ending in a dot or a space, which Windows reads as another folder", () => {
+    const home = tmp("home");
+    const base = tmp("base");
+    // The home folder with a dot after it is the home folder to PowerShell, and a new folder to Node.
+    expect(refused(`${home}.`, { home })).toContain("ends in a dot or a space");
+    expect(refused(join(`${home}.`, "Projects"), { home })).toContain("ends in a dot or a space");
+    expect(refused(join(base, "app ", "inner"))).toContain("ends in a dot or a space");
+    expect(refused(join(base, "app. ", "x"))).toContain("ends in a dot or a space");
+    expect(refused(join(base, "...", "x"))).toContain("ends in a dot or a space");
+    expect(readdirSync(base)).toEqual([]);
+    // A dot inside a name, and a ".." step that resolves away, are fine.
+    expect(checkOutputFolder(join(base, "my.app"), rules())).toBe(join(base, "my.app"));
+    expect(checkOutputFolder(`${base}${sep}other${sep}..${sep}v2.0`, rules())).toBe(join(base, "v2.0"));
+  });
+
+  it("refuses the names Windows keeps for devices, in any case and with any extension", () => {
+    const base = tmp("base");
+    for (const name of ["CON", "nul", "Aux.project", "com1", "LPT9.txt", "prn "])
+      expect(refused(join(base, name, "app")), name).toMatch(/keeps for a device|ends in a dot or a space/);
+    expect(refused(join(base, "nul.txt"))).toContain("keeps for a device");
+    expect(readdirSync(base)).toEqual([]);
+    expect(checkOutputFolder(join(base, "console"), rules())).toBe(join(base, "console"));
+  });
+
+  it.runIf(process.platform === "win32")("refuses characters a Windows folder name can't have", () => {
+    const base = tmp("base");
+    for (const name of ["a:b", "what?", "a|b", 'say"hi"', "a*"])
+      expect(refused(join(base, name)), name).toContain("characters a folder name can't have");
   });
 
   it("follows a link: a folder that leads into the data folder is the data folder", () => {

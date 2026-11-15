@@ -1,7 +1,8 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { CodeXml, Loader2, MessageSquarePlus, Play, Square, X } from "lucide-react";
-import { useEffect, useMemo, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 
-import { MAX_ROUNDS_LIMIT, type Bot, type CodingProject } from "@mrog/shared";
+import { MAX_ROUNDS_LIMIT, type Bot, type CodingProject, type Message } from "@mrog/shared";
 import { Button, cn, IconButton } from "@mrog/ui-kit";
 
 import {
@@ -17,13 +18,16 @@ import {
   canResume,
   canRevise,
   canStop,
-  clampPanelWidth,
   CODING_TABS,
   DEFAULT_PANEL_WIDTH,
+  fitPanel,
+  MIN_CHAT_WIDTH,
+  MIN_PANEL_WIDTH,
   nextTab,
   parseRounds,
   resumePlan,
   roundText,
+  sidebarWidth,
   statusLabel,
   statusTone,
   TAB_LABEL,
@@ -31,7 +35,9 @@ import {
   type StatusTone,
 } from "../../lib/coding";
 import { buildChecklist } from "../../lib/codingChecklist";
+import { roleWaiting } from "../../lib/codingWork";
 import { useCardActivity } from "../../codingActivity";
+import { messagesKey, useThreads } from "../../hooks/threads";
 import { useNow } from "../../hooks/useNow";
 import { useUi } from "../../state";
 import { CodingBoard } from "./CodingBoard";
@@ -79,21 +85,38 @@ export function CodingPanel({ bot }: { bot: Bot }) {
     const card = project?.cards.find((candidate) => candidate.ref === ref);
     if (card) acknowledge(bot.id, card.id);
   };
-  const [width, setWidth] = useState(() => clampPanelWidth(readWidth(), window.innerWidth));
+  const compact = useUi((state) => state.compactSidebar);
+  const sidebar = sidebarWidth(compact);
+  // The width the user chose; what is shown is that, fitted to the window and the sidebar beside it.
+  const [chosen, setChosen] = useState(readWidth);
+  const [viewport, setViewport] = useState(() => window.innerWidth);
+  const fit = fitPanel(chosen, viewport, sidebar);
+  const width = fit.width;
+  const [dragging, setDragging] = useState(false);
   // One clock for the whole panel: it ticks only while a turn is running, and the cards read the time from it.
   const now = useNow(Boolean(project?.active?.since));
   const checklist = useMemo(() => (project ? buildChecklist(project) : null), [project]);
 
-  // The window may shrink below the width chosen earlier.
+  // The window may shrink below the width chosen earlier, or the sidebar widen (Ctrl+B).
   useEffect(() => {
-    const onResize = () => setWidth((current) => clampPanelWidth(current, window.innerWidth));
+    const onResize = () => setViewport(window.innerWidth);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // While the edge is dragged, the pointer would select the chat's text as it passes over it.
+  useEffect(() => {
+    if (!dragging) return;
+    const before = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    return () => {
+      document.body.style.userSelect = before;
+    };
+  }, [dragging]);
+
   const resizeTo = (next: number, remember: boolean) => {
-    const clamped = clampPanelWidth(next, window.innerWidth);
-    setWidth(clamped);
+    const clamped = fitPanel(next, window.innerWidth, sidebar).width;
+    setChosen(clamped);
     if (!remember) return;
     try {
       localStorage.setItem(WIDTH_KEY, String(clamped));
@@ -119,7 +142,12 @@ export function CodingPanel({ bot }: { bot: Bot }) {
 
   return (
     <aside
-      className="relative flex h-full shrink-0 flex-col border-l border-border bg-surface"
+      className={cn(
+        "flex h-full shrink-0 flex-col border-l border-border bg-surface",
+        // Too narrow a window for the panel beside the chat: it lies over the chat, opened and closed with the
+        // Coding panel button, instead of squeezing the chat away.
+        fit.overlay ? "absolute inset-y-0 right-0 z-30 shadow-pop" : "relative",
+      )}
       style={{ width }}
       aria-label="Coding"
     >
@@ -128,10 +156,19 @@ export function CodingPanel({ bot }: { bot: Bot }) {
         aria-orientation="vertical"
         aria-label="Resize the Coding panel"
         aria-valuenow={width}
+        aria-valuemin={Math.min(MIN_PANEL_WIDTH, width)}
+        aria-valuemax={Math.max(width, viewport - sidebar - (fit.overlay ? 0 : MIN_CHAT_WIDTH))}
         tabIndex={0}
-        onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          setDragging(true);
+        }}
         onPointerMove={onDrag}
-        onPointerUp={() => resizeTo(width, true)}
+        onPointerUp={() => {
+          setDragging(false);
+          resizeTo(width, true);
+        }}
+        onPointerCancel={() => setDragging(false)}
         onKeyDown={onDragKey}
         className="absolute inset-y-0 -left-1 z-30 w-2 cursor-col-resize outline-none hover:bg-selected focus-visible:bg-selected"
       />
@@ -263,6 +300,27 @@ function Header({
   const settings = useUpdateCodingSettings(bot.id);
   const { status } = project;
   const failure = stop.error ?? resume.error ?? settings.error;
+  // A role that waits for the user's approval isn't slow: the banner says what it waits for instead.
+  const activity = useUi((state) => state.activity);
+  const { data: threads } = useThreads();
+  const client = useQueryClient();
+  const teamChats = useMemo(
+    () =>
+      new Set([
+        bot.threadId,
+        ...(threads ?? [])
+          .filter((thread) => thread.pair && thread.memberIds.includes(bot.id))
+          .map((thread) => thread.id),
+      ]),
+    [threads, bot.id, bot.threadId],
+  );
+  // The Coding Bot's own chat is open beside the panel, so its messages (with the roles' approval cards) are cached.
+  const waiting = roleWaiting(
+    project,
+    activity,
+    teamChats,
+    client.getQueryData<Message[]>(messagesKey(bot.threadId)) ?? [],
+  );
 
   return (
     <div className="flex max-h-[55%] shrink-0 flex-col gap-2.5 overflow-y-auto border-b border-border px-4 py-3">
@@ -290,7 +348,7 @@ function Header({
         </IconButton>
       </div>
 
-      <StatusBanner project={project} now={now} />
+      <StatusBanner project={project} now={now} waiting={waiting} />
       <WorkingStrip project={project} now={now} />
       <Progress project={project} now={now} />
       {failure && (
@@ -453,16 +511,22 @@ function RaiseLimit({ bot, project }: { bot: Bot; project: CodingProject }) {
   const [draft, setDraft] = useState(() => String(Math.min(MAX_ROUNDS_LIMIT, project.maxRounds + 3)));
   const [problem, setProblem] = useState<string | null>(null);
   const busy = settings.isPending || resume.isPending;
+  // Set at once, before the pending flags re-render: a second Enter in the same moment must not send it again.
+  const going = useRef(false);
 
   const go = async () => {
+    if (going.current || busy) return;
     const plan = resumePlan(project, draft);
     setProblem(plan.problem);
     if (plan.problem) return;
+    going.current = true;
     try {
       if (plan.raiseTo !== null) await settings.mutateAsync({ maxRounds: plan.raiseTo });
       await resume.mutateAsync();
     } catch {
       // shown below from the mutation that failed
+    } finally {
+      going.current = false;
     }
   };
 

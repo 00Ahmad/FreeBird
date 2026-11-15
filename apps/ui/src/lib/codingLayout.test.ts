@@ -10,7 +10,11 @@ import {
   JUNCTION_R,
   layoutDiagram,
   MAX_ZOOM,
+  MIN_FIT_ZOOM,
   MIN_ZOOM,
+  occludedLinks,
+  packJunctions,
+  pathPoints,
   PER_RANK,
   stepZoom,
   wrapText,
@@ -19,6 +23,12 @@ import {
 
 const ids = (count: number) => Array.from({ length: count }, (_, i) => `n${i + 1}`);
 const nodesOf = (count: number) => ids(count).map((id) => node(id));
+
+/** The biggest plan the planner may make: 40 files, 80 connections of three files each. */
+const bigEdges = (a = 7, b = 11, count = 40) =>
+  Array.from({ length: 80 }, (_, i) =>
+    edge(`e${i}`, [`n${(i % count) + 1}`, `n${((i * a + 3) % count) + 1}`, `n${((i * b + 5) % count) + 1}`]),
+  );
 
 /** Every node box, junction circle and the picture's edges, checked against each other. */
 function expectTidy(layout: DiagramLayout) {
@@ -196,17 +206,125 @@ describe("diagram layout", () => {
   });
 
   it("lays out the biggest plan the planner may make without overlaps", () => {
-    const count = 40;
-    const edges = Array.from({ length: 80 }, (_, i) =>
-      edge(`e${i}`, [
-        `n${(i % count) + 1}`,
-        `n${((i * 7 + 3) % count) + 1}`,
-        `n${((i * 11 + 5) % count) + 1}`,
-      ]),
-    );
-    expectTidy(layoutDiagram(nodesOf(count), edges));
+    expectTidy(layoutDiagram(nodesOf(40), bigEdges()));
   });
 
+  it("draws no line of a big plan over a box (it was 123 of 240 before lines went round)", () => {
+    const layout = layoutDiagram(nodesOf(40), bigEdges());
+    expect(layout.links.length).toBe(240);
+    expect(occludedLinks(layout)).toBe(0);
+    // Other big plans too, built in other orders.
+    for (const [a, b] of [
+      [3, 5],
+      [13, 17],
+      [29, 31],
+    ] as const) {
+      const other = layoutDiagram(nodesOf(40), bigEdges(a, b));
+      expect(occludedLinks(other), `${a} ${b}`).toBe(0);
+      expectTidy(other);
+    }
+  });
+
+  it("keeps a big plan's junctions beside its files, not stacked far below them", () => {
+    const layout = layoutDiagram(nodesOf(40), bigEdges());
+    const filesTop = Math.min(...layout.files.map((f) => f.y));
+    const filesBottom = Math.max(...layout.files.map((f) => f.y + f.h));
+    for (const junction of layout.junctions) {
+      expect(junction.y, junction.label).toBeGreaterThanOrEqual(filesTop);
+      expect(junction.y, junction.label).toBeLessThanOrEqual(filesBottom);
+    }
+  });
+
+  it("never makes more than eight columns, however the files depend on each other", () => {
+    // A chain of 40: each file depends on the one before.
+    const chain = Array.from({ length: 39 }, (_, i) => edge(`c${i}`, [`n${i + 1}`, `n${i + 2}`]));
+    const layout = layoutDiagram(nodesOf(40), chain);
+    const perRank = new Map<number, number>();
+    for (const file of layout.files) perRank.set(file.rank, (perRank.get(file.rank) ?? 0) + 1);
+    expect(Math.max(...perRank.keys())).toBeLessThanOrEqual(7);
+    expect(Math.max(...perRank.values())).toBeLessThanOrEqual(PER_RANK);
+    expect(occludedLinks(layout)).toBe(0);
+    expectTidy(layout);
+    // More files than eight columns hold: the columns grow taller rather than wider.
+    const many = layoutDiagram(nodesOf(PER_RANK * 8 + 5), []);
+    expect(Math.max(...many.files.map((f) => f.rank))).toBe(7);
+    expectTidy(many);
+  });
+
+  it("joins a far file to its junction round the boxes, from the side that faces it, ending at the junction", () => {
+    // n1 links to n3 two columns on, through n2's column.
+    const layout = layoutDiagram(nodesOf(3), [
+      edge("a", ["n1", "n2"]),
+      edge("b", ["n2", "n3"]),
+      edge("far", ["n1", "n2", "n3"]),
+    ]);
+    const files = Object.fromEntries(layout.files.map((f) => [f.id, f]));
+    const junction = layout.junctions.find((j) => j.id === "far")!;
+    for (const link of layout.links.filter((l) => l.edgeId === "far")) {
+      const file = files[link.fileId]!;
+      const facing = junction.x > file.x ? file.x + file.w : file.x;
+      expect(link.d.startsWith(`M ${facing} ${file.y + FILE_H / 2} `), link.fileId).toBe(true);
+      expect(link.d.endsWith(`${junction.x} ${junction.y}`), link.fileId).toBe(true);
+    }
+    expect(occludedLinks(layout)).toBe(0);
+    expectTidy(layout);
+  });
+});
+
+describe("telling a line hidden behind a box", () => {
+  const box = (id: string, x: number, y: number) => ({
+    id,
+    x,
+    y,
+    w: 100,
+    h: 50,
+    rank: 0,
+    pathText: id,
+    purposeLines: [],
+    clipped: false,
+  });
+  const files = [box("a", 0, 0), box("b", 200, 0), box("c", 400, 0)];
+
+  it("counts a line across another box, and not one that only leaves its own", () => {
+    const across = { edgeId: "e", fileId: "a", d: "M 100 25 L 450 25" };
+    const beside = { edgeId: "e", fileId: "a", d: "M 100 25 C 140 25 160 80 180 80" };
+    const over = { edgeId: "e", fileId: "a", d: "M 100 25 L 150 25 Q 160 25 160 -10 L 260 -10" };
+    expect(occludedLinks({ files, links: [across] })).toBe(1);
+    expect(occludedLinks({ files, links: [beside, over] })).toBe(0);
+    // A curve that bends into a box counts too.
+    expect(occludedLinks({ files, links: [{ ...beside, d: "M 100 25 C 300 25 300 25 300 60" }] })).toBe(1);
+  });
+
+  it("samples a path finely enough to catch a corner", () => {
+    const points = pathPoints("M 0 0 L 100 0 Q 110 0 110 10");
+    expect(points[0]).toEqual([0, 0]);
+    expect(points.at(-1)).toEqual([110, 10]);
+    for (let i = 1; i < points.length; i++)
+      expect(Math.hypot(points[i]![0] - points[i - 1]![0], points[i]![1] - points[i - 1]![1])).toBeLessThan(
+        5,
+      );
+  });
+});
+
+describe("spreading junctions", () => {
+  it("leaves junctions that don't touch where they want to be", () => {
+    expect(packJunctions([100, 200, 300], 40, 0)).toEqual([100, 200, 300]);
+  });
+
+  it("centres a crowd on the heights it wants, instead of pushing it all below them", () => {
+    const ys = packJunctions([200, 200, 200], 40, 0);
+    expect(ys).toEqual([160, 200, 240]);
+  });
+
+  it("keeps them apart and below the floor", () => {
+    const ys = packJunctions([0, 5, 10, 300], 40, 30);
+    expect(ys[0]).toBe(30);
+    for (let i = 1; i < ys.length; i++) expect(ys[i]! - ys[i - 1]!).toBeGreaterThanOrEqual(40);
+    expect(ys[3]).toBe(300);
+  });
+});
+
+describe("file boxes and the picture's size", () => {
   it("clips what doesn't fit in a box and says so", () => {
     const layout = layoutDiagram(
       [node("a", "packages/very/deep/folder/structure/with/ComponentName.tsx", "word ".repeat(80))],
@@ -272,10 +390,17 @@ describe("zoom", () => {
   });
 
   it("fits the picture across the space, but never enlarges it", () => {
-    expect(fitZoom(1000, 500)).toBe(0.5);
+    expect(fitZoom(1000, 800)).toBe(0.8);
     expect(fitZoom(400, 800)).toBe(1);
-    expect(fitZoom(10_000, 300)).toBe(MIN_ZOOM);
     expect(fitZoom(0, 300)).toBe(1);
     expect(fitZoom(300, 0)).toBe(1);
+  });
+
+  it("never fits a big plan so small its text can't be read: it scrolls instead", () => {
+    expect(fitZoom(1000, 500)).toBe(MIN_FIT_ZOOM);
+    expect(fitZoom(10_000, 300)).toBe(MIN_FIT_ZOOM);
+    expect(MIN_FIT_ZOOM).toBeGreaterThan(MIN_ZOOM);
+    // The buttons still zoom further out.
+    expect(stepZoom(MIN_FIT_ZOOM, -1)).toBeLessThan(MIN_FIT_ZOOM);
   });
 });

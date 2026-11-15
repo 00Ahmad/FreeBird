@@ -13,6 +13,7 @@ import {
   useWarmup,
 } from "../../hooks/runtime";
 import { LocalModelList, PullModel } from "./ModelPicker";
+import { parseBounded, SEPARATE_ON_CLOUD_HINT, SEPARATE_ON_CLOUD_LABEL } from "../../lib/parallelLanes";
 import { Field, Section } from "./parts";
 
 const KEEP_ALIVE = [
@@ -144,6 +145,40 @@ export function LocalModelSettings() {
               ))}
             </select>
           </Field>
+          <Field
+            label="Parallel Bots: roles writing at once"
+            hint="Needs OLLAMA_NUM_PARALLEL set to the same number in Ollama, and a smaller context."
+          >
+            <NumberSetting
+              value={settings.parallelLanes}
+              min={1}
+              max={3}
+              label="Parallel Bots: roles writing at once"
+              onCommit={(parallelLanes) => update.mutate({ parallelLanes })}
+            />
+          </Field>
+          <Field
+            label="Parallel Bots: steps per role"
+            hint="How many searches or pages each role may use before it must answer (1 to 10)."
+          >
+            <NumberSetting
+              value={settings.parallelSteps}
+              min={1}
+              max={10}
+              label="Parallel Bots: steps per role"
+              onCommit={(parallelSteps) => update.mutate({ parallelSteps })}
+            />
+          </Field>
+          <Field label={SEPARATE_ON_CLOUD_LABEL} hint={SEPARATE_ON_CLOUD_HINT}>
+            <label className="flex h-8 items-center gap-2 text-[13px]">
+              <input
+                type="checkbox"
+                checked={settings.parallelSeparateOnCloud}
+                onChange={(event) => update.mutate({ parallelSeparateOnCloud: event.target.checked })}
+              />
+              Ask each role separately
+            </label>
+          </Field>
           <Field label="Thinking" hint="Let thinking models reason before answering (slower).">
             <label className="flex h-8 items-center gap-2 text-[13px]">
               <input
@@ -181,6 +216,47 @@ export function LocalModelSettings() {
 }
 
 /** Keyed by the saved address, so it resets when the address changes elsewhere. */
+/** A whole number in a range, saved when you leave the field or press Enter; a value out of range snaps back. */
+function NumberSetting({
+  value,
+  min,
+  max,
+  label,
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  label: string;
+  onCommit(value: number): void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const [seen, setSeen] = useState(value);
+  if (seen !== value) {
+    setSeen(value);
+    setDraft(String(value));
+  }
+  const parsed = parseBounded(draft, min, max);
+  const save = () => {
+    if (parsed === null) return setDraft(String(value));
+    if (parsed !== value) onCommit(parsed);
+  };
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      value={draft}
+      aria-label={label}
+      aria-invalid={parsed === null}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={save}
+      onKeyDown={(event) => event.key === "Enter" && event.currentTarget.blur()}
+      className="h-8 w-24 rounded-lg border border-border bg-bg px-2 text-[13px] outline-none focus:border-accent aria-[invalid=true]:border-danger"
+    />
+  );
+}
+
 function OllamaAddress({ current }: { current: string }) {
   const update = useUpdateRuntime();
   const [url, setUrl] = useState(current);

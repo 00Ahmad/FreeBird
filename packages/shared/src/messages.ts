@@ -5,13 +5,23 @@ import { BotId, MessageId, ThreadId } from "./ids";
 export const ToolStatus = z.enum(["pending_approval", "running", "done", "error", "denied"]);
 export type ToolStatus = z.infer<typeof ToolStatus>;
 
+/** Which of the three Parallel Bots roles (1 to 3) a part belongs to, when each role ran as its own conversation. */
+export const ParallelLane = z.number().int().min(1).max(3).optional();
+
 export const MessagePart = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("text"), text: z.string() }),
-  z.object({ type: z.literal("reasoning"), text: z.string() }),
+  z.object({
+    type: z.literal("text"),
+    text: z.string(),
+    lane: ParallelLane,
+    /** On a lane's heading part: that role has finished (answered, failed or was stopped). */
+    laneDone: z.boolean().optional(),
+  }),
+  z.object({ type: z.literal("reasoning"), text: z.string(), lane: ParallelLane }),
   /** Base64 image the user attached (sent to vision models). */
   z.object({ type: z.literal("image"), mediaType: z.string(), data: z.string() }),
   z.object({
     type: z.literal("tool"),
+    lane: ParallelLane,
     callId: z.string(),
     name: z.string(),
     args: z.record(z.string(), z.unknown()),
@@ -48,7 +58,7 @@ export const MessagePart = z.discriminatedUnion("type", [
     /** Set when the turn ended before it was answered: the card can no longer be answered. */
     expired: z.boolean().optional(),
   }),
-  z.object({ type: z.literal("error"), code: z.string(), message: z.string() }),
+  z.object({ type: z.literal("error"), code: z.string(), message: z.string(), lane: ParallelLane }),
   /** Secure secret card: the user types a value straight into the keychain; the bot only learns its name. */
   z.object({
     type: z.literal("secret"),
@@ -77,6 +87,8 @@ export const Message = z.object({
   moderator: z.boolean().default(false),
   /** A message sent in Parallel Bots mode, or the reply to one (written in three sections). */
   parallel: z.boolean().default(false),
+  /** A Parallel Bots reply whose three roles each ran on their own, with tools. */
+  parallelTools: z.boolean().default(false),
   parts: z.array(MessagePart),
   status: MessageStatus,
   model: z.string().nullable(),
@@ -121,6 +133,8 @@ export const SendMessageInput = z.object({
   replyToId: MessageId.optional(),
   /** Parallel Bots: one request, and one reply with three roles' answers in three sections. Chats with one bot only. */
   parallel: z.boolean().optional(),
+  /** With `parallel`: let each of the three roles search and open pages, on its own. */
+  parallelTools: z.boolean().optional(),
 });
 export type SendMessageInput = z.infer<typeof SendMessageInput>;
 

@@ -7,8 +7,10 @@ import { useImportCoding } from "../../hooks/coding";
 import { edgeLabel } from "../../lib/coding";
 import { linkedFiles } from "../../lib/codingBoard";
 import {
+  applyRequest,
   canApplyImport,
   existingWarning,
+  importFileProblem,
   importInput,
   needsReplace,
   previewCounts,
@@ -27,15 +29,19 @@ export function ImportDialog({ botId, onClose }: { botId: string; onClose(): voi
   const [fileName, setFileName] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
-  // The plan to send again when applying (as read from the text), and whether the board must be reset to apply it.
+  // The plan to send again when applying (as read from the text), and whether the dry run found that the board must
+  // be reset to apply it. That alone never resets anything: Apply then asks first (`confirming`).
   const [plan, setPlan] = useState<unknown>(null);
-  const [replace, setReplace] = useState(false);
+  const [resetNeeded, setResetNeeded] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
 
   const readFile = async (file: File | undefined) => {
     if (!file) return;
     setProblem(null);
+    // A huge file is refused by its size, before reading it all into the page.
+    const tooBig = importFileProblem(file);
+    if (tooBig) return setProblem(tooBig);
     try {
       setText(await file.text());
       setFileName(file.name);
@@ -55,27 +61,34 @@ export function ImportDialog({ botId, onClose }: { botId: string; onClose(): voi
       let result;
       try {
         result = await ask(false);
-        setReplace(false);
+        setResetNeeded(false);
       } catch (error) {
         if (!needsReplace(error)) throw error;
         // The board has moved: the preview is of what applying would do after a reset.
         result = await ask(true);
-        setReplace(true);
+        setResetNeeded(true);
       }
+      setConfirming(false);
       setPreview(result.preview);
     } catch (error) {
       setProblem((error as Error).message);
     }
   };
 
-  const apply = async (withReplace: boolean) => {
+  /** Apply; `confirmed` only from the explicit "Reset the board and apply". */
+  const apply = async (confirmed: boolean) => {
+    const request = applyRequest(resetNeeded, confirmed);
+    if (!request) return setConfirming(true);
     setProblem(null);
     try {
-      await run.mutateAsync({ plan, replace: withReplace });
+      await run.mutateAsync({ plan, replace: request.replace });
       onClose();
     } catch (error) {
-      if (needsReplace(error)) setConfirming(true);
-      else setProblem((error as Error).message);
+      // The board moved since the preview: ask before resetting it.
+      if (needsReplace(error)) {
+        setResetNeeded(true);
+        setConfirming(true);
+      } else setProblem((error as Error).message);
     }
   };
 
@@ -130,7 +143,7 @@ export function ImportDialog({ botId, onClose }: { botId: string; onClose(): voi
             <Preview preview={preview} warning={warning} />
           )}
 
-          {replace && preview && (
+          {resetNeeded && preview && (
             <p className="flex items-start gap-2 rounded-lg bg-hover px-3 py-2 text-[12.5px] text-warning">
               <TriangleAlert size={14} className="mt-px shrink-0" aria-hidden />
               The board has already moved. Applying this plan resets the board and starts again from the plan.
@@ -171,7 +184,7 @@ export function ImportDialog({ botId, onClose }: { botId: string; onClose(): voi
                 </Button>
                 <Button
                   variant="primary"
-                  onClick={() => void apply(replace)}
+                  onClick={() => void apply(false)}
                   disabled={!canApplyImport(preview) || run.isPending}
                 >
                   {run.isPending && <Loader2 size={14} className="animate-spin" />} Apply the plan

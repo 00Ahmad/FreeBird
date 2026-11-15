@@ -18,6 +18,11 @@ export interface ProviderPreset {
   streamUsage?: boolean;
   fallbackModels?: string[];
   keyUrl?: string;
+  /**
+   * Environment variables the provider's own docs tell people to keep their key in, most preferred first. A key
+   * already set in one can be added without pasting it.
+   */
+  envVars?: string[];
 }
 
 const cloud = (
@@ -50,38 +55,55 @@ const localServer = (preset: string, label: string, baseUrl: string): ProviderPr
 });
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
-  cloud("openai", "OpenAI", "https://api.openai.com/v1", { keyUrl: "https://platform.openai.com/api-keys" }),
+  cloud("openai", "OpenAI", "https://api.openai.com/v1", {
+    keyUrl: "https://platform.openai.com/api-keys",
+    envVars: ["OPENAI_API_KEY"],
+  }),
   {
     ...cloud("anthropic", "Anthropic", "https://api.anthropic.com", {
       keyUrl: "https://console.anthropic.com/settings/keys",
+      envVars: ["ANTHROPIC_API_KEY"],
     }),
     kind: "anthropic",
   },
   cloud("google", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", {
     keyUrl: "https://aistudio.google.com/apikey",
+    envVars: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
     streamUsage: false,
   }),
-  cloud("groq", "Groq", "https://api.groq.com/openai/v1", { keyUrl: "https://console.groq.com/keys" }),
-  cloud("xai", "xAI", "https://api.x.ai/v1", { keyUrl: "https://console.x.ai" }),
+  cloud("groq", "Groq", "https://api.groq.com/openai/v1", {
+    keyUrl: "https://console.groq.com/keys",
+    envVars: ["GROQ_API_KEY"],
+  }),
+  cloud("xai", "xAI", "https://api.x.ai/v1", { keyUrl: "https://console.x.ai", envVars: ["XAI_API_KEY"] }),
   cloud("mistral", "Mistral", "https://api.mistral.ai/v1", {
     keyUrl: "https://console.mistral.ai/api-keys",
+    envVars: ["MISTRAL_API_KEY"],
     streamUsage: false,
   }),
   cloud("deepseek", "DeepSeek", "https://api.deepseek.com/v1", {
     keyUrl: "https://platform.deepseek.com/api_keys",
+    envVars: ["DEEPSEEK_API_KEY"],
     fallbackModels: ["deepseek-chat", "deepseek-reasoner"],
   }),
   cloud("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", {
     keyUrl: "https://openrouter.ai/keys",
+    envVars: ["OPENROUTER_API_KEY"],
     headers: { "x-title": "FreeBird" },
   }),
   cloud("together", "Together AI", "https://api.together.xyz/v1", {
     keyUrl: "https://api.together.ai/settings/api-keys",
+    envVars: ["TOGETHER_API_KEY"],
   }),
   cloud("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", {
     keyUrl: "https://fireworks.ai/account/api-keys",
+    envVars: ["FIREWORKS_API_KEY"],
   }),
-  cloud("cerebras", "Cerebras", "https://api.cerebras.ai/v1", { keyUrl: "https://cloud.cerebras.ai" }),
+  cloud("cerebras", "Cerebras", "https://api.cerebras.ai/v1", {
+    keyUrl: "https://cloud.cerebras.ai",
+    envVars: ["CEREBRAS_API_KEY"],
+  }),
+  // No variable for Azure: its key is useless without the resource's own address, which only the user knows.
   cloud("azure", "Azure OpenAI", "", {
     needsBaseUrl: true,
     baseUrlHint: "https://<resource>.openai.azure.com/openai/v1",
@@ -89,6 +111,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   }),
   cloud("ollama-cloud", "Ollama Cloud", "https://ollama.com/v1", {
     keyUrl: "https://ollama.com/settings/keys",
+    envVars: ["OLLAMA_API_KEY"],
   }),
   localServer("lmstudio", "LM Studio", "http://127.0.0.1:1234/v1"),
   localServer("vllm", "vLLM", "http://127.0.0.1:8000/v1"),
@@ -149,6 +172,17 @@ export const ProviderView = ProviderConfig.extend({
   kind: z.enum(["openai", "anthropic", "ollama"]),
 });
 export type ProviderView = z.infer<typeof ProviderView>;
+
+/**
+ * A provider's key found in an environment variable on this computer, ready to add. Only the variable's name: its
+ * value stays in the harness.
+ */
+export const FoundKey = z.object({
+  preset: z.string(),
+  label: z.string(),
+  envVar: z.string(),
+});
+export type FoundKey = z.infer<typeof FoundKey>;
 
 export const AddProviderInput = z.object({
   preset: z.string(),

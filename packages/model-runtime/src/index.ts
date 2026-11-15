@@ -25,6 +25,107 @@ interface Waiter {
 }
 
 /**
+ * Several requests of ONE turn that share a single slot on the model (a Parallel Bots turn whose three roles each
+ * search and write on their own). The turn counts as one bot at once: the slot is taken when the first request starts
+ * and given back when the last one ends, so while every role waits for a search the model is free for others. At most
+ * `lanes` requests are in flight together.
+ *
+ * Why the slots exist at all: one local model serves every bot, and a second bot's request must not make Ollama swap
+ * the model out (or fight over its memory). Requests to the SAME model are safe to overlap: Ollama runs them side by
+ * side up to its own OLLAMA_NUM_PARALLEL and queues the rest, which only makes them wait. Nothing else gets the model
+ * meanwhile, because the group holds its slot, so no other model is ever loaded in the middle of it.
+ */
+export class RequestGroup {
+  private inflight = 0;
+  private free: number;
+  private readonly waiting: { grant(): void; reject(error: unknown): void }[] = [];
+  private held: Promise<() => void> | null = null;
+  /** The slot's releaser once it was granted, so the last request can hand it back at once. */
+  private heldRelease: (() => void) | null = null;
+
+  /**
+   * @param takeSlot  takes the turn's slot on the model (null for a model that has none, like a cloud one)
+   * @param lanes     the most requests in flight together
+   */
+  constructor(
+    private readonly takeSlot: (() => Promise<() => void>) | null,
+    readonly lanes: number,
+  ) {
+    this.free = Math.max(1, lanes);
+  }
+
+  /** Requests in flight right now. */
+  get active(): number {
+    return this.inflight;
+  }
+
+  /** Waits for a place among the lanes and for the group's slot. The returned function ends the request. */
+  async acquire(signal?: AbortSignal): Promise<() => void> {
+    await this.takePlace(signal);
+    this.inflight += 1;
+    // Requests that start together share one attempt at the slot.
+    if (this.inflight === 1 && this.takeSlot)
+      this.held = this.takeSlot().then((release) => ((this.heldRelease = release), release));
+    const slot = this.held;
+    try {
+      if (slot) await slot;
+    } catch (error) {
+      this.leave();
+      throw error;
+    }
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      this.leave();
+    };
+  }
+
+  private takePlace(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new ProviderError("aborted", "Stopped."));
+    if (this.free > 0) {
+      this.free -= 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        grant: () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        reject,
+      };
+      const onAbort = () => {
+        const at = this.waiting.indexOf(waiter);
+        if (at !== -1) this.waiting.splice(at, 1);
+        reject(new ProviderError("aborted", "Stopped."));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.waiting.push(waiter);
+    });
+  }
+
+  private leave() {
+    this.inflight -= 1;
+    const next = this.waiting.shift();
+    if (next) next.grant();
+    else this.free += 1;
+    if (this.inflight === 0 && this.held) {
+      const slot = this.held;
+      const release = this.heldRelease;
+      this.held = null;
+      this.heldRelease = null;
+      if (release) release();
+      else
+        void slot.then(
+          (late) => late(),
+          () => {},
+        );
+    }
+  }
+}
+
+/**
  * One local model serves every bot. This keeps it loaded (same options on every request, keep_alive, warm-up)
  * and lets at most `parallel` turns use it at once, queueing the rest by priority.
  */
@@ -114,6 +215,22 @@ export class ModelRuntime {
       onQueued?.();
       this.onChange();
     });
+  }
+
+  /**
+   * A group of requests that make one turn's single slot (see RequestGroup). `local` false is a model with no slot
+   * (a cloud one): the group then only limits how many requests are in flight together.
+   */
+  group(
+    priority: Priority,
+    options: { lanes: number; local: boolean; signal?: AbortSignal; onQueued?: () => void },
+  ): RequestGroup {
+    return new RequestGroup(
+      options.local
+        ? () => this.acquire(priority, { signal: options.signal, onQueued: options.onQueued })
+        : null,
+      options.lanes,
+    );
   }
 
   async run<T>(

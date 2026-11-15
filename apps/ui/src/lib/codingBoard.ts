@@ -47,9 +47,49 @@ export function sortComments(comments: readonly CardComment[]): CardComment[] {
     .map(({ comment }) => comment);
 }
 
-/** A card sent back to Todo by QA: it has a QA comment to act on. */
+type CommentKind = NonNullable<CardComment["kind"]>;
+
+/** The automatic note on a card that went back to QA, as the server words it (older comments carry no kind). */
+const REQUEUE_TEXT = /^Back in QA\b/;
+
+const isRequeue = (comment: CardComment) =>
+  comment.kind === "requeue" || (comment.kind === undefined && REQUEUE_TEXT.test(comment.text));
+
+/**
+ * What each comment on a card is. The server says so; for older comments without a kind, a QA comment is worked
+ * out from what followed it: a "Back in QA" note is a requeue, a QA verdict followed by a requeue (or one that left
+ * the card in Done) was a pass, and one after which the card came back for another review, or is still waiting to
+ * be fixed, was a failure.
+ */
+export function commentKinds(card: Pick<CodingCard, "column" | "comments">): CommentKind[] {
+  const { comments } = card;
+  return comments.map((comment, index) => {
+    if (comment.kind) return comment.kind;
+    if (comment.author !== "qa") return "note";
+    if (isRequeue(comment)) return "requeue";
+    const next = comments.slice(index + 1).find((later) => later.author === "qa");
+    if (next) return isRequeue(next) ? "pass" : "fail";
+    return card.column === "done" ? "pass" : "fail";
+  });
+}
+
+/** QA failed the card, or the whole-project check found something in it: something to fix. */
+const isFailureKind = (kind: CommentKind) => kind === "fail" || kind === "check";
+
+/** The comments that sent the card back to be fixed, in the order they came. */
+export function qaFailures(card: Pick<CodingCard, "column" | "comments">): CardComment[] {
+  const kinds = commentKinds(card);
+  return card.comments.filter((_, index) => isFailureKind(kinds[index]!));
+}
+
+/** Where the latest failure is in the card's comments (as given), or -1. */
+export function lastFailureIndex(card: Pick<CodingCard, "column" | "comments">): number {
+  return commentKinds(card).findLastIndex(isFailureKind);
+}
+
+/** A card sent back to Todo by QA: it has a QA finding to act on. */
 export const needsFixing = (card: Pick<CodingCard, "column" | "comments">): boolean =>
-  card.column === "todo" && card.comments.some((comment) => comment.author === "qa");
+  card.column === "todo" && qaFailures(card).length > 0;
 
 export interface LinkedFile {
   id: string;

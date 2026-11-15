@@ -2,6 +2,56 @@
 
 All notable changes to FreeBird. The format follows [Keep a Changelog](https://keepachangelog.com), and the project uses [semantic versioning](https://semver.org).
 
+## 0.0.13 - 2026-11-15
+
+### Added
+
+- **Client Bot.** **+ → New Client Bot** makes a bot that interviews you about what you sell and who your ideal client is, then finds businesses that may need it, only when you ask. It never searches for your service by name, which finds competitors; it looks for signs that a business needs you instead (hiring for your kind of work, opening a new site, raising money, asking for a provider). Leads come in three kinds: **asking now** (UK public tenders and "seeking a provider" posts), **with signs**, and **quiet fits** (good fits that never posted anything, from UK Companies House with your free API key and the UK food hygiene register). Quiet fits must be confirmed by an official record and their own website, and are re-checked for new signs each time you scan. Ready-made playbooks cover payroll, accounting, marketing, software development, IT support and recruitment, with a general one for anything else. Every fact and sign is quoted from its page or record. Contact routes are found by the app and are company-level only, never guessed. Your clients, competitors and do-not-contact list are never shown. Lookalikes of your best clients, a board from New to Won, CSV export, and suggestions from your reactions. Nothing is ever sent for you. See [the Client Bot guide](docs/client-bot.md).
+
+### Changed
+
+- **A new logo** for the app, its installer and the sidebar.
+
+## 0.0.12 - 2026-11-14
+
+### Added
+
+- **Job Bot.** **+ → New Job Bot** makes a bot that interviews you about the job you want, then finds and checks jobs that fit you, only when you ask. Each scan asks how many new jobs to find and counts only jobs that match you (weaker ones still go on the board) and that you haven't been shown before. Every fact on a job card must be quoted from the posting it was read from ("Not stated" otherwise), and the match score is worked out line by line from your requirements, with warning signs such as old postings, no salary or scam wording. Pages are read the cheapest way that works (a job system's public list, the page as text, the bot's browser, then a Visual helper as the fallback), and a CAPTCHA or sign-in is handed to you. Reactions with a reason suggest profile changes you can accept. See [the Job Bot guide](docs/job-bot.md).
+
+## 0.0.11 - 2026-11-14
+
+### Added
+
+- **API keys already on your computer are found for you.** Settings → Models & Providers lists keys set as environment variables for your account (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` and the others) under **Found on this computer**, with one-click **Add**. The screen never sees the key; Add copies it into the keychain exactly as a pasted key would. Pasting a key works as before.
+
+### Changed
+
+- **Parallel Bots on a cloud model asks the three roles separately, at the same time.** Without Allow tools, a cloud model (ChatGPT, Claude, Gemini and the others) now gets one short request to pick the roles and then one request per role, all at once, so the answers fill in side by side and a role can't echo another; it uses about three times the input tokens. A local model still sends one request with three sections, and Allow tools is unchanged. Switch it off in **Settings → Local model → Parallel Bots on cloud models: ask each role separately** to use one request on cloud models too.
+
+## 0.0.10 - 2026-11-14
+
+### Security
+
+- **Commands bots run no longer get FreeBird's access token.** Every command inherited the app's environment, including the token that unlocks its local API, so code run by an approved command (an install script, or code a bot wrote) could have switched approvals off. Commands now get a clean environment, and the app drops the token from its own environment after reading it.
+- **Typed command rules can't be chained.** A Custom Rule for a terminal command only covers the command itself, so a rule for `npm` no longer lets `npm i; Remove-Item …` or a command with `|`, `&`, `$(`, brackets, redirects or `iex` through. This is stricter than before: commands such as `npm i -E`, `xcopy /e`, `node -e …` or `echo (Get-Date)` now show a card even if a rule used to allow them, and a `run_command` rule with no text only covers plain commands.
+- **A Coding Bot's team only writes the files of its plan.** Writes to other files, to `.git`, `node_modules` or editor settings that run commands (`.vscode/tasks.json` and similar) are refused; plans can't list them either. Its roles can't read `.env` files or private keys. Its commands always ask, even with commands set to always allow.
+- **Output folders can't be network paths** (`\\server\share`, `\\localhost\C$…`), names ending in a dot or space, or device names; such folders got past the folder rules, and one ending in a dot made commands run in the home folder.
+- **A hostile plan file can no longer freeze the app** (the plan reader is linear and refuses more than 1 MB).
+
+### Added
+
+- **Parallel Bots can use tools.** With **Allow tools**, the three roles each run as their own conversation at the same time, each with its own web searches and pages, which the others never see; each card shows its own searches, steps, sources and answer. Two settings: roles writing at once (default 3) and steps per role (default 6). **Bots at once** and Races are unaffected.
+- **A finished Coding Bot project can be changed**: type what you want changed, the Planner updates the plan, and only what changed is built again. A plan can also be imported after a project is done, stopped or failed, and a failed plan can be given a new brief.
+
+### Fixed
+
+- **The Coding Bot's Developer no longer gets stuck reading.** It was told to read files a later card writes, read up to 21 files per try and wrote nothing; now it only reads written files (at most 6 per try), is told when 3 rounds are left, retries are told what went wrong, a written file counts even without "finished", and model errors are retried instead of ending the project.
+- **Stopping, clearing or deleting a Coding Bot's team conversation no longer leaves the project stuck** "working"; deleting, duplicating or renaming the team on its own is refused.
+- **The whole-project check no longer fails normal TypeScript projects** (`import type`, `export interface`, `.js` imports of `.ts` files, commented `tsconfig.json`, missing images), and it catches more made-up keys (`OPENWEATHER_API_KEY`, `sk-proj-…`, `appid=` in a URL, `.env` lines).
+- **QA's instructions no longer contradict themselves** about placeholders.
+- **Bots in a bot-to-bot conversation** (a helper's or a Coding Bot role's) are no longer told to ask a short question when something is unclear, since nobody is there to answer: they make a sensible choice and say what they assumed.
+- **The Coding Bot screen:** no desktop notification or unread count for each team reply; "Finished" and "Error" clear once seen; passes are no longer counted as failures; the panel no longer squeezes the chat away (it becomes a drawer in narrow windows); the message box's Stop stops the team; resetting the board on import has its own confirmation; big diagrams no longer draw lines behind boxes; plus focus, screen reader and export fixes.
+
 ## 0.0.9 - 2026-11-13
 
 ### Fixed

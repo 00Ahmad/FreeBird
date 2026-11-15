@@ -1,5 +1,5 @@
 import { LayoutGrid, Maximize2, Timer, X, ZoomIn, ZoomOut } from "lucide-react";
-import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import type { CodingProject } from "@mrog/shared";
 import { Button, cn, IconButton } from "@mrog/ui-kit";
@@ -45,6 +45,19 @@ export function CodingDiagram({
   const scroller = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const fitted = useRef(false);
+  // What opened the details box from here, so closing it gives focus back. A pick made elsewhere (the board, the
+  // checklist) or one the tab opens with leaves focus where it is.
+  const [opener, setOpener] = useState<HTMLElement | null>(null);
+  /** A pick by the user in this diagram: the details box takes focus, and returns it on close. */
+  const pickHere = (ref: string | null) => {
+    setOpener(ref ? (document.activeElement as HTMLElement | null) : null);
+    onSelect(ref);
+  };
+  const closeDetails = () => {
+    setOpener(null);
+    onSelect(null);
+    if (opener?.isConnected) opener.focus();
+  };
 
   // The first time there is something to draw, fit it across the panel.
   useLayoutEffect(() => {
@@ -123,19 +136,26 @@ export function CodingDiagram({
           className="block"
           onClick={(event) => event.target === event.currentTarget && onSelect(null)}
         >
-          <g fill="none" strokeLinecap="round">
-            {layout.links.map((link) => {
-              const on = lit.has(link.edgeId) && lit.has(link.fileId);
-              return (
-                <path
-                  key={`${link.edgeId}-${link.fileId}`}
-                  d={link.d}
-                  stroke={on ? "var(--mrog-accent)" : "var(--mrog-ink-3)"}
-                  strokeWidth={on ? 2 : 1.25}
-                  opacity={selectedRef !== null && !on ? 0.2 : 0.85}
-                />
-              );
-            })}
+          <g fill="none" strokeLinecap="round" strokeLinejoin="round">
+            {/* The picked one's lines last, so they stay on top where lines share a corridor. */}
+            {layout.links
+              .toSorted(
+                (a, b) =>
+                  Number(lit.has(a.edgeId) && lit.has(a.fileId)) -
+                  Number(lit.has(b.edgeId) && lit.has(b.fileId)),
+              )
+              .map((link) => {
+                const on = lit.has(link.edgeId) && lit.has(link.fileId);
+                return (
+                  <path
+                    key={`${link.edgeId}-${link.fileId}`}
+                    d={link.d}
+                    stroke={on ? "var(--mrog-accent)" : "var(--mrog-ink-3)"}
+                    strokeWidth={on ? 2 : 1.25}
+                    opacity={selectedRef !== null && !on ? 0.2 : 0.85}
+                  />
+                );
+              })}
           </g>
 
           {layout.files.map((file) => {
@@ -145,7 +165,7 @@ export function CodingDiagram({
             const mark = markOf(file.id);
             const state = stateOf(file.id);
             const column = columnLabel(mark.column);
-            const pick = () => onSelect(picked ? null : file.id);
+            const pick = () => pickHere(picked ? null : file.id);
             return (
               <g
                 key={file.id}
@@ -235,7 +255,7 @@ export function CodingDiagram({
             const picked = selectedRef === junction.id;
             const files = linkedFiles(edge, project.nodes).map((file) => file.path);
             const mark = markOf(junction.id);
-            const pick = () => onSelect(picked ? null : junction.id);
+            const pick = () => pickHere(picked ? null : junction.id);
             return (
               <g
                 key={junction.id}
@@ -309,7 +329,7 @@ export function CodingDiagram({
                 <li key={edge.id}>
                   <button
                     type="button"
-                    onClick={() => onSelect(selectedRef === edge.id ? null : edge.id)}
+                    onClick={() => pickHere(selectedRef === edge.id ? null : edge.id)}
                     aria-pressed={selectedRef === edge.id}
                     className={cn(
                       "flex w-full items-start gap-2 rounded-lg px-2 py-1 text-left text-[12.5px] outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent",
@@ -335,10 +355,13 @@ export function CodingDiagram({
 
       {selectedRef && (
         <Details
+          // Made anew for each pick, so a new pick from here takes focus again.
+          key={selectedRef}
           project={project}
           now={now}
           refId={selectedRef}
-          onClose={() => onSelect(null)}
+          takeFocus={opener !== null}
+          onClose={closeDetails}
           onShowOnBoard={() => onShowOnBoard(selectedRef)}
         />
       )}
@@ -410,15 +433,22 @@ function Details({
   project,
   now,
   refId,
+  takeFocus,
   onClose,
   onShowOnBoard,
 }: {
   project: CodingProject;
   now: number;
   refId: string;
+  /** The user opened it from the diagram: focus moves into it (and comes back on close). */
+  takeFocus: boolean;
   onClose(): void;
   onShowOnBoard(): void;
 }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (takeFocus) box.current?.querySelector<HTMLElement>("[data-close]")?.focus();
+  }, [takeFocus]);
   const node = project.nodes.find((candidate) => candidate.id === refId);
   const edgeIndex = project.edges.findIndex((candidate) => candidate.id === refId);
   const edge = edgeIndex >= 0 ? project.edges[edgeIndex]! : null;
@@ -432,6 +462,7 @@ function Details({
 
   return (
     <div
+      ref={box}
       role="dialog"
       aria-label="Details"
       onKeyDown={(event) => {
@@ -455,7 +486,7 @@ function Details({
         <Button size="sm" variant="subtle" onClick={onShowOnBoard} disabled={!card}>
           Show on board
         </Button>
-        <IconButton label="Close details" onClick={onClose} autoFocus>
+        <IconButton label="Close details" onClick={onClose} data-close>
           <X size={14} />
         </IconButton>
       </div>

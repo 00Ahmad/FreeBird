@@ -19,7 +19,15 @@ import {
   type ToolGroup,
   type ToolInfo,
 } from "@mrog/shared";
-import { BUILTIN_TOOLS, createToolHost, defineTool, safe, type Risk, type ToolSpec } from "@mrog/tools";
+import {
+  BUILTIN_TOOLS,
+  createToolHost,
+  defineTool,
+  safe,
+  type Risk,
+  type ToolContext,
+  type ToolSpec,
+} from "@mrog/tools";
 
 import { fail, parse } from "../http";
 import type { TurnInfo } from "../turns";
@@ -163,14 +171,24 @@ const NO_CARDS_UNATTENDED =
  * the user denied it.
  */
 function withoutCards(spec: ToolSpec, approvals: ApprovalBroker, reason = NO_CARDS_IN_GROUPS): ToolSpec {
-  const needsCard = (risk: Risk) => risk.level === "ask" && approvals.settled(spec.name, risk) === undefined;
+  // The bot and the command go along, so a bot whose commands must always ask, and the check on typed command rules,
+  // see the same call here as on a card.
+  const needsCard = (risk: Risk, args: Record<string, unknown>, ctx: ToolContext) =>
+    risk.level === "ask" &&
+    approvals.settled(
+      spec.name,
+      risk,
+      ctx.botId,
+      typeof args.command === "string" ? args.command : undefined,
+    ) === undefined;
   return {
     ...spec,
     risk: async (args, ctx) => {
       const risk = await spec.risk(args, ctx);
-      return needsCard(risk) ? { ...risk, level: "safe" } : risk;
+      return needsCard(risk, args, ctx) ? { ...risk, level: "safe" } : risk;
     },
-    run: async (args, ctx) => (needsCard(await spec.risk(args, ctx)) ? reason : spec.run(args, ctx)),
+    run: async (args, ctx) =>
+      needsCard(await spec.risk(args, ctx), args, ctx) ? reason : spec.run(args, ctx),
   };
 }
 
@@ -243,7 +261,9 @@ export function installAgent(services: Services): Agent {
     const visible = bot.visual
       ? all.filter((spec) => VISUAL_TOOL_NAMES.has(spec.name) || VISUAL_BOT_KEEPS.has(spec.name))
       : all;
-    return agent.toolFilters.reduce((list, filter) => filter(bot, thread, list), visible);
+    const filtered = agent.toolFilters.reduce((list, filter) => filter(bot, thread, list), visible);
+    // A Parallel Bots role may use only the tools it was given (search and opening pages).
+    return info.onlyTools ? filtered.filter((spec) => info.onlyTools!.includes(spec.name)) : filtered;
   };
 
   const listTools = (bot: Bot): ToolInfo[] => {

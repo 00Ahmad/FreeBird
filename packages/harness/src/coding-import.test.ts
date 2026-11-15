@@ -201,7 +201,7 @@ describe("bringing in a plan", () => {
     expect(published).toHaveLength(before);
   });
 
-  it("refuses while the team is working, and when it is done", async () => {
+  it("refuses while the team is working, and takes a plan once it is done, with replace", async () => {
     let release!: () => void;
     const wait = new Promise<void>((resolve) => (release = resolve));
     const team = codingTeam({ plans: [{ tool: ONE_FILE }], develop: () => ({ wait }) });
@@ -214,8 +214,42 @@ describe("bringing in a plan", () => {
     expect(busy.json().needsReplace).toBeUndefined();
     release();
     await until(h, bot.id, (p) => p.status === "done");
-    expect((await importTo(h, bot.id, { plan: file, replace: true })).statusCode).toBe(409);
-    expect(getProject(h, bot.id).cards).toHaveLength(1);
+    // A finished project is no dead end: a plan can start it over, once you say the done cards may go back to Todo.
+    const moved = await importTo(h, bot.id, { plan: file });
+    expect(moved.statusCode).toBe(409);
+    expect(moved.json().needsReplace).toBe(true);
+    const replaced = await importTo(h, bot.id, { plan: file, replace: true });
+    expect(replaced.statusCode).toBe(200);
+    expect(replaced.json().project.cards).toHaveLength(3);
+    // Auto-approve is on: the new plan is built straight away.
+    await until(h, bot.id, (p) => p.status === "done" && p.cards.length === 3);
+  });
+
+  it("takes a plan when the project stopped with an error or waits for you", async () => {
+    const team = codingTeam({ plans: [{ tool: ONE_FILE }], develop: () => ({ write: null, finish: false }) });
+    h = await startTeam(team);
+    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
+    await type(h, bot, "Make a note");
+    await until(h, bot.id, (p) => p.status === "error");
+    team.behave.develop = () => ({});
+    const res = await importTo(h, bot.id, { plan: { ...file, nodes: ONE_FILE.nodes, edges: [] } });
+    expect(res.statusCode).toBe(200);
+    await until(h, bot.id, (p) => p.status === "done");
+
+    const stuck = codingTeam({ plans: [{ tool: ONE_FILE }], review: () => ({ pass: false, comment: "no" }) });
+    await h.close();
+    h = await startTeam(stuck);
+    const second = await makeCoding(h, tmp("out"), { autoApprove: true, maxRounds: 1 });
+    await type(h, second.bot, "Make a note");
+    await until(h, second.bot.id, (p) => p.status === "needs_you");
+    expect((await importTo(h, second.bot.id, { plan: file, replace: true })).statusCode).toBe(200);
+  });
+
+  it("refuses a plan body over 2 MB", async () => {
+    h = await startTeam(codingTeam());
+    const { bot } = await makeCoding(h, tmp("out"));
+    const res = await importTo(h, bot.id, { plan: "x".repeat(2 * 1024 * 1024 + 10) });
+    expect(res.statusCode).toBe(413);
   });
 
   it("asks for replace once cards have moved, and then starts every card again from Todo", async () => {

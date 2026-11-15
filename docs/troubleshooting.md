@@ -12,6 +12,18 @@
 
 Ollama may be looking in the wrong folder, so FreeBird shows no models even though they are still on disk. Check the **`OLLAMA_MODELS`** environment variable and **Model location** in Ollama's own settings: it must be your models folder (by default `%USERPROFILE%\.ollama\models` on Windows, `~/.ollama/models` elsewhere), not its parent. After fixing it, restart Ollama. `ollama list` in a terminal shows what Ollama sees; if it's empty there too, the problem is in Ollama's setup, not in FreeBird.
 
+### "unable to load model"
+
+Ollama found the model but couldn't load it. The usual reason is an Ollama that is older than the model: run `ollama --version` and update Ollama from https://ollama.com/download (or from the Ollama app's menu). It can also mean the model file is damaged; pull it again with `ollama pull <model>`. A Coding Bot retries a model that fails to load twice and then stops with this error; change the role's model under **Models** and press **Resume**, or send the brief again.
+
+### A command rule no longer allows a command
+
+Custom Rules for terminal commands only cover the command itself. If anything after the rule's text could chain or inject another command (`;`, `&`, `|`, a backtick, brackets, `<` or `>`, `$(`, a new line, `iex`, or a flag like `-e`), the command asks first, even though the rule matches its start. Approve it once, or write the rule for the exact command.
+
+### Parallel Bots with tools answers without searching
+
+Each role decides for itself whether it needs to search, and a small model often answers from what it remembers, which can be out of date. Ask for current facts plainly ("look up the latest version"), or use a larger model.
+
 ### "No model is selected"
 
 Pick a shared model in **Settings → Local model**, or give the bot its own model in its **Details** panel.

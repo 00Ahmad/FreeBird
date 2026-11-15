@@ -1,4 +1,4 @@
-import { SLOW_CARD_SECONDS, type CodingCard, type CodingProject } from "@mrog/shared";
+import { SLOW_CARD_SECONDS, type CodingCard, type CodingProject, type Message } from "@mrog/shared";
 
 import { roleLabel } from "./coding";
 
@@ -124,11 +124,57 @@ export function activeElapsed(project: Pick<CodingProject, "cards" | "active">, 
   return card ? cardElapsedSeconds(card, project, now) : runningSeconds(project, now);
 }
 
-/** One plain line for the status banner while the card being worked on is slow. */
-export function slowHint(project: Pick<CodingProject, "cards" | "active">, now: number): string | null {
+interface Activity {
+  botId: string | null;
+  activity: string;
+}
+
+/**
+ * Whether the role at work is waiting for the user (a command to approve, most often) rather than working: a chat of
+ * the team (`threads`: the Coding Bot's own and its conversations with its roles) or the role bot itself is marked
+ * "waiting for you", or the latest tool call in the given messages (the Coding Bot's chat, which shows its roles'
+ * approval cards) waits for approval.
+ */
+export function roleWaiting(
+  project: Pick<CodingProject, "active" | "roles">,
+  activity: Readonly<Record<string, Activity>>,
+  threads: ReadonlySet<string>,
+  messages: readonly Pick<Message, "parts">[] = [],
+): boolean {
+  const active = project.active;
+  if (!active) return false;
+  const roleBot = project.roles[active.role].botId;
+  const marked = Object.entries(activity).some(
+    ([threadId, entry]) =>
+      entry.activity === "waiting_user" && (entry.botId === roleBot || threads.has(threadId)),
+  );
+  if (marked) return true;
+  for (const message of messages.toReversed()) {
+    const tool = message.parts.findLast((part) => part.type === "tool");
+    if (tool) return tool.type === "tool" && tool.status === "pending_approval";
+  }
+  return false;
+}
+
+/** The banner's line while the role at work waits for the user: the clock runs on, but the model isn't slow. */
+export function waitingHint(project: Pick<CodingProject, "active">): string | null {
+  const active = project.active;
+  if (!active) return null;
+  return `The ${roleLabel(active.role)} is waiting for your approval. The time on the card keeps counting meanwhile; the model isn't slow.`;
+}
+
+/**
+ * One plain line for the status banner while the card being worked on is slow. Not while the role waits for the user
+ * (`waiting`): that time is the user's, and a faster model wouldn't help.
+ */
+export function slowHint(
+  project: Pick<CodingProject, "cards" | "active">,
+  now: number,
+  waiting = false,
+): string | null {
   const active = project.active;
   const card = active ? project.cards.find((candidate) => candidate.id === active.cardId) : undefined;
-  if (!active || !card || !isSlowCard(card, project, now)) return null;
+  if (!active || !card || waiting || !isSlowCard(card, project, now)) return null;
   const seconds = cardElapsedSeconds(card, project, now);
   return `The ${roleLabel(active.role)} has spent ${formatDuration(seconds)} on this card. A smaller or faster model for this role may help; you can change it under Models.`;
 }

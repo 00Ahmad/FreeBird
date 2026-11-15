@@ -7,9 +7,12 @@ import {
   cardsByRef,
   columnLabel,
   COLUMN_COLOR,
+  commentKinds,
   edgeLabels,
+  lastFailureIndex,
   needsFixing,
   progressText,
+  qaFailures,
   relatedRefs,
   sortComments,
 } from "./codingBoard";
@@ -17,6 +20,43 @@ import { comment, connectorCard, edge, fileCard, node } from "./codingFixture";
 
 const nodes = [node("a", "src/a.ts"), node("b", "src/b.ts"), node("c", "src/c.ts")];
 const edges = [edge("x", ["a", "b"]), edge("y", ["a", "b", "c"])];
+
+describe("what a comment is", () => {
+  const said = (kind: NonNullable<ReturnType<typeof comment>["kind"]>, text = kind) => ({
+    ...comment("qa", text),
+    kind,
+  });
+
+  it("takes the server's word for it", () => {
+    const card = fileCard("a", "done", [said("fail"), said("pass"), said("requeue"), said("check")]);
+    expect(commentKinds(card)).toEqual(["fail", "pass", "requeue", "check"]);
+    // A failure and a finding of the whole-project check are things to fix; a pass and a requeue are not.
+    expect(qaFailures(card).map((c) => c.kind)).toEqual(["fail", "check"]);
+  });
+
+  it("does not take a passing comment or a requeue note for a reason to fix the card", () => {
+    expect(needsFixing(fileCard("a", "todo", [said("pass")]))).toBe(false);
+    expect(needsFixing(fileCard("a", "todo", [said("requeue")]))).toBe(false);
+    expect(needsFixing(fileCard("a", "todo", [said("pass"), said("check")]))).toBe(true);
+    expect(lastFailureIndex(fileCard("a", "qa", [said("fail"), said("pass"), said("requeue")]))).toBe(0);
+  });
+
+  it("works out older comments without a kind from what followed them", () => {
+    const qa = (text: string) => comment("qa", text);
+    const back = qa("Back in QA: src/b.ts changed after this card passed, so it has to be checked again.");
+    // Failed, fixed and passed: the first was a failure, the last a pass.
+    expect(
+      commentKinds(fileCard("a", "done", [qa("no tests"), comment("developer", "added"), qa("ok")])),
+    ).toEqual(["fail", "note", "pass"]);
+    // Passed, then back in QA because a file changed: still a pass, and the note is a requeue.
+    expect(commentKinds(fileCard("a", "qa", [qa("looks good"), back]))).toEqual(["pass", "requeue"]);
+    // The last verdict on a card that isn't done sent it back.
+    for (const column of ["todo", "in_progress", "qa"] as const)
+      expect(commentKinds(fileCard("a", column, [qa("broken")])), column).toEqual(["fail"]);
+    expect(commentKinds(fileCard("a", "done", [qa("fine")]))).toEqual(["pass"]);
+    expect(commentKinds(fileCard("a", "todo", [comment("user", "hi")]))).toEqual(["note"]);
+  });
+});
 
 describe("board columns", () => {
   it("has the four columns in the shared order, with labels and a colour each", () => {

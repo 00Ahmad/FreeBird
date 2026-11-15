@@ -12,10 +12,12 @@ import {
   formatTokens,
   isSlowCard,
   projectTotals,
+  roleWaiting,
   slowBadge,
   slowHint,
   SLOW_TOOLTIP,
   totalsLine,
+  waitingHint,
 } from "./codingWork";
 
 const SINCE = "2026-01-01T10:00:00.000Z";
@@ -232,6 +234,55 @@ describe("the role at work", () => {
     expect(
       slowHint(project({ cards: slow, active: { role: "qa", cardId: null, since: SINCE } }), T0),
     ).toBeNull();
+  });
+
+  it("blames no model while the role waits for the user's approval, and says so instead", () => {
+    const slow = [withWork(fileCard("a", "in_progress"), { seconds: 700 })];
+    const p = project({ cards: slow, active: { role: "developer", cardId: "card-a", since: SINCE } });
+    expect(slowHint(p, T0, true)).toBeNull();
+    expect(waitingHint(p)).toMatch(/^The Developer is waiting for your approval/);
+    // The time still counts.
+    expect(activeElapsed(p, T0 + 60_000)).toBe(760);
+    expect(waitingHint(project({ active: null }))).toBeNull();
+  });
+});
+
+describe("waiting for the user", () => {
+  const active = { role: "developer", cardId: "card-a", since: SINCE } as const;
+  const p = project({ active });
+  const team = new Set(["t-coder", "t-dev"]);
+  const tool = (status: "pending_approval" | "running" | "done") => ({
+    parts: [
+      { type: "text" as const, text: "Developing…" },
+      { type: "tool" as const, callId: "c1", name: "run_command", args: {}, status },
+    ],
+  });
+
+  it("is when a team chat or the role bot is marked as waiting for you", () => {
+    expect(roleWaiting(p, { "t-dev": { botId: "bot-developer", activity: "waiting_user" } }, team)).toBe(
+      true,
+    );
+    expect(roleWaiting(p, { elsewhere: { botId: "bot-developer", activity: "waiting_user" } }, team)).toBe(
+      true,
+    );
+    expect(roleWaiting(p, { "t-coder": { botId: null, activity: "waiting_user" } }, team)).toBe(true);
+  });
+
+  it("is when the latest tool call in the Coding Bot's chat waits for approval", () => {
+    expect(roleWaiting(p, {}, team, [tool("done"), tool("pending_approval")])).toBe(true);
+    expect(roleWaiting(p, {}, team, [tool("pending_approval"), tool("running")])).toBe(false);
+    // A message without tools after it says nothing either way.
+    expect(
+      roleWaiting(p, {}, team, [tool("pending_approval"), { parts: [{ type: "text", text: "hi" }] }]),
+    ).toBe(true);
+  });
+
+  it("is not while the team works, in another chat, or with nobody at work", () => {
+    expect(roleWaiting(p, { "t-dev": { botId: "bot-developer", activity: "working" } }, team)).toBe(false);
+    expect(roleWaiting(p, { other: { botId: "bot-other", activity: "waiting_user" } }, team)).toBe(false);
+    expect(
+      roleWaiting(project({ active: null }), { "t-dev": { botId: null, activity: "waiting_user" } }, team),
+    ).toBe(false);
   });
 });
 

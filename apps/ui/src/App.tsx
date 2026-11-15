@@ -25,6 +25,14 @@ const NewClusterDialog = lazy(() =>
 const NewCodingBotDialog = lazy(() =>
   import("./components/NewCodingBotDialog").then((module) => ({ default: module.NewCodingBotDialog })),
 );
+const NewClientBotDialog = lazy(() =>
+  import("./components/clients/NewClientBotDialog").then((module) => ({
+    default: module.NewClientBotDialog,
+  })),
+);
+const NewJobBotDialog = lazy(() =>
+  import("./components/jobs/NewJobBotDialog").then((module) => ({ default: module.NewJobBotDialog })),
+);
 const NewRaceDialog = lazy(() =>
   import("./components/NewRaceDialog").then((module) => ({ default: module.NewRaceDialog })),
 );
@@ -50,6 +58,8 @@ export function App() {
         {overlay === "newCluster" && <NewClusterDialog />}
         {overlay === "newRace" && <NewRaceDialog />}
         {overlay === "newCodingBot" && <NewCodingBotDialog />}
+        {overlay === "newJobBot" && <NewJobBotDialog />}
+        {overlay === "newClientBot" && <NewClientBotDialog />}
       </Suspense>
       {overlay === "newGroup" && <NewGroupDialog />}
       {overlay === "palette" && <CommandPalette />}

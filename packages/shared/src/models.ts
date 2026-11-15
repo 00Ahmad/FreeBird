@@ -36,6 +36,16 @@ export const RuntimeSettings = z.object({
   keepAlive: z.string().regex(/^(-1|\d+[smh])$/),
   /** Turns run against the local model at once; the rest wait in the queue. */
   parallel: z.number().int().min(1).max(8),
+  /** Parallel Bots with tools: how many of its three roles write at once (it takes one of the slots above). */
+  parallelLanes: z.number().int().min(1).max(3).default(3),
+  /** Parallel Bots with tools: the most tool steps each role may take before it must answer. */
+  parallelSteps: z.number().int().min(1).max(10).default(6),
+  /**
+   * Parallel Bots without tools on a cloud model: ask each of the three roles in its own request, all at once (faster,
+   * and the roles can't echo each other), instead of one request whose reply has three sections (fewer tokens). A local
+   * model always uses the one request, so the GPU holds one conversation.
+   */
+  parallelSeparateOnCloud: z.boolean().default(true),
   /** Let thinking models reason before answering. */
   think: z.boolean(),
   ollamaUrl: z.url(),
@@ -50,6 +60,9 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   numCtx: 32768,
   keepAlive: "30m",
   parallel: 1,
+  parallelLanes: 3,
+  parallelSteps: 6,
+  parallelSeparateOnCloud: true,
   think: false,
   ollamaUrl: "http://127.0.0.1:11434",
   startOllama: true,

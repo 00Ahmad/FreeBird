@@ -36,6 +36,29 @@ function killTree(pid: number, exited: boolean): Promise<void> {
 }
 
 /**
+ * The app's own settings (MROG_*: the access token, the data folder, the port) and the variables that make node
+ * load code before it runs (NODE_OPTIONS, ELECTRON_RUN_AS_NODE). A command must not see any of them: with the token
+ * it could drive the app's API like the user, and through the others it could slip code into a node it starts.
+ */
+const hiddenFromCommands = (name: string) => {
+  const upper = name.toUpperCase();
+  return (
+    upper.startsWith("MROG_") ||
+    upper.includes("_MROG_") ||
+    upper === "ELECTRON_RUN_AS_NODE" ||
+    upper === "NODE_OPTIONS"
+  );
+};
+
+/** The environment a command runs with: this process's, without what it must not see, plus the secrets it was given. */
+export function commandEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env))
+    if (value !== undefined && !hiddenFromCommands(name)) env[name] = value;
+  return { ...env, ...extra };
+}
+
+/**
  * Runs a shell command (PowerShell on Windows, sh elsewhere), killing the whole tree on timeout or abort. A child
  * left running in the background can keep the output open; after a timeout or Stop the result comes back anyway.
  */
@@ -58,13 +81,13 @@ export function runShell(
         ],
         {
           cwd: options.cwd,
-          env: { ...process.env, ...options.env },
+          env: commandEnv(options.env),
           windowsHide: true,
         },
       )
     : spawn("/bin/sh", ["-c", command], {
         cwd: options.cwd,
-        env: { ...process.env, ...options.env },
+        env: commandEnv(options.env),
         detached: true,
       });
 
@@ -135,7 +158,7 @@ export function runShell(
 export function formatCommandResult(result: CommandResult, timeoutSeconds: number): string {
   const text =
     result.output.length > RETURN_CHARS
-      ? `…(earlier output cut)\n${result.output.slice(-RETURN_CHARS)}`
+      ? `â€¦(earlier output cut)\n${result.output.slice(-RETURN_CHARS)}`
       : result.output;
   const status = result.timedOut
     ? `Timed out after ${timeoutSeconds}s and was stopped.`

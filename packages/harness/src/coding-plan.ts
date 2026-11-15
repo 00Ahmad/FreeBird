@@ -11,22 +11,33 @@ import {
   type CodingProject,
 } from "@mrog/shared";
 
+import { nameProblem, protectedPathReason } from "./coding-paths";
+
 /** The longest purpose or connection description a plan may carry: a plan nobody can read is not a plan. */
 const MAX_TEXT = 2000;
-/** Characters a file name can't have on Windows (the strictest system), plus control characters. */
+/** The longest path a plan may list, and the longest name in it: deep enough for any project, short of Windows' limits. */
+const MAX_PATH = 200;
+const MAX_NAME = 100;
+/** Characters a file name can't have on Windows (the strictest system). */
 const BAD_NAME = /[<>:"|?*]/;
-const hasControlCharacter = (text: string) => [...text].some((char) => char.charCodeAt(0) < 32);
+/** Control characters, and the invisible ones that hide or reorder text (zero-width, text direction, BOM). */
+// oxlint-disable-next-line no-control-regex -- control characters are exactly what this looks for
+const INVISIBLE = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
 
 export type PlanResult =
   { ok: true; nodes: CodingNode[]; edges: CodingEdge[] } | { ok: false; errors: string[] };
 
-/** A path the way the plan keeps it: forward slashes, no "./" in front, no doubled slashes. */
+/**
+ * A path the way the plan keeps it: one Unicode form, forward slashes, no "./" steps, no doubled slashes. Written two
+ * ways ("src/./a.js" and "src/a.js"), one file would be two cards that wait on each other.
+ */
 export function normalizePlanPath(path: string): string {
   return path
+    .normalize("NFC")
     .trim()
     .replaceAll("\\", "/")
     .replace(/\/{2,}/g, "/")
-    .replace(/^(?:\.\/)+/, "");
+    .replace(/(?<=^|\/)\.(?:\/|$)/g, "");
 }
 
 const asList = (value: unknown): unknown[] | null => {
@@ -60,8 +71,18 @@ function pathProblem(path: string): string | null {
     return "paths are relative to the output folder; this one is absolute";
   if (path.split("/").includes("..")) return 'paths can\'t contain ".." (they stay inside the output folder)';
   if (path.endsWith("/")) return "that is a folder; list files only";
-  if (BAD_NAME.test(path) || hasControlCharacter(path))
-    return "it has characters a file name can't have (< > : \" | ? *)";
+  if (INVISIBLE.test(path))
+    return "it has invisible characters (control, zero-width or text-direction ones), which can make one name look like another; use only visible characters";
+  if (BAD_NAME.test(path)) return "it has characters a file name can't have (< > : \" | ? *)";
+  if (path.length > MAX_PATH) return `the path is ${path.length} characters; keep it under ${MAX_PATH}`;
+  for (const name of path.split("/")) {
+    if (name.length > MAX_NAME)
+      return `the name ${quote(name)} is ${name.length} characters; keep each name in the path under ${MAX_NAME}`;
+    const problem = nameProblem(name);
+    if (problem) return `${problem}; rename it`;
+  }
+  const reason = protectedPathReason(path);
+  if (reason) return `${reason}, so the team may not write it; leave it out of the plan`;
   return null;
 }
 
@@ -168,27 +189,88 @@ export function validatePlan(raw: unknown): PlanResult {
   return errors.length > 0 ? { ok: false, errors } : { ok: true, nodes, edges };
 }
 
-/** Every `{…}` in the text that is a whole JSON object, outermost first (strings and nesting respected). */
-function objectsIn(text: string): string[] {
-  const found: string[] = [];
-  for (let start = text.indexOf("{"); start !== -1; start = text.indexOf("{", start + 1)) {
-    let depth = 0;
-    let inString = false;
-    for (let i = start; i < text.length; i++) {
-      const char = text[i];
-      if (inString) {
-        if (char === "\\") i += 1;
-        else if (char === '"') inString = false;
-      } else if (char === '"') inString = true;
-      else if (char === "{") depth += 1;
-      else if (char === "}" && --depth === 0) {
-        found.push(text.slice(start, i + 1));
-        start = i;
-        break;
-      }
+/** How many times the scan starts again after a `{` that never closed (each start is one pass over the text). */
+const RESCANS = 2;
+/** How many pieces of a reply are tried as the plan's JSON, the last ones first. */
+const MAX_PARSE_TRIES = 200;
+
+/**
+ * Every balanced `{…}` in the text, outermost first and in order (strings and nesting respected), in a few passes
+ * whatever the text: it also reads the Planner's replies and pasted text, where one pass per `{` would take minutes.
+ * A quote counts only inside braces, since prose has stray ones. A `{` that never closes doesn't hide the objects
+ * after it; if a stray quote after it threw the strings off, the scan starts again just after it.
+ */
+function objectsIn(text: string, wanted?: RegExp): string[] {
+  let starts: number[] = [];
+  let stops: number[] = [];
+  let from = 0;
+  for (let pass = 0; pass <= RESCANS && from < text.length; pass++) {
+    const scan = pairsIn(text, from);
+    if (pass === 0) [starts, stops] = [scan.starts, scan.stops];
+    else {
+      // A later pass may find pairs the first one missed: add those, in order.
+      const known = new Set(starts);
+      const merged = starts.map((start, k) => [start, stops[k]!] as const);
+      scan.starts.forEach((start, k) => known.has(start) || merged.push([start, scan.stops[k]!]));
+      merged.sort((a, b) => a[0] - b[0]);
+      [starts, stops] = [merged.map((pair) => pair[0]), merged.map((pair) => pair[1])];
     }
+    if (scan.firstOpen === -1) break;
+    from = scan.firstOpen + 1;
+  }
+  // Where `wanted` appears, so a pair without it is skipped without cutting it out of the text.
+  const hits = wanted ? [...text.matchAll(new RegExp(wanted.source, "g"))].map((match) => match.index) : [];
+  const found: string[] = [];
+  let next = 0;
+  for (let k = 0; k < starts.length; k++) {
+    if (wanted) {
+      while (next < hits.length && hits[next]! < starts[k]!) next += 1;
+      if (next === hits.length || hits[next]! > stops[k]!) continue;
+    }
+    found.push(text.slice(starts[k], stops[k]! + 1));
   }
   return found;
+}
+
+/** One pass of `objectsIn`: the outermost closed pairs from `from` on, and the first `{` that never closed (or -1). */
+function pairsIn(text: string, from: number): { starts: number[]; stops: number[]; firstOpen: number } {
+  const open: number[] = [];
+  const starts: number[] = [];
+  const stops: number[] = [];
+  let inString = false;
+  for (let i = from; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (char === "\\") i += 1;
+      else if (char === '"') inString = false;
+    } else if (char === "{") open.push(i);
+    else if (open.length === 0) continue;
+    else if (char === '"') inString = true;
+    else if (char === "}") {
+      const start = open.pop()!;
+      // The pairs that closed inside this one are part of it, not objects of their own.
+      while (starts.length > 0 && starts.at(-1)! > start) {
+        starts.pop();
+        stops.pop();
+      }
+      starts.push(start);
+      stops.push(i);
+    }
+  }
+  return { starts, stops, firstOpen: open[0] ?? -1 };
+}
+
+/** The text without the model's `<think>…</think>` blocks, found with indexOf so an unclosed one costs one pass. */
+function withoutThinking(text: string): string {
+  let kept = "";
+  let at = 0;
+  for (;;) {
+    const open = text.indexOf("<think>", at);
+    const close = open === -1 ? -1 : text.indexOf("</think>", open + 7);
+    if (close === -1) return kept + text.slice(at);
+    kept += text.slice(at, open);
+    at = close + 8;
+  }
 }
 
 /**
@@ -196,11 +278,18 @@ function objectsIn(text: string): string[] {
  * that parses to an object with files in it. Null when there is none.
  */
 export function planFromReply(reply: string): unknown {
-  const text = reply.replace(/<think>[\s\S]*?<\/think>/g, "");
-  const blocks = [...text.matchAll(/```(?:json|JSON)?[^\n]*\n([\s\S]*?)```/g)].map((match) => match[1]!);
-  const candidates = [...blocks.toReversed(), ...objectsIn(text).toReversed()];
+  const text = withoutThinking(reply);
+  // The fence's info string stops at a backtick, so a run of backticks with no new line can't make it backtrack.
+  const blocks = [...text.matchAll(/```(?:json|JSON)?[^\n`]*\n([\s\S]*?)```/g)].map((match) => match[1]!);
+  // Only text that names the files can hold a plan; the rest isn't worth parsing.
+  const names = /"(?:nodes|files)"/;
+  const candidates = [...blocks.toReversed(), ...objectsIn(text, names).toReversed()];
+  // A failed parse is slow (it builds an error), so only so many are tried: a reply has a plan or two, not thousands.
+  let tries = MAX_PARSE_TRIES;
   for (const candidate of candidates) {
-    for (const body of [candidate, ...objectsIn(candidate)]) {
+    if (!names.test(candidate)) continue;
+    for (const body of [candidate, ...objectsIn(candidate, names)]) {
+      if (tries-- === 0) return null;
       try {
         const parsed: unknown = JSON.parse(body.trim());
         if (parsed && typeof parsed === "object" && ("nodes" in parsed || "files" in parsed)) return parsed;
@@ -293,6 +382,19 @@ export function reviewable(project: CodingProject): CodingCard[] {
 /** The `format` value of a plan file written by the app's Export. */
 export const PLAN_FILE_FORMAT = "freebird-coding-plan";
 
+/** The most a plan brought in may be, in bytes (UTF-8): the largest valid plan is a small fraction of it. */
+export const MAX_PLAN_BYTES = 1024 * 1024;
+
+/** The size in bytes of what was handed in: text as UTF-8, anything else as the JSON it came as. */
+function sizeOf(input: unknown): number {
+  if (typeof input === "string") return Buffer.byteLength(input, "utf8");
+  try {
+    return Buffer.byteLength(JSON.stringify(input) ?? "", "utf8");
+  } catch {
+    return 0;
+  }
+}
+
 export interface ReadPlan {
   /** Handed to `validatePlan`. */
   plan: unknown;
@@ -306,6 +408,11 @@ export interface ReadPlan {
  * be found; a plan file of a version this app doesn't know is an error with a message.
  */
 export function readPlanInput(input: unknown): ReadPlan | { error: string } | null {
+  const bytes = sizeOf(input);
+  if (bytes > MAX_PLAN_BYTES)
+    return {
+      error: `That is ${(bytes / MAX_PLAN_BYTES).toFixed(1)} MB; a plan can be at most 1 MB. A plan lists the files and what each one is for, not their code: send just the plan file, or the reply with the plan in it.`,
+    };
   let value: unknown = input;
   if (typeof value === "string") {
     const text = value.trim();

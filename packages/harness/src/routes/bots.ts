@@ -2,10 +2,16 @@ import type { FastifyInstance } from "fastify";
 
 import { BotId, CreateBotInput, UpdateBotInput, type Bot } from "@mrog/shared";
 
+import { MAX_CODING_NAME } from "../coding";
+import { MAX_CLIENT_NAME } from "../clients/team";
+import { MAX_JOB_NAME } from "../jobs/team";
 import { fail, parse } from "../http";
 import type { Services } from "../services";
 
-export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation, agent, coding }: Services) {
+export function registerBotRoutes(
+  app: FastifyInstance,
+  { store, bus, delegation, agent, coding, jobs, clients }: Services,
+) {
   /** Making a bot primary demotes the old one; tell the UI about both. */
   const publishDemotedPrimary = (previous: Bot | undefined, current: Bot) => {
     if (!previous || previous.id === current.id || !current.isPrimary) return;
@@ -33,6 +39,52 @@ export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation
     if (!id) return reply;
     const patch = parse(UpdateBotInput, request.body, reply);
     if (!patch) return reply;
+    const current = store.bots.get(id);
+    // A Coding Bot's role bots are named after it, and its name must leave room for theirs.
+    if (current && patch.name !== undefined && patch.name !== current.name) {
+      if (coding.isRoleBot(current))
+        return fail(
+          reply,
+          409,
+          "team_member",
+          "This bot is part of a Coding Bot's team and is named after it: rename the Coding Bot instead.",
+        );
+      if (current.coding && patch.name.trim().length > MAX_CODING_NAME)
+        return fail(
+          reply,
+          409,
+          "name_too_long",
+          `A Coding Bot's name can be up to ${MAX_CODING_NAME} characters: its team's bots are named after it.`,
+        );
+      if (jobs.isRoleBot(current))
+        return fail(
+          reply,
+          409,
+          "team_member",
+          "This bot is part of a Job Bot's team and is named after it: rename the Job Bot instead.",
+        );
+      if (current.job && patch.name.trim().length > MAX_JOB_NAME)
+        return fail(
+          reply,
+          409,
+          "name_too_long",
+          `A Job Bot's name can be up to ${MAX_JOB_NAME} characters: its team's bots are named after it.`,
+        );
+      if (clients.isRoleBot(current))
+        return fail(
+          reply,
+          409,
+          "team_member",
+          "This bot is part of a Client Bot's team and is named after it: rename the Client Bot instead.",
+        );
+      if (current.client && patch.name.trim().length > MAX_CLIENT_NAME)
+        return fail(
+          reply,
+          409,
+          "name_too_long",
+          `A Client Bot's name can be up to ${MAX_CLIENT_NAME} characters: its team's bots are named after it.`,
+        );
+    }
     const previous = currentPrimary();
     const bot = store.bots.update(id, patch);
     if (!bot) return fail(reply, 404, "not_found", "No bot has this id.");
@@ -58,6 +110,10 @@ export function registerBotRoutes(app: FastifyInstance, { store, bus, delegation
     // A Coding Bot's team goes with the Coding Bot, never alone.
     if (!bot.coding && coding.isTeamBot(bot))
       return fail(reply, 409, "team_member", "Delete the Coding Bot instead: this bot is part of its team.");
+    if (!bot.job && jobs.isTeamBot(bot))
+      return fail(reply, 409, "team_member", "Delete the Job Bot instead: this bot is part of its team.");
+    if (!bot.client && clients.isTeamBot(bot))
+      return fail(reply, 409, "team_member", "Delete the Client Bot instead: this bot is part of its team.");
     // Its temporary helpers go with it.
     for (const helper of store.bots.list())
       if (helper.parentId === id && helper.temporary) delegation.removeBot(helper);

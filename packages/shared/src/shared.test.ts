@@ -6,12 +6,15 @@ import {
   compareBots,
   CreateBotInput,
   DEFAULT_BOT_TOOLS,
+  DEFAULT_RUNTIME_SETTINGS,
   HarnessEvent,
   MAX_IMAGE_BYTES,
+  MessagePart,
   newId,
   nextRun,
   repeatsAction,
   restrictsTools,
+  RuntimeSettings,
   SecretName,
   SendMessageInput,
   setToolEnabled,
@@ -37,6 +40,8 @@ const bot = (over: Partial<Bot>): Bot => ({
   temporary: false,
   visual: false,
   coding: false,
+  job: false,
+  client: false,
   clusterId: null,
   tools: DEFAULT_BOT_TOOLS,
   threadId: newId("thr"),
@@ -125,6 +130,29 @@ describe("replies that must not be repeated", () => {
     expect(repeatsAction({ parts: [part({ outward: false }), part({})] })).toBe(false);
     expect(repeatsAction({ parts: [{ type: "error", code: "stalled", message: "x" }] })).toBe(false);
     expect(repeatsAction({ parts: [] })).toBe(false);
+  });
+});
+
+describe("runtime settings for Parallel Bots with tools", () => {
+  it("fills in lanes and steps for settings saved before they existed", () => {
+    const { parallelLanes, parallelSteps, ...old } = DEFAULT_RUNTIME_SETTINGS;
+    expect(parallelLanes).toBe(3);
+    expect(parallelSteps).toBe(6);
+    expect(RuntimeSettings.parse(old)).toMatchObject({ parallelLanes: 3, parallelSteps: 6 });
+    const { parallelSeparateOnCloud, ...older } = DEFAULT_RUNTIME_SETTINGS;
+    expect(parallelSeparateOnCloud).toBe(true);
+    expect(RuntimeSettings.parse(older).parallelSeparateOnCloud).toBe(true);
+  });
+
+  it("keeps lanes between 1 and 3 and steps between 1 and 10", () => {
+    expect(RuntimeSettings.safeParse({ ...DEFAULT_RUNTIME_SETTINGS, parallelLanes: 4 }).success).toBe(false);
+    expect(RuntimeSettings.safeParse({ ...DEFAULT_RUNTIME_SETTINGS, parallelSteps: 11 }).success).toBe(false);
+    expect(RuntimeSettings.safeParse({ ...DEFAULT_RUNTIME_SETTINGS, parallelSteps: 8 }).success).toBe(true);
+  });
+
+  it("rejects a part in a lane that doesn't exist", () => {
+    expect(MessagePart.safeParse({ type: "text", text: "x", lane: 3 }).success).toBe(true);
+    expect(MessagePart.safeParse({ type: "text", text: "x", lane: 4 }).success).toBe(false);
   });
 });
 

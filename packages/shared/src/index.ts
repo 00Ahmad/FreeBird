@@ -16,4 +16,6 @@ export * from "./library";
 export * from "./discussion";
 export * from "./race";
 export * from "./coding";
+export * from "./jobs";
+export * from "./clients";
 export * from "./parallel";

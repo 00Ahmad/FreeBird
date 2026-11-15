@@ -178,6 +178,28 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services) {
     if (!thread) return fail(reply, 404, "not_found", "No thread has this id.");
     if (thread.kind !== "group")
       return fail(reply, 400, "invalid_request", "Only group chats can be changed here.");
+    // The Coding Bot hands its roles their work in exactly this thread: other members would break the loop.
+    if (input.memberIds && services.coding.isTeamThread(thread))
+      return fail(
+        reply,
+        409,
+        "team_thread",
+        "This is a Coding Bot's conversation with one of its team: its members can't be changed.",
+      );
+    if (input.memberIds && services.jobs.isTeamThread(thread))
+      return fail(
+        reply,
+        409,
+        "team_thread",
+        "This is a Job Bot's conversation with one of its team: its members can't be changed.",
+      );
+    if (input.memberIds && services.clients.isTeamThread(thread))
+      return fail(
+        reply,
+        409,
+        "team_thread",
+        "This is a Client Bot's conversation with one of its team: its members can't be changed.",
+      );
     const memberIds = input.memberIds && groupMembers(input.memberIds, reply);
     if (input.memberIds && !memberIds) return reply;
     const updated = store.threads.update(id, { ...input, memberIds })!;
@@ -192,6 +214,27 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services) {
     if (!thread) return fail(reply, 404, "not_found", "No thread has this id.");
     if (thread.kind !== "group")
       return fail(reply, 400, "invalid_request", "Delete the bot to remove its chat.");
+    if (services.coding.isTeamThread(thread))
+      return fail(
+        reply,
+        409,
+        "team_thread",
+        "This is a Coding Bot's conversation with one of its team: it goes when you delete the Coding Bot.",
+      );
+    if (services.jobs.isTeamThread(thread))
+      return fail(
+        reply,
+        409,
+        "team_thread",
+        "This is a Job Bot's conversation with one of its team: it goes when you delete the Job Bot.",
+      );
+    if (services.clients.isTeamThread(thread))
+      return fail(
+        reply,
+        409,
+        "team_thread",
+        "This is a Client Bot's conversation with one of its team: it goes when you delete the Client Bot.",
+      );
     turns.stop(id);
     store.threads.delete(id);
     bus.publish({ type: "thread.deleted", threadId: id });
@@ -316,6 +359,34 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services) {
     const botId = botParam(request.params.id, reply);
     if (!botId) return reply;
     const source = store.bots.get(botId)!;
+    // A copy would have the name and look but none of the team, the project or the output folder.
+    if (services.coding.isTeamBot(source))
+      return fail(
+        reply,
+        409,
+        "team_member",
+        source.coding
+          ? "A Coding Bot can't be duplicated: make a new Coding Bot instead."
+          : "This bot is part of a Coding Bot's team and can't be duplicated.",
+      );
+    if (services.jobs.isTeamBot(source))
+      return fail(
+        reply,
+        409,
+        "team_member",
+        source.job
+          ? "A Job Bot can't be duplicated: make a new Job Bot instead."
+          : "This bot is part of a Job Bot's team and can't be duplicated.",
+      );
+    if (services.clients.isTeamBot(source))
+      return fail(
+        reply,
+        409,
+        "team_member",
+        source.client
+          ? "A Client Bot can't be duplicated: make a new Client Bot instead."
+          : "This bot is part of a Client Bot's team and can't be duplicated.",
+      );
     const copy = store.bots.create({
       name: `${source.name} copy`.slice(0, 60),
       label: source.label,

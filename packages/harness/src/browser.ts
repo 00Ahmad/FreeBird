@@ -470,6 +470,11 @@ const clickDot = (x: number, y: number) => `(() => {
 })()`;
 
 /** Results of a search in the page: Bing's or DuckDuckGo's. */
+/** In-page: the page's links and their words, absolute http(s) addresses only. */
+const LINKS_SCRIPT = `(() => [...document.querySelectorAll("a[href]")].slice(0, 500)
+  .map((a) => ({ text: (a.innerText || a.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 120), url: a.href }))
+  .filter((link) => /^https?:/.test(link.url)))()`;
+
 const RESULTS_SCRIPT = `(() => {
   const clean = (value) => (value || "").replace(/\\s+/g, " ").trim();
   const ddg = [...document.querySelectorAll('article[data-testid="result"]')].map((result) => {
@@ -491,7 +496,7 @@ const RESULTS_SCRIPT = `(() => {
   return [...ddg, ...bing].filter((r) => r.title && /^https?:/.test(r.url) && !/duckduckgo\\.com\\/y\\.js|bing\\.com\\/aclick/.test(r.url));
 })()`;
 
-interface SearchResult {
+export interface SearchResult {
   title: string;
   url: string;
   snippet: string;
@@ -682,6 +687,19 @@ export class BrowserManager {
     this.changeTimer.unref();
   }
 
+  /**
+   * A Parallel Bots role that searches has its own tab, so three searches at once don't fight over one: the tab is
+   * keyed "<bot>#<role number>" and lives in the bot's own profile like its other tab.
+   */
+  static laneTab(botId: string, lane: number): string {
+    return `${botId}#${lane}`;
+  }
+
+  /** The bot a tab belongs to (a role's tab key is the bot's id and the role). */
+  private ownerOf(tab: string): string {
+    return tab.split("#")[0]!;
+  }
+
   async status(): Promise<BrowserStatus> {
     const names = new Map(this.services.store.bots.list().map((bot) => [bot.id, bot.name]));
     const tabs: BrowserTab[] = [];
@@ -689,7 +707,7 @@ export class BrowserManager {
       if (page.isClosed()) continue;
       tabs.push({
         botId,
-        botName: names.get(botId) ?? "?",
+        botName: names.get(this.ownerOf(botId)) ?? "?",
         url: page.url(),
         title: await page.title().catch(() => ""),
       });
@@ -706,6 +724,7 @@ export class BrowserManager {
    */
   profileKey(botId: string): string {
     if (this.settings().profiles === "shared") return SHARED_PROFILE;
+    botId = this.ownerOf(botId);
     let bot = this.services.store.bots.get(botId);
     for (let depth = 0; bot?.parentId && depth < 10; depth++) {
       const parent = this.services.store.bots.get(bot.parentId);
@@ -877,6 +896,7 @@ export class BrowserManager {
    */
   async forget(botId: string): Promise<void> {
     this.gone.add(botId);
+    for (const tab of this.pages.keys()) if (tab.startsWith(`${botId}#`)) await this.closeTab(tab);
     await this.closeTab(botId);
     await this.forgetProfile(botId);
   }
@@ -1003,7 +1023,7 @@ export class BrowserManager {
    * "Next" lands on the other bot's "Place order".
    */
   private page(botId: string): Promise<Page> {
-    if (this.gone.has(botId)) return Promise.reject(new Error("This bot was deleted."));
+    if (this.gone.has(this.ownerOf(botId))) return Promise.reject(new Error("This bot was deleted."));
     const existing = this.openTabOf(botId);
     if (existing) return Promise.resolve(existing);
     const key = this.profileKey(botId);
@@ -1021,12 +1041,12 @@ export class BrowserManager {
 
   /** A persistent profile starts with one blank tab: reuse it if no other bot has it. */
   private async openTab(botId: string, key: string): Promise<Page> {
-    if (this.gone.has(botId)) throw new Error("This bot was deleted.");
+    if (this.gone.has(this.ownerOf(botId))) throw new Error("This bot was deleted.");
     // Opened by an earlier call in the line.
     const existing = this.openTabOf(botId);
     if (existing) return existing;
     const context = await this.ensureContext(key);
-    if (this.gone.has(botId)) throw new Error("This bot was deleted.");
+    if (this.gone.has(this.ownerOf(botId))) throw new Error("This bot was deleted.");
     const taken = new Set(this.pages.values());
     const blank = context.pages().find((page) => !taken.has(page) && page.url() === "about:blank");
     const page = blank ?? (await context.newPage());
@@ -1291,7 +1311,36 @@ export class BrowserManager {
   }
 
   /** web_search: in the bot's own tab like a person would, or through a search API if one is set up. */
-  async search(botId: string, query: string, signal: AbortSignal): Promise<string> {
+  async search(botId: string, query: string, signal: AbortSignal, tab = botId): Promise<string> {
+    const found = await this.searchResults(botId, query, signal, tab);
+    if (found) return formatResults(query, found);
+    const settings = this.settings();
+    const snapshot = await this.snapshot(tab);
+    // A role working on its own has no handoff to ask for: the human check is reported as a plain failure.
+    if (snapshot.humanCheck && tab !== botId)
+      throw new Error(
+        "The search engine wants a human check, so this search couldn't be done. Answer from what you already have, or open a page you know with fetch_url.",
+      );
+    if (snapshot.humanCheck)
+      return `The search engine wants a human check.
+
+${formatSnapshot(snapshot)}`;
+    return settings.show
+      ? `The search engines gave no results for "${query}". Try other words, or open a site you know and use its own search.`
+      : `The search engines gave no results or unrelated ones for "${query}". They often do that for a hidden browser: tell the user to turn on “Show the browser window” or set up a search API in Settings → Browser.`;
+  }
+
+  /**
+   * A web search as a list of results: from the search API picked in Settings, or from Bing then DuckDuckGo in the
+   * tab. Null when the engines in the tab gave nothing related (often a hidden browser, or a human check: the tab
+   * shows which).
+   */
+  async searchResults(
+    botId: string,
+    query: string,
+    signal: AbortSignal,
+    tab = botId,
+  ): Promise<SearchResult[] | null> {
     const settings = this.settings();
     if (settings.search === "brave") {
       const key = settings.braveSecret ? this.services.vault.get(settings.braveSecret) : null;
@@ -1309,7 +1358,7 @@ export class BrowserManager {
         url: r.url,
         snippet: (r.description ?? "").replace(/<[^>]+>/g, ""),
       }));
-      return formatResults(query, results);
+      return results;
     }
     if (settings.search === "searxng") {
       if (!settings.searxngUrl)
@@ -1326,9 +1375,9 @@ export class BrowserManager {
         url: r.url,
         snippet: r.content ?? "",
       }));
-      return formatResults(query, results);
+      return results;
     }
-    const page = await this.page(botId);
+    const page = await this.page(tab);
     for (const url of [
       `https://www.bing.com/search?q=${encodeURIComponent(query)}`,
       `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
@@ -1338,14 +1387,18 @@ export class BrowserManager {
       const results = (await page.evaluate(RESULTS_SCRIPT)) as SearchResult[];
       if (relevant(query, results)) {
         this.changed();
-        return formatResults(query, results);
+        return results;
       }
     }
-    const snapshot = await this.snapshot(botId);
-    if (snapshot.humanCheck) return `The search engine wants a human check.\n\n${formatSnapshot(snapshot)}`;
-    return settings.show
-      ? `The search engines gave no results for "${query}". Try other words, or open a site you know and use its own search.`
-      : `The search engines gave no results or unrelated ones for "${query}". They often do that for a hidden browser: tell the user to turn on “Show the browser window” or set up a search API in Settings → Browser.`;
+    return null;
+  }
+
+  /** The links on the page in a bot's tab, with their words: absolute http(s) addresses only, at most 500. */
+  async links(botId: string): Promise<{ text: string; url: string }[]> {
+    const page = this.pages.get(botId);
+    if (!page || page.isClosed()) return [];
+    const found = await page.evaluate(LINKS_SCRIPT).catch(() => []);
+    return Array.isArray(found) ? (found as { text: string; url: string }[]) : [];
   }
 
   /** How to use the web like a person, for bots that have the browser. */
@@ -1370,7 +1423,7 @@ export class BrowserManager {
   }
 
   /** Browser tools for a bot. Every action returns what the page looks like afterwards. */
-  tools(bot: Bot): ToolSpec[] {
+  tools(bot: Bot, tab?: string): ToolSpec[] {
     if (!this.settings().enabled) return [];
     const id = bot.id;
     const label = (ref: number) => this.seen.get(id)?.get(ref)?.label || `element ${ref}`;
@@ -1386,7 +1439,7 @@ export class BrowserManager {
           "Search the web, like typing into a search engine. Start here to find the right site or page instead of guessing addresses.",
         args: z.object({ query: z.string().trim().min(1).max(300) }),
         risk: (args) => safe(`Search the web for “${args.query}”`),
-        run: (args, ctx) => this.search(id, args.query, ctx.signal),
+        run: (args, ctx) => this.search(id, args.query, ctx.signal, tab),
       }),
       defineTool({
         name: "browser_open",
@@ -1502,7 +1555,7 @@ export class BrowserManager {
             }),
           ]
         : []),
-    ].map((spec) => this.guarded(id, spec));
+    ].map((spec) => this.guarded(tab ?? id, spec));
   }
 
   /**

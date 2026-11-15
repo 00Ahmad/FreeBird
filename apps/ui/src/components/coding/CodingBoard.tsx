@@ -32,12 +32,13 @@ export function CodingBoard({
 }) {
   const board = useMemo(() => buildBoard(project), [project]);
 
-  // A card picked in the diagram or the checklist is brought into view here.
+  // A card picked in the diagram or the checklist is brought into view here: when the pick changes (or the board
+  // opens with one), not on every update of the project, which would pull the board back while you scroll it.
+  const pickedId = project.cards.find((card) => card.ref === selectedRef)?.id ?? null;
   useEffect(() => {
-    const picked = project.cards.find((card) => card.ref === selectedRef);
-    if (picked)
-      document.getElementById(cardDomId(picked.id))?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [selectedRef, project.cards]);
+    if (pickedId)
+      document.getElementById(cardDomId(pickedId))?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [pickedId]);
 
   if (project.cards.length === 0) {
     return <p className="p-6 text-center text-[13px] text-ink-3">{emptyPlanText(project.status, "board")}</p>;

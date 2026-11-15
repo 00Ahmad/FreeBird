@@ -97,6 +97,21 @@ describe("progress", () => {
     expect(roundFailures({ cards, round: 0, status: "qa" })).toBe(1);
   });
 
+  it("counts only failures, not passes or cards back in QA", () => {
+    const kinded = (kind: "fail" | "pass" | "requeue" | "check", round: number) => ({
+      ...comment("qa", kind, undefined, round),
+      kind,
+    });
+    const board = [
+      fileCard("a", "done", [kinded("pass", 2)]),
+      fileCard("b", "qa", [kinded("pass", 1), kinded("requeue", 2)]),
+      fileCard("c", "todo", [kinded("fail", 2)]),
+      fileCard("d", "todo", [kinded("check", 2)]),
+    ];
+    expect(roundFailures({ cards: board, round: 2, status: "developing" })).toBe(2);
+    expect(roundFailures({ cards: board.slice(0, 2), round: 1, status: "qa" })).toBe(0);
+  });
+
   it("words the round with its failures", () => {
     const base = { maxRounds: 5, cards };
     expect(roundSummary({ ...base, round: 2, status: "developing" })).toBe(

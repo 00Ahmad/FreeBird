@@ -6,6 +6,9 @@ Everything FreeBird can do, by area. New here? Start with [Getting started](gett
 - [Group chats](#group-chats)
 - [Coordinators and helpers](#coordinators-and-helpers)
 - [Races and Clusters](#races-and-clusters)
+- [Coding Bot](#coding-bot)
+- [Job Bot](#job-bot)
+- [Client Bot](#client-bot)
 - [Parallel Bots](#parallel-bots)
 - [Tools and approvals](#tools-and-approvals)
 - [The bots' web browser](#the-bots-web-browser)
@@ -86,15 +89,27 @@ They have their own page: [Races & Clusters](races-and-clusters.md).
 
 **+ → New Coding Bot** makes a bot that is really a team of three roles (Planner, Developer, QA), each on its own model, building a project in an output folder you choose. The Planner draws the files and connections, you approve the plan, the Developer writes it card by card, and QA checks every file and connection until it all passes or the round limit is reached. A panel beside the chat shows the **Diagram**, the **Board** and a **Checklist**, and you can export the plan or import one. See the [Coding Bot guide](coding-bot.md).
 
+## Job Bot
+
+**+ → New Job Bot** makes a bot that finds jobs that fit you. It interviews you about the job you want and fills in a profile you approve. Then, only when you ask, it scans: it asks how many new jobs to find, searches, reads each page and checks every fact against the posting, so a detail it can't find there shows as "Not stated" instead of a guess. Jobs land on a board with a match score explained line by line and any warning signs. Pages that need a browser are opened in its own tab, the Visual helper is the fallback for the hardest ones, and a CAPTCHA or sign-in is handed to you. See the [Job Bot guide](job-bot.md).
+
+## Client Bot
+
+**+ → New Client Bot** makes a bot that finds businesses that may need what you sell: payroll, marketing, software development or any other service. It interviews you about your offer and your ideal client and fills in a profile you approve. Then, only when you ask, it scans: it asks how many new leads to find and which kinds. It looks for tenders and "seeking a provider" posts, for businesses showing signs they may need you (hiring for the work you do, opening a new site), and, from official UK registers, for good fits that have never posted anything. It never searches for your service by name, which would find your competitors. Every fact and every sign must be quoted from the page or record it came from. Each lead shows why now, why you and how to reach the business, with company-level contact routes only. Your clients, competitors and do-not-contact list are never shown, quiet fits are re-checked for new signs on each scan you start, and nothing is ever sent for you. See the [Client Bot guide](client-bot.md).
+
 ## Parallel Bots
 
-One question, three answers, **one request**. In a chat with one bot, switch on **Parallel Bots** with the columns button next to the message box, then ask as usual. FreeBird adds a short instruction to your message and sends it to the model once. The model picks three roles that fit _that_ question (say a cost analyst, a security engineer and a skeptic) and answers as each of them in a single reply, which FreeBird shows as three cards that fill in as the reply is written.
+One question, three answers from three roles. In a chat with one bot, switch on **Parallel Bots** with the columns button next to the message box, then ask as usual. The model picks three roles that fit _that_ question (say a cost analyst, a security engineer and a skeptic) and answers as each of them, shown as three cards that fill in as the answers are written. How the answers are asked for depends on where the model runs:
 
-- **One request, not three at once.** The reply is written one section after another. What you save is the overhead: the model reads the chat and the bot's instructions once, the request takes one place in the queue instead of three, no second model loads and memory stays at one slot. It works with **Bots at once** set to 1, on any GPU.
+- **Local model (Ollama and other local runtimes): one request.** FreeBird adds a short instruction to your message and sends it once; the single reply has three sections, which become the three cards.
+- **Cloud model (ChatGPT, Claude, Gemini and the others): three requests at the same time.** One short request picks the three roles, then each role is asked in its own request, all at once, so the three cards fill in side by side and a role can't echo another. This uses about three times the input tokens (each request reads the chat and the bot's instructions). To use the single request on cloud models too, switch off **Settings → Local model → Parallel Bots on cloud models: ask each role separately**.
+
+- **Why one request on a local model** (without Allow tools). The reply is written one section after another. What you save is the overhead: the model reads the chat and the bot's instructions once, the request takes one place in the queue instead of three, no second model loads and memory stays at one slot. It works with **Bots at once** set to 1, on any GPU.
 - **New roles every time.** The model chooses them from your question, so there is nothing to set up. The bot's own name, instructions and memory still apply.
-- **No tools.** In this mode a bot doesn't browse, touch files, run commands or create helpers: it answers from what the model knows and what you wrote. Switch it off for a question that needs tools.
-- **The sections aren't independent.** Later ones are written after the earlier ones, so the roles can influence each other, and a small model sometimes writes fewer than three sections. A reply that didn't come out in sections is shown as written, with a note: send your question again for a fresh reply. (If a reply fails or stalls, **Try again** keeps the mode.)
+- **No tools unless you allow them.** Without **Allow tools** (below) a bot doesn't browse, touch files, run commands or create helpers in this mode: it answers from what the model knows and what you wrote. With it, each role may search and open pages, nothing more.
+- **In one request the sections aren't independent.** Later ones are written after the earlier ones, so the roles can influence each other, and a small model sometimes writes fewer than three sections. A reply that didn't come out in sections is shown as written, with a note: send your question again for a fresh reply. With separate requests (cloud models, or Allow tools) each role is on its own, and each card shows **Done**, **No answer** or **Failed** as soon as its role finishes. (If a reply fails or stalls, **Try again** keeps the mode.)
 - **One bot only.** It isn't offered in group chats, clusters or races.
+- **Allow tools.** With Parallel Bots on, switch on **Allow tools** to let each role search the web and open pages. Then the three roles each run as **their own conversation, at the same time**: a role's searches, the pages it reads and its answer never reach the other two, and each card shows that role's own searches, step count ("step 3 of 6"), sources and answer, with Done, No answer or Failed as soon as that role finishes. It takes more requests than one (a short one to choose the roles, then each role's own), so it is slower, but searches really overlap. The roles share one place in the model queue and write up to three at once on the same model (**Settings → Local model → Parallel Bots: roles writing at once**, default 3); **Bots at once** isn't changed, so Races still run one at a time. Each role takes at most **Parallel Bots: steps per role** searches and page reads (default 6, up to 10). Only web search and page fetching are used, and only if the bot is allowed them; a Visual Bot can't use it. For three roles writing at once, Ollama needs `OLLAMA_NUM_PARALLEL` set to 3 and a context small enough for three; if the model doesn't fit on the GPU, the reply starts with a note saying so.
 - **What is saved.** Your question and the reply are saved as written (your message gets a small **Parallel Bots** mark); the instruction isn't. The next message you send with the switch off is answered the ordinary way. A long chat isn't summarised first in this mode, since that would be a second request: the model keeps the newest messages that fit.
 
 To see how a model does with it, run the eval on a 9B model, and later on larger ones: `pnpm --filter @mrog/harness exec tsx evals/parallel.eval.ts qwen3.5:9b` (see [Development](development.md#evals)).
@@ -218,15 +233,15 @@ Store **logins, cards and contact info** in your operating system's keychain (**
 
 ## Settings at a glance
 
-| Page                   | What's there                                                                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| **General**            | Commands policy, Custom Rules, steps per reply, plan checklist, self-check                                                      |
-| **Local model**        | Shared model, loaded models and memory use, context size, keep loaded, bots at once, thinking, download a model, Ollama address |
-| **Models & Providers** | Add, test, enable and remove providers; keys go to your keychain                                                                |
-| **Computer**           | Docker desktops for bots                                                                                                        |
-| **Browser & search**   | The bots' browser and the search engine                                                                                         |
-| **Routines**           | Weekly calendar of every routine                                                                                                |
-| **Connect apps**       | MCP servers and their tools                                                                                                     |
-| **Vault**              | Logins, cards, contact info, CSV import                                                                                         |
-| **Voice**              | Dictation endpoint                                                                                                              |
-| **Usage**              | Tokens per bot                                                                                                                  |
+| Page                   | What's there                                                                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **General**            | Commands policy, Custom Rules, steps per reply, plan checklist, self-check                                                                                                                                                            |
+| **Local model**        | Shared model, loaded models and memory use, context size, keep loaded, bots at once, Parallel Bots roles writing at once, steps per role, and asking each role separately on cloud models, thinking, download a model, Ollama address |
+| **Models & Providers** | Add, test, enable and remove providers; keys go to your keychain                                                                                                                                                                      |
+| **Computer**           | Docker desktops for bots                                                                                                                                                                                                              |
+| **Browser & search**   | The bots' browser and the search engine                                                                                                                                                                                               |
+| **Routines**           | Weekly calendar of every routine                                                                                                                                                                                                      |
+| **Connect apps**       | MCP servers and their tools                                                                                                                                                                                                           |
+| **Vault**              | Logins, cards, contact info, CSV import                                                                                                                                                                                               |
+| **Voice**              | Dictation endpoint                                                                                                                                                                                                                    |
+| **Usage**              | Tokens per bot                                                                                                                                                                                                                        |

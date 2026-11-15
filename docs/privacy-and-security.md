@@ -26,7 +26,7 @@ The interface talks to a local server (the "harness") that holds all data, model
 
 - It listens on **127.0.0.1 only**, never on your network.
 - It rejects requests addressed to any host name other than loopback, which stops malicious web pages from reaching it through DNS rebinding.
-- Every API call needs a **random token created at each launch**, which only the app's own window can read. Only `/api/health` is public.
+- Every API call needs a **random token created at each launch**, which only the app's own window can read. Commands that bots run never get it (nor any of FreeBird's own settings from its environment), so code a command runs can't call the app. Only `/api/health` is public.
 - The desktop window can't navigate away from the app; links open in your normal browser.
 - The packaged app serves its interface with a strict Content Security Policy.
 
@@ -46,7 +46,7 @@ Risky actions stop at an **approval card** that shows exactly what will happen, 
 | Creating a helper on the shared model                                              | Allowed                                        |
 | Creating a helper on a different model (may cost money)                            | Asks                                           |
 
-You decide globally in **Settings → General → Execution on this computer** (ask, always allow, or never allow commands), and with **Custom Rules**. "Always allow" on a card saves a rule for that exact action only (the identical call, so allowing `Fetch http://192.168.1.1` doesn't allow `http://192.168.1.10`), never for the whole tool. Rules you type yourself in Custom Rules still match everything that starts with the text you give. Racers and the race judge work on their own, so a call of theirs that needs approval is refused at once instead of waiting for a card nobody can see. Group chats can't show cards, so actions that need approval simply aren't available there.
+You decide globally in **Settings → General → Execution on this computer** (ask, always allow, or never allow commands), and with **Custom Rules**. "Always allow" on a card saves a rule for that exact action only (the identical call, so allowing `Fetch http://192.168.1.1` doesn't allow `http://192.168.1.10`), never for the whole tool. Rules you type yourself in Custom Rules still match everything that starts with the text you give, except for terminal commands: there a rule only covers the command itself, so a rule for `npm` doesn't let `npm i; Remove-Item …` or a command with `|`, `&`, `;`, `$(`, redirects or `iex` through. Racers and the race judge work on their own, so a call of theirs that needs approval is refused at once instead of waiting for a card nobody can see. Group chats can't show cards, so actions that need approval simply aren't available there.
 
 ## Secrets never reach the model
 
@@ -57,10 +57,13 @@ You decide globally in **Settings → General → Execution on this computer** (
 - **App sign-ins** (OAuth with PKCE): you sign in on the app's own page in your browser; FreeBird never sees your password there. Each sign-in link works once and for 10 minutes. The tokens are tied to the app's address and are never sent to another server, even if you change the address. Sign-ins and Vault entries (`MCP_OAUTH_…`, `VAULT_ITEM_…`) are never handed to a command, and a bot can't ask you to type into one.
 - **Web sign-ins** (`browser_sign_in`): the app types a vault login into the page itself, only on the login's own site and only over HTTPS. The password never appears in what the model sees, including page snapshots.
 - **Pictures are covered too.** Card number, security code and password fields (including a "show password" box that has turned into plain text) are blacked out in every screenshot a bot receives and never appear in the list of page elements, so a card you type during a handoff isn't visible to the model afterwards.
+- **Keys found on your computer** (environment variables such as `OPENAI_API_KEY`) are offered in Settings → Models & Providers by name only; the screen never receives the key, and it is copied into the keychain only when you press **Add**.
 - **A secret can be at most 1,280 characters** (the Windows keychain's limit, applied everywhere so it behaves the same on every system). A longer value gets a clear error; connected-app sign-ins, which can be longer, are stored in pieces.
 - **Images in chat load on request.** A picture a bot's reply points to on the web isn't fetched until you press **Load image**, because the address itself could carry your text to someone else's server.
 - Keys typed for a server that takes none (LM Studio, another computer on your network) are ignored, never stored and never sent.
-- **A Coding Bot writes only inside its output folder** without asking, and the folder can't be a drive root, your home folder, FreeBird's data folder or another bot's folder. Running commands always asks. Deleting a Coding Bot never deletes the output folder. An imported plan is checked like the Planner's own (relative paths only, no `..`), and you approve it before anything is written.
+- **A Coding Bot writes only the files of its plan, inside its output folder**, without asking. Anything else (helper scripts, `.git`, `node_modules`, editor settings that run commands) is refused, and its roles can't read `.env` files or private keys. The folder can't be a drive root, your home folder, FreeBird's data folder, another bot's folder or a network path. Its commands **always ask**, whatever the global command setting (unless that is set to never allow). Deleting a Coding Bot never deletes the output folder. An imported plan is checked like the Planner's own (relative paths only, no `..`, no protected files), and you approve it before anything is written unless auto-approve is on.
+- **A Job Bot keeps your job profile, its board and your reactions on this computer.** It searches only when you start a scan. Its roles have one tool each and no access to files, commands or your sign-ins; the pages it reads are treated as data, and every fact it shows must be quoted from the page it read. It never applies, sends or signs in for you: a CAPTCHA or sign-in is handed to you, and its Visual helper never types or submits anything.
+- **A Client Bot keeps your client profile, your lists (clients, competitors, do-not-contact), its leads and your notes on this computer.** It searches only when you start a scan. Contact routes are found by the app on the pages it reads and are company-level only (a contact page, a shared business inbox, the main phone line): it never guesses or looks up a person's email, and leaves out personal-looking addresses and mobile numbers. It never sends anything. A Companies House API key is kept in the system keychain and never reaches a model. It doesn't read LinkedIn, Facebook or marketplaces.
 - Bots never type passwords or card numbers themselves: sign-ins, human checks and payments are handed to you (`browser_handoff`).
 - Saved logins match their exact site by default; subdomains only when you allow it.
 
@@ -94,5 +97,3 @@ We'd rather you know these than discover them:
 - The browser's local-network guard checks page loads and the page's own requests, but not images, scripts, or a popup's very first request.
 - Visual Bots judge a click by the control at that spot on the page. Inside an embedded frame from another site (a video, a payment form) nothing can be read, so such clicks always ask first.
 - Models can be tricked by text on web pages ("prompt injection"). Approval cards are your safety net: read them before you allow.
-
-See the [roadmap](roadmap.md) for planned improvements.

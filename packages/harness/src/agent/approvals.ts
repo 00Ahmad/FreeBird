@@ -64,6 +64,11 @@ export class ApprovalBroker {
   private readonly pending = new Map<string, Pending>();
   /** How long a card waits for an answer (tests shorten it). */
   timeoutMs: number;
+  /**
+   * Bots whose commands always show a card (the Coding Bot's roles, which work in the user's own project folder):
+   * for them neither "Always allow commands" nor a saved rule runs a command unseen. "Never" still refuses it.
+   */
+  readonly alwaysAsk: Array<(botId: string) => boolean> = [];
 
   constructor(
     private readonly deps: { store: Store; bus: EventBus; turns: TurnManager; timeoutMs?: number },
@@ -92,10 +97,17 @@ export class ApprovalBroker {
     return created;
   }
 
-  /** A saved rule for this action, most specific (longest match) first. */
-  private ruleFor(tool: string, risk: Risk): PermissionRule | undefined {
+  /**
+   * A saved rule for this action, most specific (longest match) first. For a command, `command` is its text when
+   * known; otherwise the whole summary stands in for it, so the folder and secrets lines after it count as more.
+   */
+  private ruleFor(tool: string, risk: Risk, command?: string): PermissionRule | undefined {
+    const options =
+      risk.kind === "terminal"
+        ? { command: command !== undefined && risk.summary.startsWith(command) ? command : risk.summary }
+        : {};
     return this.permissions()
-      .rules.filter((rule) => rule.tool === tool && ruleMatches(rule, risk.summary))
+      .rules.filter((rule) => rule.tool === tool && ruleMatches(rule, risk.summary, options))
       .toSorted((a, b) => (b.match?.length ?? 0) - (a.match?.length ?? 0))[0];
   }
 
@@ -103,25 +115,32 @@ export class ApprovalBroker {
   private settledBy(
     tool: string,
     risk: Risk,
+    botId?: string,
+    command?: string,
   ): { decision: "allow" | "deny"; source: "policy" | "rule" } | undefined {
+    const never = risk.kind === "terminal" && this.permissions().localExecution === "never";
     // Giving secrets to a command is never settled without the user: not by "always allow commands", not by a rule.
-    // "Never allow commands" still refuses it.
-    if (risk.badges.includes(BADGES.secrets)) {
-      return risk.kind === "terminal" && this.permissions().localExecution === "never"
-        ? { decision: "deny", source: "policy" }
-        : undefined;
-    }
-    if (risk.kind === "terminal") {
-      const policy = this.permissions().localExecution;
-      if (policy === "never") return { decision: "deny", source: "policy" };
-      if (policy === "always") return { decision: "allow", source: "policy" };
-    }
-    return this.ruleFor(tool, risk)?.decision === "allow" ? { decision: "allow", source: "rule" } : undefined;
+    // "Never allow commands" still refuses it. The same for every command of a bot that must always ask.
+    if (
+      risk.badges.includes(BADGES.secrets) ||
+      (risk.kind === "terminal" && botId !== undefined && this.alwaysAsk.some((asks) => asks(botId)))
+    )
+      return never ? { decision: "deny", source: "policy" } : undefined;
+    if (never) return { decision: "deny", source: "policy" };
+    if (risk.kind === "terminal" && this.permissions().localExecution === "always")
+      return { decision: "allow", source: "policy" };
+    return this.ruleFor(tool, risk, command)?.decision === "allow"
+      ? { decision: "allow", source: "rule" }
+      : undefined;
   }
 
-  /** What the local-execution policy or a saved rule decides without asking; undefined when the user must. */
-  settled(tool: string, risk: Risk): "allow" | "deny" | undefined {
-    return this.settledBy(tool, risk)?.decision;
+  /**
+   * What the local-execution policy or a saved rule decides without asking; undefined when the user must. Pass the
+   * bot that makes the call, so a bot that must always ask is never settled here, and a command's own text, so a
+   * typed rule is judged on the command rather than on the card's folder line.
+   */
+  settled(tool: string, risk: Risk, botId?: string, command?: string): "allow" | "deny" | undefined {
+    return this.settledBy(tool, risk, botId, command)?.decision;
   }
 
   /** Notes on the call's card who decided it (shown nowhere yet, but kept on the message for the record). */
@@ -133,7 +152,14 @@ export class ApprovalBroker {
   }
 
   async decide(request: ApprovalRequest, scope: TurnScope): Promise<Verdict> {
-    const settled = this.settledBy(request.call.name, request.risk);
+    // The command itself, as it will run: what follows a typed rule's start is judged on it, not on the card's text.
+    const command = (request.args as { command?: unknown } | null | undefined)?.command;
+    const settled = this.settledBy(
+      request.call.name,
+      request.risk,
+      scope.botId,
+      typeof command === "string" ? command : undefined,
+    );
     if (settled) {
       this.note(request, scope, settled.source);
       return settled.decision;

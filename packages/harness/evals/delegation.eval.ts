@@ -35,6 +35,8 @@ async function run(model: string) {
       heartbeatMs: 60_000,
       vault: "memory",
       keyringService: "eval",
+      previousKeyringService: null,
+      eventLog: false,
     },
     store,
     vault,

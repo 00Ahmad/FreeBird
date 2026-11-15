@@ -51,6 +51,28 @@ describe("what changed on the board", () => {
     expect(t1.unseenQa).toEqual({});
   });
 
+  it("badges a failure or a project-check finding, not a pass or a back-in-QA note", () => {
+    const kinded = (kind: "fail" | "pass" | "requeue" | "check") => ({ ...comment("qa", kind), kind });
+    const t0 = advanceActivity(null, [fileCard("a", "qa"), fileCard("b", "done")], 0);
+    const passed = advanceActivity(t0, [fileCard("a", "done", [kinded("pass")]), fileCard("b", "done")], 10);
+    expect(passed.unseenQa).toEqual({});
+    const requeued = advanceActivity(
+      passed,
+      [fileCard("a", "done", [kinded("pass")]), fileCard("b", "qa", [kinded("requeue")])],
+      20,
+    );
+    expect(requeued.unseenQa).toEqual({});
+    const checked = advanceActivity(
+      requeued,
+      [
+        fileCard("a", "todo", [kinded("pass"), kinded("check")]),
+        fileCard("b", "todo", [kinded("requeue"), kinded("fail")]),
+      ],
+      30,
+    );
+    expect(checked.unseenQa).toEqual({ "card-a": true, "card-b": true });
+  });
+
   it("forgets a card that is gone", () => {
     const t0 = advanceActivity(null, [fileCard("a"), fileCard("b")], 0);
     const t1 = advanceActivity(t0, [fileCard("b", "qa")], 5);

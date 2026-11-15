@@ -1,12 +1,13 @@
-import { BellRing, CodeXml, Pin, Star } from "lucide-react";
+import { BellRing, Briefcase, CodeXml, Handshake, Pin, Star } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import type { Bot } from "@mrog/shared";
 import { BotAvatar, cn } from "@mrog/ui-kit";
 
 import { useUpdateBot } from "../hooks/bots";
+import { useCodingSeen } from "../codingSeen";
 import { useCodingProject } from "../hooks/coding";
-import { attentionBadge } from "../lib/codingAttention";
+import { shownAttention } from "../lib/codingAttention";
 import { badgeText } from "../lib/unread";
 import { useUi } from "../state";
 import { useUnread } from "../unread";
@@ -18,18 +19,22 @@ interface BotRowProps {
   selected: boolean;
   /** Avatar only (compact sidebar, Ctrl+B). */
   compact?: boolean;
+  /** False for a Coding Bot's role bots, which are named after their team. */
+  canRename?: boolean;
   onContextMenu(event: MouseEvent, bot: Bot): void;
 }
 
-export function BotRow({ bot, chatId, selected, compact, onContextMenu }: BotRowProps) {
+export function BotRow({ bot, chatId, selected, compact, canRename = true, onContextMenu }: BotRowProps) {
   const select = useUi((state) => state.select);
   const startRename = useUi((state) => state.startRename);
   const busy = useUi((state) => Boolean(state.activity[bot.threadId]));
   const unread = useUnread((store) => store.state.threads[bot.threadId]?.ids.length ?? 0);
-  // A Coding Bot that is waiting for you says so on its row, whatever chat is open.
+  // A Coding Bot that is waiting for you says so on its row, whatever chat is open. "Finished" and "Error" go once
+  // you have opened its chat since.
   const { data: project } = useCodingProject(bot.id, bot.coding);
-  const attention = bot.coding ? attentionBadge(project?.status) : null;
-  const renaming = useUi((state) => state.renamingBotId === bot.id) && !compact;
+  const seen = useCodingSeen((store) => store.byBot[bot.id]);
+  const attention = bot.coding ? shownAttention(project, seen) : null;
+  const renaming = useUi((state) => state.renamingBotId === bot.id) && !compact && canRename;
 
   if (renaming) return <RenameRow bot={bot} onDone={() => startRename(null)} />;
 
@@ -51,6 +56,15 @@ export function BotRow({ bot, chatId, selected, compact, onContextMenu }: BotRow
         {busy && (
           <span className="absolute top-1.5 right-1.5 size-1.5 animate-pulse rounded-full bg-accent" />
         )}
+        {attention && (
+          // The same wait the full row spells out, as a small bell on the avatar.
+          <span
+            aria-hidden
+            className="absolute right-1 bottom-0.5 flex size-3.5 items-center justify-center rounded-full bg-warning text-accent-ink ring-2 ring-sidebar"
+          >
+            <BellRing size={8} />
+          </span>
+        )}
         {unread > 0 && (
           <span
             aria-hidden
@@ -65,7 +79,7 @@ export function BotRow({ bot, chatId, selected, compact, onContextMenu }: BotRow
     <button
       type="button"
       onClick={() => select(chatId)}
-      onDoubleClick={() => startRename(bot.id)}
+      onDoubleClick={() => canRename && startRename(bot.id)}
       onContextMenu={(event) => onContextMenu(event, bot)}
       aria-current={selected ? "page" : undefined}
       className={cn(
@@ -82,6 +96,8 @@ export function BotRow({ bot, chatId, selected, compact, onContextMenu }: BotRow
         {bot.name}
       </span>
       {bot.coding && <CodeXml size={13} className="shrink-0 text-ink-3" aria-label="Coding Bot" />}
+      {bot.job && <Briefcase size={13} className="shrink-0 text-ink-3" aria-label="Job Bot" />}
+      {bot.client && <Handshake size={13} className="shrink-0 text-ink-3" aria-label="Client Bot" />}
       {attention && (
         <span className="flex shrink-0 items-center gap-1 rounded-full bg-hover px-1.5 py-px text-[11px] font-medium text-warning">
           <BellRing size={10} aria-hidden /> {attention}

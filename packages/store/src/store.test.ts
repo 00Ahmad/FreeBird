@@ -352,6 +352,32 @@ describe("messages", () => {
     });
   });
 
+  it("remembers a Parallel Bots reply whose roles ran with tools, and each part's lane", () => {
+    store = openStore(":memory:");
+    const bot = store.bots.create({ name: "Ada" });
+    const reply = store.messages.create({
+      threadId: bot.threadId,
+      role: "bot",
+      botId: bot.id,
+      parallel: true,
+      parallelTools: true,
+      status: "streaming",
+      parts: [],
+    });
+    const plain = store.messages.create({ threadId: bot.threadId, role: "bot", botId: bot.id, parts: [] });
+    expect(reply).toMatchObject({ parallel: true, parallelTools: true });
+    expect(plain).toMatchObject({ parallel: false, parallelTools: false });
+    const streamed = store.messages.update(reply.id, {
+      parts: [
+        { type: "text", text: "## Role", lane: 2 },
+        { type: "tool", callId: "c1", name: "web_search", args: {}, status: "done", lane: 3 },
+      ],
+    });
+    expect(streamed).toMatchObject({ parallelTools: true });
+    expect(store.messages.get(reply.id)?.parts.map((p) => ("lane" in p ? p.lane : null))).toEqual([2, 3]);
+    expect(store.messages.update(reply.id, { status: "done" })).toMatchObject({ parallelTools: true });
+  });
+
   it("keeps the moderator mark, which a deleted bot's messages don't get", () => {
     store = openStore(":memory:");
     const ada = store.bots.create({ name: "Ada" });

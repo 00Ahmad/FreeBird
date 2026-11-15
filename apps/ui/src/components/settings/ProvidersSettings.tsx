@@ -13,6 +13,7 @@ import {
 } from "../../hooks/providers";
 import { useModels } from "../../hooks/runtime";
 import { addProviderBody, showsApiKey, showsBaseUrl } from "../../lib/provider-form";
+import { FoundKeys } from "./FoundKeys";
 import { Field, Section, TextInput } from "./parts";
 
 const GROUPS: { id: ProviderPreset["group"]; label: string }[] = [
@@ -41,6 +42,7 @@ export function ProvidersSettings() {
             <ProviderRow key={provider.id} provider={provider} />
           ))}
         </ul>
+        <FoundKeys providers={data.providers} />
         {adding ? (
           <AddProvider presets={data.presets} onDone={() => setAdding(false)} />
         ) : (

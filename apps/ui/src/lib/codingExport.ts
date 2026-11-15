@@ -4,7 +4,7 @@ import { edgeLabel } from "./coding";
 import { cardsByRef, progressText, sortComments } from "./codingBoard";
 import { buildChecklist } from "./codingChecklist";
 import { cornerKind, diagramMarks, type CornerKind } from "./codingFeedback";
-import { layoutDiagram } from "./codingLayout";
+import { layoutDiagram, wrapText } from "./codingLayout";
 
 /** What the exports read from a project. */
 type Plan = Pick<CodingProject, "brief" | "nodes" | "edges">;
@@ -225,10 +225,44 @@ export function tintHex(color: string, percent: number): string {
   return `#${mixed.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
-export const xmlEscape = (text: string): string =>
-  text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+/**
+ * Characters XML 1.0 can't hold at all, even escaped: the C0 controls but tab, line feed and carriage return,
+ * unpaired surrogates, and U+FFFE / U+FFFF. A plan from a model can carry them; one would make the file unreadable.
+ */
+// With the u flag a surrogate pair is one character (an emoji stays), so the surrogate range only catches lone ones.
+// oxlint-disable-next-line no-control-regex -- matching those characters is the point
+const NOT_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uD800-\uDFFF\u{FFFE}\u{FFFF}]/gu;
 
-const LEGEND_CHARS = 120;
+export const xmlEscape = (text: string): string =>
+  text
+    .replace(NOT_XML, "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+
+/** About how wide a character of the legend is (11px sans): enough to wrap it inside the picture. */
+const LEGEND_CHAR_W = 6.2;
+/** A connection's description is wrapped onto this many lines at most, then cut with "…". */
+const LEGEND_LINES = 3;
+const LEGEND_LINE_H = 16;
+
+/**
+ * The legend under the picture: a line per connection, wrapped to the picture's width (a small picture would cut
+ * long lines off) and kept to a few lines each.
+ */
+export function legendLines(
+  edges: readonly { description: string }[],
+  width: number,
+): { label: string; lines: string[] }[] {
+  const chars = Math.max(20, Math.floor((width - 48) / LEGEND_CHAR_W));
+  return edges.map((edge, index) => {
+    const label = edgeLabel(index);
+    // The label starts the first line; the rest of the lines line up under the text.
+    const { lines } = wrapText(oneLine(edge.description), chars - label.length - 2, LEGEND_LINES);
+    return { label, lines: lines.length ? lines : [""] };
+  });
+}
 
 /**
  * The diagram as a stand-alone SVG file: the same layout as on the screen, drawn in the app's light colours with
@@ -245,12 +279,11 @@ export function toSvg(project: Exportable): string {
   const mono = "ui-monospace, SFMono-Regular, Consolas, Menlo, monospace";
   const sans = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 
-  const legend = project.edges.map((edge, index) =>
-    `${edgeLabel(index)}  ${oneLine(edge.description)}`.slice(0, LEGEND_CHARS),
-  );
-  const legendTop = layout.height + 8;
   const width = Math.max(layout.width, 320);
-  const height = (layout.height || 48) + (legend.length ? 28 + legend.length * 16 : 0);
+  const legend = legendLines(project.edges, width);
+  const legendRows = legend.reduce((sum, entry) => sum + entry.lines.length, 0);
+  const legendTop = layout.height + 8;
+  const height = (layout.height || 48) + (legend.length ? 28 + legendRows * LEGEND_LINE_H : 0);
 
   const parts: string[] = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Plan diagram">`,
@@ -307,11 +340,17 @@ export function toSvg(project: Exportable): string {
     parts.push(
       `<line x1="24" y1="${legendTop}" x2="${width - 24}" y2="${legendTop}" stroke="${LIGHT.border}"/>`,
     );
-    legend.forEach((line, index) =>
-      parts.push(
-        `<text x="24" y="${legendTop + 20 + index * 16}" font-size="11" font-family="${sans}" fill="${LIGHT.ink2}">${xmlEscape(line)}</text>`,
-      ),
-    );
+    let row = 0;
+    for (const entry of legend) {
+      const indent = 24 + Math.ceil((entry.label.length + 2) * LEGEND_CHAR_W);
+      entry.lines.forEach((line, index) => {
+        const y = legendTop + 20 + row * LEGEND_LINE_H;
+        parts.push(
+          `<text x="${index === 0 ? 24 : indent}" y="${y}" font-size="11" font-family="${sans}" fill="${LIGHT.ink2}">${xmlEscape(index === 0 ? `${entry.label}  ${line}` : line)}</text>`,
+        );
+        row += 1;
+      });
+    }
   }
   parts.push("</svg>");
   return `${parts.join("\n")}\n`;

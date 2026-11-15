@@ -489,26 +489,59 @@ describe("a Coding Bot's loop", () => {
     await until(h, bot.id, (p) => p.status === "awaiting_approval");
   });
 
-  it("asks again when the Developer ends a turn without finish_card or before the file exists", async () => {
+  it("asks again when the Developer finishes before the file exists, saying what happened", async () => {
     const team = codingTeam({
       plans: [{ tool: ONE_FILE }],
-      // First try: finishes without writing the file (refused). Second: writes it but never says it is finished.
-      // Third: does it properly.
-      develop: (_card, attempt) => (attempt === 1 ? { write: null } : attempt === 2 ? { finish: false } : {}),
+      // First try: finishes without writing the file (refused), twice. Third: does it properly.
+      develop: (_card, attempt) => (attempt < 3 ? { write: null } : {}),
     });
     h = await startTeam(team);
     const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
     await type(h, bot, "Make a note");
     const done = await until(h, bot.id, (p) => p.status === "done");
-    expect(done.cards[0]!.comments.map((c) => c.author)).toEqual(["developer"]);
+    expect(done.cards[0]!.comments.map((c) => [c.author, c.kind])).toEqual([["developer", "note"]]);
     const retries = turnsOf(team, "developer").filter((s) =>
-      s.task.includes("Your last try ended without calling finish_card"),
+      s.task.includes("Your last try read 0 files and wrote nothing."),
     );
     expect(retries).toHaveLength(2);
+    expect(retries[0]!.task).toContain("Write a.txt now with at most 2 reads, then call finish_card.");
+  });
+
+  it("sends a file the Developer wrote to QA even when it never called finish_card", async () => {
+    const team = codingTeam({ plans: [{ tool: ONE_FILE }], develop: () => ({ finish: false }) });
+    h = await startTeam(team);
+    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
+    await type(h, bot, "Make a note");
+    const done = await until(h, bot.id, (p) => p.status === "done");
+    expect(turnsOf(team, "developer")).toHaveLength(1);
+    expect(done.log!.map((l) => l.text)).toContain(
+      "a.txt was written; sent to QA (finish_card wasn't called)",
+    );
+    expect(turnsOf(team, "qa").map((s) => s.task)).toHaveLength(1);
+  });
+
+  it("asks again when a fix turn leaves the file as it was and never calls finish_card", async () => {
+    const team = codingTeam({
+      plans: [{ tool: ONE_FILE }],
+      // The fix writes the same content again and doesn't finish; the next try does.
+      develop: (_card, attempt) => (attempt === 2 ? { finish: false } : {}),
+      review: (_card, nth) => (nth === 1 ? { pass: false, comment: "needs a heading" } : { pass: true }),
+    });
+    h = await startTeam(team);
+    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
+    await type(h, bot, "Make a note");
+    await until(h, bot.id, (p) => p.status === "done");
+    const fixes = turnsOf(team, "developer").slice(1);
+    expect(fixes).toHaveLength(2);
+    expect(fixes[1]!.task).toContain("Your last try wrote a.txt, but finish_card was not called.");
+    expect(fixes[1]!.task).toContain("Written so far: a.txt.");
   });
 
   it("stops with an error after three turns without finish_card, and resumes", async () => {
-    const team = codingTeam({ plans: [{ tool: ONE_FILE }], develop: () => ({ finish: false }) });
+    const team = codingTeam({
+      plans: [{ tool: ONE_FILE }],
+      develop: () => ({ write: null, finish: false }),
+    });
     h = await startTeam(team);
     const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
     await type(h, bot, "Make a note");
@@ -652,16 +685,18 @@ describe("talking to the team", () => {
     expect(bot.coding).toBe(true);
   });
 
-  it("answers in each state with a short status", async () => {
-    h = await startTeam(codingTeam({ plans: [{ tool: ONE_FILE }] }));
+  it("answers with a short status when a message can't change anything", async () => {
+    h = await startTeam(
+      codingTeam({ plans: [{ tool: ONE_FILE }], develop: () => ({ write: null, finish: false }) }),
+    );
     const { bot } = await makeCoding(h, tmp("out"));
     await type(h, bot, "Make a note");
     await until(h, bot.id, (p) => p.status === "awaiting_approval");
     await post(h, `/api/bots/${bot.id}/coding/approve`);
-    await until(h, bot.id, (p) => p.status === "done");
+    await until(h, bot.id, (p) => p.status === "error");
     await type(h, bot, "thanks");
     const last = chat(h, bot.threadId).at(-1)!;
-    expect(messageText(last)).toMatch(/^This project is done: all 1 cards passed QA\./);
+    expect(messageText(last)).toMatch(/^I stopped because of a problem: The Developer didn't finish/);
     expect(last.botId).toBe(bot.id);
   });
 

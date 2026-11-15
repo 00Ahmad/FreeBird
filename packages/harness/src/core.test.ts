@@ -16,6 +16,7 @@ const message = (text: string, id = newId("msg")) =>
     botId: null,
     moderator: false,
     parallel: false,
+    parallelTools: false,
     parts: [{ type: "text", text }],
     status: "streaming",
     model: null,
@@ -102,5 +103,15 @@ describe("system prompt", () => {
       "This is a group chat with the user and these bots: Boss",
     );
     expect(prompt({ kind: "group", pair: true })).not.toContain("group chat");
+  });
+
+  it("doesn't tell a bot in a bot-to-bot thread to ask questions, since no user is there to answer", () => {
+    const bot = { name: "Ada", label: null, instructions: "" } as unknown as Bot;
+    const prompt = (thread: Partial<Thread>) =>
+      buildSystemPrompt(bot, { thread: thread as Thread, teammates: [], now: new Date() });
+    expect(prompt({ kind: "direct" })).toContain("Ask a short question when a request is ambiguous");
+    const pair = prompt({ kind: "group", pair: true });
+    expect(pair).not.toContain("Ask a short question");
+    expect(pair).toContain("make a sensible choice and say what you assumed");
   });
 });

@@ -60,6 +60,8 @@ function toBot(row: Row): Bot {
     temporary: row.temporary === 1,
     visual: row.visual === 1,
     coding: row.coding === 1,
+    job: row.job === 1,
+    client: row.client === 1,
     clusterId: row.cluster_id ?? null,
     tools: readTools(row.tools),
     threadId: row.thread_id,
@@ -91,7 +93,7 @@ export class BotRepo {
    * bot made for a cluster's discussion.
    */
   create(
-    input: CreateBotInput & { coding?: boolean },
+    input: CreateBotInput & { coding?: boolean; job?: boolean; client?: boolean },
     helper?: { parentId: string; temporary: boolean; section: string },
     clusterId?: string,
   ): Bot {
@@ -104,9 +106,9 @@ export class BotRepo {
       this.db
         .prepare(
           `INSERT INTO bots (id, name, label, avatar_shape, avatar_color, avatar_image, is_primary, model,
-             instructions, coordinator, parent_id, temporary, section, visual, coding, cluster_id, tools,
-             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             instructions, coordinator, parent_id, temporary, section, visual, coding, job, client, cluster_id,
+             tools, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -124,6 +126,8 @@ export class BotRepo {
           helper?.section ?? null,
           input.visual ? 1 : 0,
           input.coding ? 1 : 0,
+          input.job ? 1 : 0,
+          input.client ? 1 : 0,
           clusterId ?? null,
           writeTools(input.tools ?? DEFAULT_BOT_TOOLS),
           now,

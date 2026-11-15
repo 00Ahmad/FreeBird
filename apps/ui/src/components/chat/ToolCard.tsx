@@ -26,8 +26,11 @@ const STATUS_ICON = {
   denied: <CircleSlash size={13} className="text-ink-3" />,
 } as const;
 
-/** A tool run in the transcript: an approval card while it waits, otherwise a collapsible chip. */
-export function ToolCard({ part }: { part: ToolPart }) {
+/**
+ * A tool run in the transcript: an approval card while it waits, otherwise a collapsible chip. `label` replaces the
+ * chip's text (a Parallel Bots lane names its searches by query and host).
+ */
+export function ToolCard({ part, label }: { part: ToolPart; label?: string }) {
   const [open, setOpen] = useState(false);
   // ask_user shows as its own question card.
   if (part.name === "ask_user") return null;
@@ -47,7 +50,7 @@ export function ToolCard({ part }: { part: ToolPart }) {
         ) : (
           <Wrench size={12} className="shrink-0" />
         )}
-        <span className="truncate font-mono text-[12px]">{toolTitle(part)}</span>
+        <span className="truncate font-mono text-[12px]">{label ?? toolTitle(part)}</span>
         {STATUS_ICON[part.status]}
         <ChevronRight size={12} className={cn("shrink-0 transition-transform", open && "rotate-90")} />
       </button>

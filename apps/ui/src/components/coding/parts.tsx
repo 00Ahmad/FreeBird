@@ -4,7 +4,13 @@ import type { ReactNode } from "react";
 import type { CardComment, CodingCard, CodingColumn } from "@mrog/shared";
 import { cn } from "@mrog/ui-kit";
 
-import { COLUMN_COLOR, columnLabel, needsFixing, sortComments } from "../../lib/codingBoard";
+import {
+  COLUMN_COLOR,
+  columnLabel,
+  lastFailureIndex,
+  needsFixing,
+  sortComments,
+} from "../../lib/codingBoard";
 
 /** A colour mixed into the surface, for tinted backgrounds that stay readable in light and dark. */
 export const tint = (color: string, percent: number) =>
@@ -47,7 +53,8 @@ export function Comments({ card, className }: { card: CodingCard; className?: st
   const comments = sortComments(card.comments);
   if (comments.length === 0) return null;
   const fixing = needsFixing(card);
-  const lastQa = comments.findLastIndex((comment) => comment.author === "qa");
+  // The finding to fix, not a pass or a "back in QA" note that came after it.
+  const lastQa = lastFailureIndex({ column: card.column, comments });
   return (
     <ul className={cn("flex flex-col gap-1.5", className)} aria-label="Comments">
       {comments.map((comment, index) => {

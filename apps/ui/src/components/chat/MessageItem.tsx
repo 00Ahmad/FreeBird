@@ -5,6 +5,8 @@ import { messageText, type Bot, type Message, type MessagePart } from "@mrog/sha
 import { BotAvatar, cn } from "@mrog/ui-kit";
 
 import { Markdown } from "./Markdown";
+import { parallelLabel, parallelView } from "../../lib/parallelLanes";
+import { LaneCards } from "./LaneCards";
 import { ParallelCards } from "./ParallelCards";
 import { PlanCard } from "./PlanCard";
 import { ToolCard } from "./ToolCard";
@@ -46,7 +48,7 @@ export function MessageItem({ message, bot, grouped, actions, latest = false }: 
         <div className="flex max-w-[78%] flex-col items-end gap-1">
           {message.parallel && (
             <span className="flex items-center gap-1 text-[11px] text-ink-3">
-              <Columns3 size={11} /> Parallel Bots
+              <Columns3 size={11} /> {parallelLabel(message)}
             </span>
           )}
           {message.parts.map((part, index) => (
@@ -60,6 +62,7 @@ export function MessageItem({ message, bot, grouped, actions, latest = false }: 
 
   const streaming = message.status === "streaming";
   const empty = message.parts.length === 0;
+  const lanes = parallelView(message) === "lanes";
   return (
     <div className={cn("group flex gap-3", grouped ? "mt-1" : "mt-4")}>
       <div className="w-8 shrink-0">
@@ -77,17 +80,22 @@ export function MessageItem({ message, bot, grouped, actions, latest = false }: 
           </div>
         )}
         <div className="flex flex-col gap-1.5 text-[14.5px] leading-relaxed">
-          {message.parts.map((part, index) => (
-            <BotPart
-              key={index}
-              part={part}
-              message={message}
-              bot={bot}
-              latest={latest}
-              last={index === message.parts.length - 1}
-            />
-          ))}
-          {streaming && empty && <TypingDots />}
+          {lanes ? (
+            // The roles ran as separate conversations (with tools, or three requests on a cloud model): three cards.
+            <LaneCards message={message} bot={bot} latest={latest} />
+          ) : (
+            message.parts.map((part, index) => (
+              <BotPart
+                key={index}
+                part={part}
+                message={message}
+                bot={bot}
+                latest={latest}
+                last={index === message.parts.length - 1}
+              />
+            ))
+          )}
+          {streaming && empty && !lanes && <TypingDots />}
           {streaming && empty && <SlowReply message={message} bot={bot} />}
           {message.status === "stopped" && <span className="text-xs text-ink-3">Stopped</span>}
         </div>

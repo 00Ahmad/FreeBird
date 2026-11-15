@@ -1,9 +1,20 @@
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
-import { messageText, type Bot, type Message, type RuntimeStatus, type ThreadActivity } from "@mrog/shared";
+import {
+  messageText,
+  type Bot,
+  type Message,
+  type RuntimeStatus,
+  type Thread,
+  type ThreadActivity,
+} from "@mrog/shared";
 
+import { useCardActivity } from "../codingActivity";
+import { useCodingSeen } from "../codingSeen";
 import { api } from "../lib/api";
+import { addBounded } from "../lib/bounded";
+import { isTeamBot, isTeamThread, teamParentOf } from "../lib/codingTeam";
 import { harnessInfo } from "../lib/harness";
 import { coalesceDeltas, type Delta } from "../lib/messages";
 import { connectEvents } from "../lib/sse";
@@ -11,22 +22,40 @@ import { useConnection, useUi } from "../state";
 import { isWatching, useUnread } from "../unread";
 import { BOTS_KEY, removeBot, upsertBot } from "./bots";
 import { setCodingProject } from "./coding";
-import { noticeCoding } from "./codingNotice";
+import { noticeJob, setJobProject } from "./jobs";
+import { noticeClient, setClientProject } from "./clients";
+import { forgetCodingNotice, noticeCoding } from "./codingNotice";
 import { setDiscussion } from "./discussion";
 import { setRace } from "./race";
 import { MODELS_KEY, RUNTIME_KEY } from "./runtime";
-import { applyDelta, messagesKey, removeThread, upsertMessage, upsertThread } from "./threads";
+import { applyDelta, messagesKey, removeThread, THREADS_KEY, upsertMessage, upsertThread } from "./threads";
 
+/** Replies already told about; only the newest are kept, the rest can't finish again. */
 const notified = new Set<string>();
+const NOTIFIED_MAX = 500;
+
+/** Whether a message is in a conversation between a Coding Bot and one of its roles. */
+function inTeamThread(client: QueryClient, threadId: string): boolean {
+  const thread = client.getQueryData<Thread[]>(THREADS_KEY)?.find((candidate) => candidate.id === threadId);
+  return Boolean(thread && isTeamThread(thread, client.getQueryData<Bot[]>(BOTS_KEY) ?? []));
+}
 
 /** A desktop notification when a bot finishes replying while you're in another chat or app (per-bot toggle). */
 function notifyIfAway(client: QueryClient, message: Message) {
-  if (message.role !== "bot" || message.status !== "done" || !message.botId || notified.has(message.id))
+  if (message.role !== "bot" || message.status !== "done" || !message.botId) return;
+  if (!addBounded(notified, message.id, NOTIFIED_MAX)) return;
+  const bots = client.getQueryData<Bot[]>(BOTS_KEY) ?? [];
+  const bot = bots.find((candidate) => candidate.id === message.botId);
+  // A Coding Bot and its Planner, Developer and QA post a message for every step; the Coding Bot tells you when it
+  // needs you instead (see noticeCoding).
+  if (
+    bot?.coding ||
+    bot?.job ||
+    bot?.client ||
+    (bot && isTeamBot(bot, bots)) ||
+    inTeamThread(client, message.threadId)
+  )
     return;
-  notified.add(message.id);
-  const bot = client.getQueryData<Bot[]>(BOTS_KEY)?.find((candidate) => candidate.id === message.botId);
-  // A Coding Bot posts a message for every step; it tells you when it needs you instead (see noticeCoding).
-  if (bot?.coding) return;
   const watching = document.hasFocus() && useUi.getState().selectedThreadId === message.threadId;
   if (!bot?.notifications || watching || typeof Notification === "undefined") return;
   const text = messageText(message).replace(/\s+/g, " ").trim();
@@ -58,11 +87,19 @@ function notifyWaiting(
   }
   if (waitingNoticed.has(key)) return;
   waitingNoticed.add(key);
-  const bot = client.getQueryData<Bot[]>(BOTS_KEY)?.find((candidate) => candidate.id === botId);
-  const watching = document.hasFocus() && useUi.getState().selectedThreadId === threadId;
-  if (!bot?.notifications || watching || typeof Notification === "undefined") return;
-  const notification = new Notification(bot.name, {
-    body: `${bot.name} needs you for a moment.`,
+  const bots = client.getQueryData<Bot[]>(BOTS_KEY) ?? [];
+  const bot = bots.find((candidate) => candidate.id === botId);
+  // A role of a Coding Bot or Job Bot that waits (something to approve) is told under the team's name and switch:
+  // its own notifications are off, and the user knows the team, not its members.
+  const team = bot ? teamParentOf(bot, bots) : null;
+  const teller = team ? bots.find((candidate) => candidate.id === team.id) : bot;
+  const selected = useUi.getState().selectedThreadId;
+  // The Coding Bot's chat shows its roles' approval cards too.
+  const watching =
+    document.hasFocus() && (selected === threadId || (team !== null && selected === teller?.threadId));
+  if (!teller?.notifications || watching || typeof Notification === "undefined") return;
+  const notification = new Notification(teller.name, {
+    body: `${bot!.name} needs you for a moment.`,
     silent: false,
   });
   notification.addEventListener("click", () => {
@@ -146,6 +183,10 @@ export function useHarnessEvents() {
             break;
           case "bot.deleted":
             removeBot(client, event.botId);
+            // What the screen remembered about a Coding Bot goes with it.
+            useCardActivity.getState().forget(event.botId);
+            useCodingSeen.getState().forget(event.botId);
+            forgetCodingNotice(event.botId);
             break;
           case "thread.created":
           case "thread.updated":
@@ -162,7 +203,9 @@ export function useHarnessEvents() {
           case "message.updated":
             upsertMessage(client, event.message);
             notifyIfAway(client, event.message);
-            useUnread.getState().arrive(event.message, isWatching(event.message.threadId));
+            // A build fills its team conversations with steps; they are the team's working notes, not unread mail.
+            if (!inTeamThread(client, event.message.threadId))
+              useUnread.getState().arrive(event.message, isWatching(event.message.threadId));
             break;
           case "thread.activity":
             ui.setActivity(event.threadId, event.botId, event.activity);
@@ -177,6 +220,16 @@ export function useHarnessEvents() {
             break;
           case "discussion.updated":
             setDiscussion(client, event.discussion);
+            break;
+          case "job.updated":
+            // Before the cache is replaced, so the old status is still there to compare with.
+            noticeJob(client, event.project);
+            setJobProject(client, event.project);
+            break;
+          case "client.updated":
+            // Before the cache is replaced, so the old status is still there to compare with.
+            noticeClient(client, event.project);
+            setClientProject(client, event.project);
             break;
           case "coding.updated":
             // Before the cache is replaced, so the old status is still there to compare with.

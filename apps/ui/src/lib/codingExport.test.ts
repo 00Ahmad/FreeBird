@@ -7,6 +7,7 @@ import { planFromReply, validatePlan } from "../../../../packages/harness/src/co
 import { comment, connectorCard, edge, fileCard, node, project, withWork } from "./codingFixture";
 import {
   exportName,
+  legendLines,
   mermaidText,
   planningPrompt,
   planToFile,
@@ -301,6 +302,47 @@ describe("SVG file", () => {
 
   it("lists the connections under the picture", () => {
     expect(svg).toContain("e1  main calls storage");
+  });
+
+  it("wraps a long connection onto lines that fit a small picture, and makes room for them", () => {
+    const long = "word ".repeat(60).trim();
+    const small = project({ nodes: [node("a"), node("b")], edges: [edge("x", ["a", "b"], long)], cards: [] });
+    const out = toSvg(small);
+    const width = Number(/width="(\d+)"/.exec(out)![1]);
+    const [entry] = legendLines(small.edges, width);
+    expect(entry!.label).toBe("e1");
+    expect(entry!.lines.length).toBeGreaterThan(1);
+    expect(entry!.lines.length).toBeLessThanOrEqual(3);
+    // Every line fits across the picture at about 6.2 px a character, after the left margin and the label.
+    for (const line of entry!.lines) expect(24 + (line.length + 4) * 6.2).toBeLessThanOrEqual(width - 24);
+    expect(entry!.lines.at(-1)!.endsWith("…")).toBe(true);
+    // The picture is tall enough for every line.
+    const height = Number(/height="(\d+)"/.exec(out)![1]);
+    const ys = [...out.matchAll(/<text [^>]*y="(\d+(?:\.\d+)?)"[^>]*>(?:e1 {2})?word/g)].map((m) =>
+      Number(m[1]),
+    );
+    expect(ys).toHaveLength(entry!.lines.length);
+    expect(Math.max(...ys)).toBeLessThan(height);
+  });
+
+  it("leaves out characters XML can't hold, so the file always opens", () => {
+    expect(xmlEscape("a\u0000b\u0007c\u001Fd")).toBe("abcd");
+    // Tab, line feed and carriage return are allowed.
+    expect(xmlEscape("a\tb\nc\rd")).toBe("a\tb\nc\rd");
+    expect(xmlEscape("x\u{FFFE}y\uD800z\u{FFFF}")).toBe("xyz");
+    expect(xmlEscape("a\uDC00b")).toBe("ab");
+    // A real emoji (a surrogate pair) stays.
+    expect(xmlEscape("ok 😀")).toBe("ok 😀");
+    const dirty = project({
+      nodes: [node("a", "src/a\u0001.ts", "Does\u0008 things"), node("b")],
+      edges: [edge("x", ["a", "b"], "bad\u000Bchar")],
+      cards: [],
+    });
+    const controls = [...toSvg(dirty)].filter((char) => {
+      const code = char.charCodeAt(0);
+      return code < 32 && code !== 9 && code !== 10 && code !== 13;
+    });
+    expect(controls).toEqual([]);
   });
 
   it("is balanced and sized for its content", () => {

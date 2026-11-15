@@ -10,6 +10,11 @@ import { BOTS_KEY } from "./bots";
 /** The status last heard for each Coding Bot, so a settings change while it waits isn't news again. */
 const lastStatus = new Map<string, CodingStatus>();
 
+/** The Coding Bot was deleted: nothing more will be heard from it. */
+export function forgetCodingNotice(botId: string) {
+  lastStatus.delete(botId);
+}
+
 /**
  * Tells the user when a Coding Bot needs them (a plan to approve, the round limit, finished, an error) with a desktop
  * notification, when they are elsewhere and the bot's notifications are on. Its sidebar row shows the same wait from
@@ -19,6 +24,7 @@ export function noticeCoding(client: QueryClient, project: CodingProject) {
   const before =
     lastStatus.get(project.botId) ?? client.getQueryData<CodingProject>(["coding", project.botId])?.status;
   lastStatus.set(project.botId, project.status);
+  // With no status before (the first update after a reload beat the fetch), there is nothing to compare: no news.
   const news = attentionFor(before, project);
   if (!news) return;
   const bot = client.getQueryData<Bot[]>(BOTS_KEY)?.find((candidate) => candidate.id === project.botId);

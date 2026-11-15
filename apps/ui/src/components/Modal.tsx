@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 
 import { cn, IconButton } from "@mrog/ui-kit";
 
-import { FOCUSABLE, nextFocus, tabbable } from "../lib/focus";
+import { FIELD, firstFocus, FOCUSABLE, nextFocus, tabbable } from "../lib/focus";
 import { pushLayer } from "../lib/layers";
 
 interface ModalProps {
@@ -47,10 +47,10 @@ export function Modal({ title, onClose, children, className, bare }: ModalProps)
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const root = panel.current;
-    // Start in the first field; the header's Close button only when there's nothing to type into.
-    const first =
-      root?.querySelector<HTMLElement>("input, textarea, select") ??
-      root?.querySelector<HTMLElement>("button, [tabindex]");
+    // Start in the first field Tab could reach (not a hidden file input behind a "Choose a file" button); the
+    // header's Close button only when there's nothing to type into.
+    const candidates = root ? tabbableIn(root) : [];
+    const first = candidates[firstFocus(candidates.map((element) => ({ field: element.matches(FIELD) })))];
     (first ?? root)?.focus();
     const layer = pushLayer(() => close.current());
 

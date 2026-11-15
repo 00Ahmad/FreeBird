@@ -1,11 +1,19 @@
 import { CodeXml, FolderOpen, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { MAX_ROUNDS_LIMIT } from "@mrog/shared";
 import { Button, cn } from "@mrog/ui-kit";
 
+import { useBots } from "../hooks/bots";
 import { useCreateCodingBot } from "../hooks/coding";
-import { codingFormProblem, codingInput, DEFAULT_CODING_FORM, type CodingForm } from "../lib/coding";
+import {
+  codingFormProblem,
+  codingInput,
+  DEFAULT_CODING_FORM,
+  defaultCodingName,
+  MAX_CODING_NAME,
+  type CodingForm,
+} from "../lib/coding";
 import { useUi } from "../state";
 import { Switch } from "./coding/Switch";
 import { Modal } from "./Modal";
@@ -25,14 +33,31 @@ const ROLES = [
  */
 export function NewCodingBotDialog() {
   const setOverlay = useUi((state) => state.setOverlay);
-  const select = useUi((state) => state.select);
   const create = useCreateCodingBot();
-  const [form, setForm] = useState<CodingForm>(DEFAULT_CODING_FORM);
+  const { data: bots } = useBots();
+  const names = useMemo(() => (bots ?? []).map((bot) => bot.name), [bots]);
+  const [form, setForm] = useState<CodingForm>(() => ({
+    ...DEFAULT_CODING_FORM,
+    name: defaultCodingName(names),
+  }));
+  // Until the name is edited it follows the bots as they load, so the default is never one that is taken.
+  const [nameEdited, setNameEdited] = useState(false);
+  const suggested = defaultCodingName(names);
+  if (!nameEdited && form.name !== suggested) setForm((current) => ({ ...current, name: suggested }));
   // The folder dialog only exists in the desktop app; in a plain browser the path is typed.
   const pickFolder = window.mrog?.pickFolder;
   const [picking, setPicking] = useState(false);
+  const [pickProblem, setPickProblem] = useState<string | null>(null);
+  // Whether the dialog is still open when the new bot arrives.
+  const open = useRef(true);
+  useEffect(() => {
+    open.current = true;
+    return () => {
+      open.current = false;
+    };
+  }, []);
   const close = () => setOverlay(null);
-  const problem = codingFormProblem(form);
+  const problem = codingFormProblem(form, names);
   const change = (patch: Partial<CodingForm>) => {
     if (create.error) create.reset();
     setForm((current) => ({ ...current, ...patch }));
@@ -41,12 +66,33 @@ export function NewCodingBotDialog() {
   const browse = async () => {
     if (!pickFolder || picking) return;
     setPicking(true);
+    setPickProblem(null);
     try {
       const folder = await pickFolder();
       if (folder) change({ outputFolder: folder });
+    } catch (error) {
+      setPickProblem(
+        `Couldn't open the folder picker${error instanceof Error && error.message ? `: ${error.message}` : ""}. Type the path instead.`,
+      );
     } finally {
       setPicking(false);
     }
+  };
+
+  const submit = () => {
+    if (problem || create.isPending) return;
+    // Not mutate()'s callbacks: they don't run once the dialog is closed, and the new bot should open even then.
+    create.mutateAsync(codingInput(form)).then(
+      ({ bot }) => {
+        const ui = useUi.getState();
+        ui.select(bot.threadId);
+        if (open.current) ui.setOverlay(null);
+      },
+      (error: Error) => {
+        // Shown in the dialog while it is open; told in the sidebar once it is gone.
+        if (!open.current) useUi.getState().notify(`Couldn't create the Coding Bot: ${error.message}`);
+      },
+    );
   };
 
   return (
@@ -55,13 +101,7 @@ export function NewCodingBotDialog() {
         className="flex min-h-0 flex-col"
         onSubmit={(event) => {
           event.preventDefault();
-          if (problem || create.isPending) return;
-          create.mutate(codingInput(form), {
-            onSuccess: ({ bot }) => {
-              select(bot.threadId);
-              close();
-            },
-          });
+          submit();
         }}
       >
         <div className="flex min-h-0 flex-col gap-4 overflow-y-auto p-5">
@@ -76,8 +116,11 @@ export function NewCodingBotDialog() {
             </span>
             <input
               value={form.name}
-              onChange={(event) => change({ name: event.target.value })}
-              maxLength={60}
+              onChange={(event) => {
+                setNameEdited(true);
+                change({ name: event.target.value });
+              }}
+              maxLength={MAX_CODING_NAME}
               className={cn(field, "h-8")}
             />
           </label>
@@ -108,6 +151,11 @@ export function NewCodingBotDialog() {
                 </Button>
               )}
             </div>
+            {pickProblem && (
+              <span role="alert" className="text-xs text-danger">
+                {pickProblem}
+              </span>
+            )}
             <span className="text-xs text-ink-3">
               Every file the team writes goes here. It is created if it doesn't exist. Running commands
               (tests, installs) still asks you first.

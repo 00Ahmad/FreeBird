@@ -79,7 +79,7 @@ export function installDelegation(services: Services) {
 
   /**
    * Teammates a bot can hand work to: visible bots, plus its own helpers even when hidden; never a cluster's experts,
-   * and never a Coding Bot (it runs no model turn: it is spoken to in its own chat).
+   * and never a Coding Bot or a Job Bot (they run no model turn: each is spoken to in its own chat).
    */
   const teammatesOf = (bot: Bot) =>
     store.bots
@@ -89,6 +89,8 @@ export function installDelegation(services: Services) {
           other.id !== bot.id &&
           !other.clusterId &&
           !other.coding &&
+          !other.job &&
+          !other.client &&
           (!other.hidden || other.parentId === bot.id),
       );
 

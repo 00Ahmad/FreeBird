@@ -27,7 +27,11 @@ function currentTime(now: Date): string {
 export function buildSystemPrompt(bot: Bot, context: PromptContext): string {
   const sections = [
     `You are ${bot.name}${bot.label ? `, ${bot.label}` : ""}: an AI teammate the user messages in the FreeBird app.`,
-    "Be direct and useful. Use Markdown when it helps. Ask a short question when a request is ambiguous.",
+    // A bot-to-bot thread (a helper's or a Coding Bot role's) has no user to answer a question, and a question there
+    // ends the hand-off without the work: choose and say what was assumed instead.
+    context.thread.pair
+      ? "Be direct and useful. Use Markdown when it helps. If something is unclear, make a sensible choice and say what you assumed."
+      : "Be direct and useful. Use Markdown when it helps. Ask a short question when a request is ambiguous.",
     currentTime(context.now),
   ];
   if (bot.instructions.trim())

@@ -14,15 +14,15 @@ Each role runs on **its own model**, so you can put a strong model on the Planne
 
 Press **+ → New Coding Bot**. You choose:
 
-| Setting                           | What it does                                                                                           |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Name**                          | How it appears in your bot list.                                                                       |
-| **Output folder**                 | Required. Every project file is written here. Use **Browse** in the desktop app, or type the path.     |
-| **Planner, Developer, QA models** | One model per role. Leave one empty to use the shared model.                                           |
-| **Auto-approve**                  | Off by default. When on, the Developer starts as soon as the plan is ready, without waiting for you.   |
-| **QA round limit**                | How many times QA may send work back before it stops and asks you. Default 5, any number from 1 to 20. |
+| Setting                           | What it does                                                                                             |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Name**                          | How it appears in your bot list (up to 49 characters, because its team is named after it).               |
+| **Output folder**                 | Required. Every project file is written here. Use **Browse** in the desktop app, or type the path.       |
+| **Planner, Developer, QA models** | One model per role. Leave one empty to use the shared model. You can change them later under **Models**. |
+| **Auto-approve**                  | Off by default. When on, the Developer starts as soon as the plan is ready, without waiting for you.     |
+| **QA round limit**                | How many times QA may send work back before it stops and asks you. Default 5, any number from 1 to 20.   |
 
-The output folder must be a folder you can write to. FreeBird refuses a drive root, your home folder itself, FreeBird's own data folder, another bot's folder, and the output folder of another Coding Bot. A folder that doesn't exist yet is created.
+The output folder must be a folder on this computer that you can write to. FreeBird refuses a drive root, your home folder itself, FreeBird's own data folder, another bot's folder, the output folder of another Coding Bot, network and `\\server\share` paths, and names ending in a dot or a space or named like a device (`CON`, `NUL`). A folder that doesn't exist yet is created.
 
 ## How a project runs
 
@@ -36,7 +36,15 @@ The output folder must be a folder you can write to. FreeBird refuses a drive ro
 8. **Whole-project check.** When every card has passed, the project is checked as a whole before it is called done. First, plain automatic checks look for mistakes that span files, such as a plain `<script>` tag loading a file that uses `import`, a missing file or import, an id the script looks for that no page has, a JSON file that doesn't parse, or a key that looks real. Anything found sends the right card back with a comment. If the automatic checks find nothing, QA gets one last turn to look across the files.
 9. **Done.** When the whole-project check passes, the project is complete. The Coding Bot's closing message ends with a short **Before you run it** list, for example "add your own API key in `api-config.js`" or "open it through a local web server, not by double-clicking the file".
 
-Typing in the Coding Bot's chat while it works doesn't start a model: after the brief, a message becomes feedback for the Planner while a plan awaits approval, and otherwise you get a one-line status reply. **Stop** and **Resume** work at any time. If you close the app while it is working, the project comes back **Stopped** with the unfinished cards back in Todo, and you can resume it.
+Typing in the Coding Bot's chat doesn't start a model of its own:
+
+- the first message is the brief;
+- while a plan waits for approval, a message is feedback for the Planner;
+- **after the project is done, a message is a change request**: the Planner updates the plan, cards for unchanged files stay Done, and only what changed is built again, after your approval as usual;
+- if planning failed before any card existed, a message is a new brief;
+- otherwise you get a one-line status reply.
+
+**Stop** and **Resume** work at any time, from the panel or the message box's Stop button. Stopping one of the team's conversations stops the project too, and Resume carries on. If you close the app while it is working, the project comes back **Stopped** with the unfinished cards back in Todo, and you can resume it; a change request you had asked for is kept.
 
 ## The panel
 
@@ -73,16 +81,17 @@ Open the panel's **Export** menu to download the plan:
 1. Press **Copy planning prompt** and paste it into the model you want to plan with. It explains the exact format and the limits.
 2. Press **Import** and choose the file, or paste the model's answer. The JSON can be inside a normal chat reply.
 3. FreeBird checks the plan with the same rules as the Planner's own, and shows a **preview**: how many files and connections it understood, any errors, and a warning for files that **already exist** in the output folder (the Developer would change them).
-4. **Apply.** The plan still waits for your approval, unless auto-approve is on. The Planner is skipped, so its model can stay empty.
+4. **Apply.** The plan waits for your approval, unless auto-approve is on, in which case the Developer starts at once. The Planner is skipped (its model still has to be one you have, or the shared model).
 
-You can import before the Developer starts. Once work has begun, importing asks you to confirm that the board will be reset.
+You can import whenever the team isn't working: before the Developer starts, or after the project is done, stopped, failed or waiting for you. Once work has begun, importing asks you to confirm, in its own step, that the board will be reset. Plan files over 1 MB are refused.
 
-A plan can have up to **40 files** and **80 connections**. Paths are relative to the output folder (no drive letters, no `..`), every file needs a purpose, and every connection links two or more of the listed files.
+A plan can have up to **40 files** and **80 connections**. Paths are relative to the output folder (no drive letters, no `..`, at most 200 characters), every file needs a purpose, and every connection links two or more of the listed files. A plan can't include files inside `.git` or `node_modules`, editor or tool settings that run commands (such as `.vscode/tasks.json` or `.npmrc`), names like `CON` or `NUL`, names ending in a dot or space, or invisible and right-to-left characters.
 
 ## Safety
 
-- **File writes need no approval card inside the output folder**, because that folder is the project. Anything outside it asks first, as for every bot. A link or junction that points out of the folder counts as outside.
-- **Running commands always asks**, for example tests or installing packages. Only QA can run commands; the Developer can't. The card appears in the Coding Bot's chat, and the command runs from the output folder. A command waiting for your answer does not block the model for anything else.
+- **Only the plan's files are written.** Writing one of the plan's files needs no approval card, because the output folder is the project. Any other file, including helper scripts, files in `.git` or `node_modules` and editor settings that run commands, is refused. A link or junction that points out of the folder counts as outside and asks first.
+- **Secrets in the folder stay out of the models.** The roles can't read `.env` files, private keys or files like `.npmrc`, and searches skip them.
+- **Running commands always asks**, for example tests or installing packages, even if you set **Execution on this computer** to always allow; set to never allow, QA can't run commands at all. Only QA runs commands; the Developer can't. The card appears in the Coding Bot's chat, and the command runs from the output folder. A command waiting for your answer does not block the model for anything else. Commands never see FreeBird's own access token.
 - The roles cannot create helpers or hand work to other bots, and other bots cannot hand work to a Coding Bot.
 - **Deleting the Coding Bot deletes its three roles and its board, never your project files.** The output folder is not touched.
 
@@ -92,14 +101,21 @@ A plan can have up to **40 files** and **80 connections**. Paths are relative to
 - Keep the first brief short and concrete: what it is, the language, and what it must do.
 - On a local model the three roles run one after another, so swapping models between roles takes a moment. Using one model for all three avoids that.
 - **Nobody invents secrets.** The Developer and QA never make up an API key, token or password. A file that needs one gets a clearly marked placeholder such as `YOUR_API_KEY_HERE` and a comment saying where to get one. QA accepts that placeholder and fails a file with a made-up key. You add the real key.
-- **The Developer writes and QA tests.** The Developer writes only the file for its card (it can read the files its card connects to), takes at most 15 steps per card, has no thinking turned on for Ollama models (so it doesn't spend minutes reasoning before every file) and can't run commands. QA runs your code to check it and installs what the project needs, sometimes with several small commands in one review. Each command asks first, in the Coding Bot's chat, so expect a few cards while it checks.
+- **The Developer writes and QA tests.** For each card the Developer:
+  - writes only that card's file, and only reads files that are already written (it is told which files a later card writes, and not to look for them);
+  - reads at most 6 files per try, has at most 15 model rounds per try and is told when 3 are left;
+  - has only reading, writing, editing and finishing the card as tools, and no thinking turned on for Ollama models (so it doesn't spend minutes reasoning before every file);
+  - can't run commands.
+
+  If a try writes the file but forgets to say it is finished, the card goes to QA anyway. QA runs your code to check it and installs what the project needs, sometimes with several small commands in one review. Each command asks first, in the Coding Bot's chat, so expect a few cards while it checks.
+
 - A file the team already wrote in this project (for example before a restart) isn't written again: its card goes straight to QA, unless QA has already sent it back.
-- The roles appear under **Hidden Bots**. Clicking one opens its conversation with the Coding Bot, under **Bot conversations**.
+- The roles appear under **Hidden Bots**. Clicking one opens its conversation with the Coding Bot. The team's conversations and bots can't be deleted, duplicated or renamed on their own: they go with the Coding Bot. Only the Coding Bot itself sends desktop notifications, when it needs you.
 
 ## If something goes wrong
 
 - **"Needs you" after the round limit.** Read the note, raise the limit in the panel and press **Resume**, or step in and edit the files yourself.
 - **A card takes very long.** The **Slow** badge shows which one. A reasoning model can spend many minutes per file; give the Developer a smaller or faster model under **Models**, then **Stop** and **Resume**.
-- **Error status.** A Developer or QA turn that finishes without moving its card is retried up to three times, then the project stops with an error. Press **Resume** to try again, or switch that role to a stronger model.
+- **Error status.** A Developer or QA turn that finishes without moving its card gets three tries in all, and each retry is told what went wrong in the last one. A model or connection error is retried too, after 2 and then 10 seconds. After the third try the project stops with an error that says why: press **Resume** to try again, or switch that role to a stronger model.
 - **The plan keeps being refused.** The message says what is wrong with it. Ask for changes with a clearer brief, or import a plan.
 - **Folder refused.** Choose a different folder: a project folder of its own, away from your home folder and FreeBird's data.

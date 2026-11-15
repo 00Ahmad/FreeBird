@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { ApiRequestError } from "./api";
 import {
+  applyRequest,
   canApplyImport,
   existingWarning,
+  importFileProblem,
   importInput,
   MAX_IMPORT_BYTES,
+  utf8Bytes,
   needsReplace,
   previewCounts,
   type ImportPreview,
@@ -43,6 +46,28 @@ describe("what to send for an import", () => {
     const result = importInput("x".repeat(MAX_IMPORT_BYTES + 1));
     expect(result.ok).toBe(false);
     expect(importInput("x".repeat(MAX_IMPORT_BYTES)).ok).toBe(true);
+  });
+
+  it("counts the paste in bytes, as the server does", () => {
+    // "é" is two bytes: half a million of them are a megabyte.
+    const accents = "é".repeat(MAX_IMPORT_BYTES / 2 + 1);
+    expect(accents.length).toBeLessThan(MAX_IMPORT_BYTES);
+    expect(importInput(accents).ok).toBe(false);
+    expect(importInput("é".repeat(MAX_IMPORT_BYTES / 2)).ok).toBe(true);
+    expect(utf8Bytes("a€😀")).toBe(1 + 3 + 4);
+  });
+
+  it("resets a board that has moved only after the user confirms it", () => {
+    expect(applyRequest(true, false)).toBeNull();
+    expect(applyRequest(true, true)).toEqual({ replace: true });
+    expect(applyRequest(false, false)).toEqual({ replace: false });
+  });
+
+  it("refuses a picked file over the limit before reading it", () => {
+    expect(importFileProblem({ name: "plan.json", size: MAX_IMPORT_BYTES + 1 })).toMatch(
+      /^plan\.json: .*1 MB/,
+    );
+    expect(importFileProblem({ name: "plan.json", size: MAX_IMPORT_BYTES })).toBeNull();
   });
 });
 

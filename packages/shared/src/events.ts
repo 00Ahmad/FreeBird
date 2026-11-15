@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import { Bot } from "./bots";
 import { CodingProject } from "./coding";
+import { JobProject } from "./jobs";
+import { ClientProject } from "./clients";
 import { Discussion } from "./discussion";
 import { Race } from "./race";
 import { BotId, EventId, MessageId, ThreadId } from "./ids";
@@ -60,6 +62,10 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("race.updated"), race: Race }),
   /** A Coding Bot's project changed: its plan, a card on the board, its status or its round. */
   z.object({ ...base, type: z.literal("coding.updated"), project: CodingProject }),
+  /** A Job Bot changed: its profile, a scan's progress, a card on the board. */
+  z.object({ ...base, type: z.literal("job.updated"), project: JobProject }),
+  /** A Client Bot changed: its profile, a scan’s progress, a lead on the board, your lists. */
+  z.object({ ...base, type: z.literal("client.updated"), project: ClientProject }),
   /** Something changed in a collection the UI caches; refetch it. */
   z.object({
     ...base,

@@ -1,10 +1,11 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import { createProvider, isLocalUrl } from "@mrog/providers";
 import {
   AddProviderInput,
   isSecretTooLong,
+  type FoundKey,
   PROVIDER_PRESETS,
   presetFor,
   ProviderConfig,
@@ -28,12 +29,70 @@ const takesKey = (presetId: string): boolean => {
   return !preset || preset.needsKey || preset.group === "custom";
 };
 
+/** Values people leave in a variable from a setup guide, which would only fail on the first request. */
+const PLACEHOLDERS = [
+  /^<.*>$/, // <your key>
+  /^\$\{?\w+\}?$|^%\w+%$/, // a reference to another variable that was never expanded
+  /^(changeme|change-me|placeholder|todo|none|null|undefined|dummy|example|test|secret|token|api[-_]?key|key)$/i,
+  // your-key, YOUR_API_KEY_HERE, paste-your-token-here. It must end in "key" or the like: some real keys have no
+  // prefix and could start with "my" or "add".
+  /^(your|my|insert|enter|paste|put|add|replace)[\w.-]*(key|token|secret)([-_.]?here)?$/i,
+  /^([a-z]+[-_])*[.x*]{3,}$/i, // xxx, sk-..., sk-ant-xxxx
+  /\.\.\.|…/, // a key shown shortened, like sk-abc...wxyz
+];
+
+/** A variable's value trimmed, or null when it can't be a working key: empty, broken up, too long or a placeholder. */
+export function plausibleKey(raw: string | undefined): string | null {
+  const value = raw?.trim() ?? "";
+  if (!value || /\s/.test(value) || isSecretTooLong(value)) return null;
+  return PLACEHOLDERS.some((pattern) => pattern.test(value)) ? null : value;
+}
+
 /** Saved cloud/local providers beyond the built-in Ollama: registered live, keys in the keychain. */
 export class ProviderManager {
   constructor(
     private readonly services: Pick<Services, "store" | "vault" | "registry" | "catalog" | "bus">,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
+
+  /**
+   * One environment variable of the user's, by name. The desktop app starts the harness with the user's environment,
+   * so a variable set for the account is here; one set only in a terminal's profile is not. Looked up by name rather
+   * than copied, because on Windows names match whatever their case. Tests swap it.
+   */
+  readEnv: (name: string) => string | undefined = (name) => process.env[name];
+
+  /** Whether a provider of this type is already set up (turned off counts), so its key isn't offered again. */
+  hasPreset(presetId: string): boolean {
+    return this.configs().some((config) => config.preset === presetId);
+  }
+
+  /** The first of the preset's variables holding a usable key, with its value; null when none does. */
+  private foundValue(presetId: string): { envVar: string; value: string } | null {
+    for (const envVar of presetFor(presetId)?.envVars ?? []) {
+      const value = plausibleKey(this.readEnv(envVar));
+      if (value) return { envVar, value };
+    }
+    return null;
+  }
+
+  /** Keys found on this computer for providers not yet added. Names only: a value never leaves the harness. */
+  found(): FoundKey[] {
+    const added = new Set(this.configs().map((config) => config.preset));
+    const out: FoundKey[] = [];
+    for (const preset of PROVIDER_PRESETS) {
+      if (!preset.envVars?.length || added.has(preset.preset)) continue;
+      const found = this.foundValue(preset.preset);
+      if (found) out.push({ preset: preset.preset, label: preset.label, envVar: found.envVar });
+    }
+    return out;
+  }
+
+  /** The request a pasted key would make, with the key from the environment instead; null when none is usable. */
+  foundInput(presetId: string): AddProviderInput | null {
+    const found = this.foundValue(presetId);
+    return found ? { preset: presetId, apiKey: found.value } : null;
+  }
 
   configs(): ProviderConfig[] {
     const parsed = z.array(ProviderConfig).safeParse(this.services.store.settings.get(KEY) ?? []);
@@ -153,13 +212,36 @@ export function registerProviderRoutes(app: FastifyInstance, services: Services,
     typeof (body as { apiKey?: unknown } | null)?.apiKey === "string" &&
     isSecretTooLong((body as { apiKey: string }).apiKey.trim());
 
-  app.post("/api/providers", async (request, reply) => {
-    if (keyTooLong(request.body)) return fail(reply, 400, "secret_too_long", SECRET_TOO_LONG);
-    const input = parse(AddProviderInput, request.body, reply);
+  const addProvider = async (body: unknown, reply: FastifyReply) => {
+    if (keyTooLong(body)) return fail(reply, 400, "secret_too_long", SECRET_TOO_LONG);
+    const input = parse(AddProviderInput, body, reply);
     if (!input) return reply;
     const config = await attempt(reply, () => manager.add(input), 400, "invalid_request");
     if (!config) return reply;
     return reply.code(201).send({ provider: manager.view(config) });
+  };
+
+  app.post("/api/providers", async (request, reply) => addProvider(request.body, reply));
+
+  app.get("/api/providers/found", async () => ({ found: manager.found() }));
+
+  // The harness reads the key itself and adds it exactly as if it had been pasted, so it is checked, kept and
+  // announced the same way. None of these answers carries the value.
+  app.post<{ Params: { preset: string } }>("/api/providers/found/:preset", async (request, reply) => {
+    const preset = presetFor(request.params.preset);
+    if (!preset?.envVars?.length)
+      return fail(reply, 404, "not_found", "FreeBird doesn't look for a key for this provider.");
+    if (manager.hasPreset(preset.preset))
+      return fail(reply, 409, "already_added", `${preset.label} is already added.`);
+    const input = manager.foundInput(preset.preset);
+    if (!input)
+      return fail(
+        reply,
+        404,
+        "not_found",
+        `No usable ${preset.label} key is set on this computer. Paste one with Add provider instead.`,
+      );
+    return addProvider(input, reply);
   });
 
   app.patch<{ Params: { id: string } }>("/api/providers/:id", async (request, reply) => {

@@ -26,7 +26,14 @@ import {
   workingStrip,
   type BannerIcon,
 } from "../../lib/codingFeedback";
-import { activeElapsed, formatDuration, projectTotals, slowHint, totalsLine } from "../../lib/codingWork";
+import {
+  activeElapsed,
+  formatDuration,
+  projectTotals,
+  slowHint,
+  totalsLine,
+  waitingHint,
+} from "../../lib/codingWork";
 import { tint } from "./parts";
 
 const TONE_COLOR: Record<StatusTone, string> = {
@@ -48,15 +55,26 @@ const ICON: Record<BannerIcon, LucideIcon> = {
   alert: TriangleAlert,
 };
 
-/** One plain line for the status, in a colour and with an icon, and what to do next. */
-export function StatusBanner({ project, now }: { project: CodingProject; now: number }) {
+/**
+ * One plain line for the status, in a colour and with an icon, and what to do next. `waiting`: the role at work
+ * waits for the user (an approval), so its time is no sign of a slow model.
+ */
+export function StatusBanner({
+  project,
+  now,
+  waiting = false,
+}: {
+  project: CodingProject;
+  now: number;
+  waiting?: boolean;
+}) {
   const banner = statusBanner(project);
-  const slow = slowHint(project, now);
+  const slow = slowHint(project, now, waiting);
+  const wait = waiting ? waitingHint(project) : null;
   const color = TONE_COLOR[banner.tone];
   const Icon = ICON[banner.icon];
   return (
     <div
-      role="status"
       className="flex items-start gap-2.5 rounded-xl border px-3 py-2"
       style={{ background: tint(color, 10), borderColor: tint(color, 40) }}
     >
@@ -67,8 +85,18 @@ export function StatusBanner({ project, now }: { project: CodingProject; now: nu
         style={{ color }}
       />
       <div className="min-w-0 text-[12.5px]">
-        <p className="font-medium text-ink">{banner.line}</p>
-        {banner.next && <p className="text-ink-2">{banner.next}</p>}
+        {/* Only the status and the next step are announced as they change; the slow hint below ticks with the
+            minutes and would be read out again every minute. */}
+        <div role="status">
+          <p className="font-medium text-ink">{banner.line}</p>
+          {banner.next && <p className="text-ink-2">{banner.next}</p>}
+          {wait && (
+            <p className="mt-0.5 flex items-start gap-1.5 text-warning">
+              <Hand size={13} aria-hidden className="mt-px shrink-0" />
+              {wait}
+            </p>
+          )}
+        </div>
         {slow && (
           <p className="mt-0.5 flex items-start gap-1.5 text-warning">
             <Timer size={13} aria-hidden className="mt-px shrink-0" />

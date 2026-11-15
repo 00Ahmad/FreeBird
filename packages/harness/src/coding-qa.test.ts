@@ -121,6 +121,10 @@ describe("a file that changes sends the cards that rely on it back to QA", () =>
     );
     const script = done.cards.find((c) => c.title === "weather-app.js")!;
     expect(script.comments.some((c) => c.text.startsWith("Back in QA: weather-app.js changed"))).toBe(true);
+    for (const said of done.cards.flatMap((c) => c.comments))
+      expect(said.kind).toBe(
+        said.text.startsWith("Back in QA") ? "requeue" : said.author === "qa" ? said.kind : "note",
+      );
     // At no moment was the project done while one of those cards waited.
     for (const project of published)
       if (project.status === "done") expect(project.cards.every((c) => c.column === "done")).toBe(true);
@@ -186,6 +190,8 @@ describe("the check of the whole project", () => {
     const comment = connection.comments.find((c) => c.author === "qa" && c.text.includes("plain <script"))!;
     expect(comment.text).toContain('type="module"');
     expect(comment.round).toBe(1);
+    // A finding of the automatic check is its own kind of comment.
+    expect(comment.kind).toBe("check");
     expect(done.log!.map((l) => l.text)).toContain(
       `The automatic check sent index.html ↔ weather-app.js back: ${comment.text.slice(0, 69).trim()}…`,
     );

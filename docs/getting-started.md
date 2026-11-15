@@ -47,7 +47,7 @@ Pick a model that can use tools, **4B parameters or larger**. Tested and recomme
 
 Models of 1B are too unreliable with tools. See [Models & providers](models-and-providers.md) for tuning and for other local runtimes like LM Studio, vLLM and llama.cpp.
 
-**No GPU, or prefer the cloud?** Skip local setup: open **Settings → Models & Providers**, choose a provider, paste your API key, press **Test**, and pick a model. Keys are stored in your operating system's keychain.
+**No GPU, or prefer the cloud?** Skip local setup: open **Settings → Models & Providers**, choose a provider, paste your API key, press **Test**, and pick a model. Keys are stored in your operating system's keychain. If a key is already set on your computer (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), it appears under **Found on this computer**: press **Add** and you're done.
 
 ## 4. Meet your first bot
 

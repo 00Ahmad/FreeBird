@@ -50,6 +50,8 @@ type Overlay =
   | "newCluster"
   | "newRace"
   | "newCodingBot"
+  | "newJobBot"
+  | "newClientBot"
   | "palette"
   | "shortcuts"
   | { avatarFor: string }
@@ -64,10 +66,14 @@ interface UiState {
   renamingBotId: string | null;
   settingsOpen: SettingsSection | null;
   /** Right-hand panel of the chat. */
-  panel: "details" | "computer" | "browser" | "coding" | null;
+  panel: "details" | "computer" | "browser" | "coding" | "job" | "client" | null;
   /** Whether the Coding panel is wanted in a Coding Bot's chat (it is, until the user closes it), and its tab. */
   codingOpen: boolean;
   codingTab: CodingTab;
+  /** Whether the Job panel is wanted in a Job Bot's chat (it is, until the user closes it). */
+  jobOpen: boolean;
+  /** Whether the Client panel is wanted in a Client Bot's chat (it is, until the user closes it). */
+  clientOpen: boolean;
   compactSidebar: boolean;
   overlay: Overlay;
   activity: Record<string, { botId: string | null; activity: ThreadActivity }>;
@@ -93,6 +99,10 @@ interface UiState {
   /** Opens the Coding panel, or closes it (and remembers that) when it is showing. */
   toggleCoding(): void;
   setCodingTab(tab: CodingTab): void;
+  /** Opens the Job panel, or closes it (and remembers that) when it is showing. */
+  toggleJob(): void;
+  /** Opens the Client panel, or closes it (and remembers that) when it is showing. */
+  toggleClient(): void;
   toggleCompact(): void;
   setOverlay(overlay: Overlay): void;
   setActivity(threadId: string, botId: string | null, activity: ThreadActivity): void;
@@ -120,6 +130,8 @@ export const useUi = create<UiState>((set) => ({
   panel: null,
   codingOpen: true,
   codingTab: "diagram",
+  jobOpen: true,
+  clientOpen: true,
   compactSidebar: readCompact(),
   overlay: null,
   activity: {},
@@ -149,6 +161,14 @@ export const useUi = create<UiState>((set) => ({
       state.panel === "coding" ? { panel: null, codingOpen: false } : { panel: "coding", codingOpen: true },
     ),
   setCodingTab: (codingTab) => set({ codingTab }),
+  toggleJob: () =>
+    set((state) =>
+      state.panel === "job" ? { panel: null, jobOpen: false } : { panel: "job", jobOpen: true },
+    ),
+  toggleClient: () =>
+    set((state) =>
+      state.panel === "client" ? { panel: null, clientOpen: false } : { panel: "client", clientOpen: true },
+    ),
   toggleCompact: () =>
     set((state) => {
       try {

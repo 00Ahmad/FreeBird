@@ -17,6 +17,8 @@ interface ActivityStore {
   advance(project: Pick<CodingProject, "botId" | "cards">): void;
   /** The new QA comment on this card has been seen. */
   acknowledge(botId: string, cardId: string): void;
+  /** The Coding Bot was deleted. */
+  forget(botId: string): void;
 }
 
 export const useCardActivity = create<ActivityStore>((set, get) => ({
@@ -38,5 +40,12 @@ export const useCardActivity = create<ActivityStore>((set, get) => ({
     if (!current) return;
     const next = acknowledgeCard(current, cardId);
     if (next !== current) set((state) => ({ byBot: { ...state.byBot, [botId]: next } }));
+  },
+  forget: (botId) => {
+    if (!(botId in get().byBot)) return;
+    set((state) => {
+      const { [botId]: _, ...byBot } = state.byBot;
+      return { byBot };
+    });
   },
 }));

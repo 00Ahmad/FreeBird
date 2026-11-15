@@ -20,6 +20,8 @@ import { installDelegation } from "./delegation";
 import { installDiscussions, type Discussions } from "./discussion";
 import { installRaces, type Races } from "./race";
 import { installCoding, type Coding } from "./coding";
+import { installJobs, type Jobs } from "./jobs/service";
+import { installClients, type Clients } from "./clients/service";
 import { TurnManager } from "./turns";
 import { VaultService } from "./vault";
 import type { WatchdogLimits } from "./watchdog";
@@ -47,6 +49,8 @@ export interface Services {
   discussions: Discussions;
   races: Races;
   coding: Coding;
+  jobs: Jobs;
+  clients: Clients;
   fetchImpl: typeof fetch;
   /** Cleanup hooks run on shutdown, in reverse order. */
   disposers: (() => void | Promise<void>)[];
@@ -143,6 +147,8 @@ export function createServices({
     discussions: undefined as unknown as Discussions,
     races: undefined as unknown as Races,
     coding: undefined as unknown as Coding,
+    jobs: undefined as unknown as Jobs,
+    clients: undefined as unknown as Clients,
   } satisfies Services;
   services.scrubber = new SecretScrubber(() => services.vaultService.secretValues());
   services.scrubber.refresh();
@@ -165,6 +171,10 @@ export function createServices({
   services.discussions = installDiscussions(services);
   services.races = installRaces(services);
   services.coding = installCoding(services);
+  // After the Coding Bot: the Job Bot chains the turn extensions the Coding Bot set.
+  services.jobs = installJobs(services);
+  // After the Job Bot: the Client Bot chains the turn extensions both set.
+  services.clients = installClients(services);
   services.agent.toolSources.push(() => services.connectors.toolSpecs());
   // A bot's access to each connected app narrows its tools through the same gates as everything else, so the Details
   // panel and the model always agree about what it has.
@@ -185,7 +195,10 @@ export function createServices({
   );
   services.agent.toolSources.push((bot) => services.computer.tools(bot));
   services.browser.logins = services.vaultService;
-  services.agent.toolSources.push((bot) => services.browser.tools(bot));
+  // A Parallel Bots role that searches uses a tab of its own.
+  services.agent.toolSources.push((bot, _thread, _messageId, info) =>
+    services.browser.tools(bot, info.lane ? BrowserManager.laneTab(bot.id, info.lane) : undefined),
+  );
   // The browser guidance names the browser's tools: a bot whose list turns them off isn't told it has them.
   services.agent.promptSources.push((bot) => ({
     extra: services.agent.allows(bot, bot.visual ? "screen_look" : "browser_open")

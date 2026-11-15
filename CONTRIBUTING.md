@@ -8,7 +8,7 @@ Thanks for helping! FreeBird is a young project and every bug report, idea, doc 
 - **Suggest a feature**: open a feature request and describe the problem it solves.
 - **Test a model**: run the [evals](docs/development.md#evals) on models you have and share the results in an issue. This helps everyone pick a good model.
 - **Improve the docs**: typos, unclear steps, missing answers in the [FAQ](docs/troubleshooting.md).
-- **Write code**: see the [roadmap](docs/roadmap.md) for open items. Good places to start:
+- **Write code**. Good places to start:
   - macOS and Linux installers,
   - a Playwright end-to-end suite,
   - AWS Bedrock and Google Vertex providers,

@@ -16,10 +16,12 @@ import {
   useUpdateGroup,
 } from "../../hooks/team";
 import { useThreads } from "../../hooks/threads";
+import { botActions, isTeamThread } from "../../lib/codingTeam";
 import { chatFor } from "../../lib/groups";
 import { exportTemplate } from "../../lib/templates";
 import { useUi } from "../../state";
 import { ModelMenu } from "../chat/ModelMenu";
+import { groupTitle } from "../Sidebar";
 import { BotRoutines } from "../routines/BotRoutines";
 import { ToolsBlock } from "./ToolsBlock";
 
@@ -116,6 +118,9 @@ function BotDetails({ bot }: { bot: Bot }) {
   const update = useUpdateBot();
   const setOverlay = useUi((state) => state.setOverlay);
   const { data: skills } = useSkills(bot.id);
+  const { data: bots } = useBots();
+  // A Coding Bot's role is named after its team.
+  const canRename = botActions(bot, bots ?? []).rename;
   const patch = (value: Parameters<typeof update.mutate>[0]["patch"]) =>
     update.mutate({ id: bot.id, patch: value });
 
@@ -133,13 +138,17 @@ function BotDetails({ bot }: { bot: Bot }) {
             <Pencil size={11} />
           </span>
         </button>
-        <InlineText
-          label="name"
-          value={bot.name}
-          placeholder="Name"
-          onSave={(name) => name && patch({ name })}
-          className="text-center text-[15px] font-semibold"
-        />
+        {canRename ? (
+          <InlineText
+            label="name"
+            value={bot.name}
+            placeholder="Name"
+            onSave={(name) => name && patch({ name })}
+            className="text-center text-[15px] font-semibold"
+          />
+        ) : (
+          <p className="px-1.5 py-1 text-center text-[15px] font-semibold">{bot.name}</p>
+        )}
         <InlineText
           label="label"
           value={bot.label ?? ""}
@@ -204,10 +213,11 @@ function TeamBlock({ bot }: { bot: Bot }) {
   const helpers = (bots ?? []).filter((candidate) => candidate.parentId === bot.id);
 
   if (bot.parentId) {
+    const role = parent?.coding === true || parent?.job === true || parent?.client === true;
     return (
       <Block title="Team">
         <p className="text-[13px] text-ink-2">
-          Helper of{" "}
+          {role ? "Part of the team of " : "Helper of "}
           <button
             type="button"
             className="text-accent hover:underline"
@@ -215,18 +225,25 @@ function TeamBlock({ bot }: { bot: Bot }) {
           >
             {parent?.name ?? "a coordinator"}
           </button>
-          {bot.temporary ? ". Made for a task; it can't hand work to other bots." : "."}
+          {role
+            ? `. It is made and deleted with its ${parent?.job ? "Job Bot" : parent?.client ? "Client Bot" : "Coding Bot"}.`
+            : bot.temporary
+              ? ". Made for a task; it can't hand work to other bots."
+              : "."}
         </p>
-        <Button
-          size="sm"
-          variant="danger"
-          className="mt-2"
-          onClick={() =>
-            window.confirm(`Dismiss ${bot.name}? Its chats are deleted.`) && remove.mutate(bot.id)
-          }
-        >
-          <Trash2 size={13} /> Dismiss helper
-        </Button>
+        {/* A Coding Bot's role can't be dismissed on its own: the team needs all three. */}
+        {!role && (
+          <Button
+            size="sm"
+            variant="danger"
+            className="mt-2"
+            onClick={() =>
+              window.confirm(`Dismiss ${bot.name}? Its chats are deleted.`) && remove.mutate(bot.id)
+            }
+          >
+            <Trash2 size={13} /> Dismiss helper
+          </Button>
+        )}
       </Block>
     );
   }
@@ -496,6 +513,33 @@ function GroupDetails({ thread, bots }: { thread: Thread; bots: Bot[] }) {
   );
   const others = bots.filter((bot) => !thread.memberIds.includes(bot.id) && !bot.hidden && !bot.clusterId);
   const setMembers = (memberIds: string[]) => update.mutate({ id: thread.id, patch: { memberIds } });
+
+  // A Coding Bot's conversation with one of its roles belongs to the team: it can be read, not renamed or changed.
+  if (isTeamThread(thread, bots)) {
+    return (
+      <>
+        <div className="border-b border-border px-4 py-4">
+          <p className="px-1.5 text-[15px] font-semibold">
+            {groupTitle(thread, new Map(bots.map((b) => [b.id, b])))}
+          </p>
+        </div>
+        <Block title={`Members · ${members.length}`}>
+          <ul className="flex flex-col gap-1">
+            {members.map((bot) => (
+              <li key={bot.id} className="flex items-center gap-2 text-[13px]">
+                <BotAvatar avatar={bot.avatar} size={22} />
+                <span className="flex-1 truncate">{bot.name}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[12px] text-ink-3">
+            A team bot (a Coding Bot, a Job Bot or a Client Bot) and one of its roles work here. It goes when
+            that bot is deleted.
+          </p>
+        </Block>
+      </>
+    );
+  }
 
   return (
     <>

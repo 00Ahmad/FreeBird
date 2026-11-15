@@ -32,10 +32,15 @@ export interface Seen {
   think: unknown;
   /** The newest tool result in the conversation (what the model just learned). */
   lastTool: string;
+  /** Notes added to the turn after its task (the Developer's "steps left" note). */
+  notes: string[];
   system: string;
 }
 
-export type PlanStep = { tool: unknown } | { json: unknown } | { say: string };
+/** `fail`: the model fails (an HTTP 500) instead of answering; `wait`: it answers once this settles. */
+export type PlanStep = ({ tool: unknown } | { json: unknown } | { say: string } | { fail: true }) & {
+  wait?: Promise<void>;
+};
 
 export interface DevAct {
   /** File content to write (file cards); null writes nothing. */
@@ -44,8 +49,14 @@ export interface DevAct {
   command?: string;
   /** Another path to write before its own (a file that belongs to another card). */
   extra?: { path: string; content: string };
-  /** Never finish: keep looking at one more folder, call after call. */
+  /** More paths to write before its own, in order. */
+  extras?: { path: string; content: string }[];
+  /** Never finish: keep reading one more file, call after call. */
   loop?: boolean;
+  /** Files to read (read_file) before anything else. */
+  reads?: string[];
+  /** The model fails (an HTTP 500) on this request of the turn (0 is the first), after the calls before it. */
+  failAt?: number;
   /** Call finish_card (default yes). */
   finish?: boolean;
   /** Wait for this before answering (a slow model). */
@@ -67,7 +78,17 @@ export interface Behave {
   review(
     card: { kind: "file" | "connector"; key: string },
     nth: number,
-  ): { pass: boolean; comment?: string; command?: string; wait?: Promise<void> };
+  ): {
+    pass: boolean;
+    comment?: string;
+    command?: string;
+    wait?: Promise<void>;
+    failAt?: number;
+    /** Files QA reads (read_file) first. */
+    reads?: string[];
+    /** Text QA searches the folder for (search_files) first. */
+    search?: string;
+  };
 }
 
 export const THREE_FILES = {
@@ -101,9 +122,10 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
     const role = (/You are .+? (Planner|Developer|QA),/.exec(system)?.[1]?.toLowerCase() ??
       "other") as Seen["role"];
     const messages: { role: string; content: string }[] = body.messages;
-    const lastUser = messages.findLastIndex((m) => m.role === "user");
-    const task = messages[lastUser]?.content ?? "";
-    const done = messages.slice(lastUser + 1).filter((m) => m.role === "tool").length;
+    // A role's turn is its one task; a user message after it is a note added mid-turn, not a new task.
+    const firstUser = messages.findIndex((m) => m.role === "user");
+    const task = messages[firstUser]?.content ?? "";
+    const done = messages.slice(firstUser + 1).filter((m) => m.role === "tool").length;
     seen.push({
       role,
       fresh: done === 0,
@@ -114,6 +136,7 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
       tools: (body.tools ?? []).map((tool: { function: { name: string } }) => tool.function.name),
       think: body.think,
       lastTool: messages.findLast((m) => m.role === "tool")?.content ?? "",
+      notes: messages.slice(firstUser + 1).flatMap((m) => (m.role === "user" ? [m.content] : [])),
       system,
     });
     if (role === "other") return ndjson([...text("hello"), { done: true }]);
@@ -123,6 +146,8 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
     let rows: unknown[];
     if (role === "planner") {
       const step = behave.plans[Math.min(done === 0 ? planned.n++ : planned.n - 1, behave.plans.length - 1)]!;
+      if (done === 0 && step.wait) await step.wait;
+      if ("fail" in step) return new Response("the model crashed", { status: 500 });
       rows =
         done > 0 || "say" in step
           ? text("say" in step ? step.say : "Plan sent.")
@@ -135,14 +160,19 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
           ? (attempts.set(key, (attempts.get(key) ?? 0) + 1), attempts.get(key)!)
           : attempts.get(key)!;
       const act = behave.develop(card, attempt);
+      if (act.failAt === done) return new Response("the model crashed", { status: 500 });
       const calls: [string, unknown][] = [];
+      for (const path of act.reads ?? []) calls.push(["read_file", { path }]);
       if (act.extra) calls.push(["write_file", act.extra]);
+      for (const extra of act.extras ?? []) calls.push(["write_file", extra]);
       if (act.command) calls.push(["run_command", { command: act.command }]);
       if (kind === "file" && act.write !== null)
         calls.push(["write_file", { path: key, content: act.write ?? `// ${key}\n` }]);
       if (act.finish !== false) calls.push(["finish_card", { note: `Did ${key}` }]);
       if (done === 0 && act.wait) await act.wait;
-      const next = act.loop ? (["list_files", { path: `dir${done}` }] as [string, unknown]) : calls[done];
+      const next = act.loop
+        ? (["read_file", { path: `notes/${done}.txt` }] as [string, unknown])
+        : calls[done];
       rows = next ? call(next[0], next[1]) : text("Done.");
     } else if (task.includes("FINAL CHECK OF THE WHOLE PROJECT")) {
       const nth = done === 0 ? ++finalChecks : finalChecks;
@@ -153,8 +183,11 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
       const nth =
         done === 0 ? (reviews.set(key, (reviews.get(key) ?? 0) + 1), reviews.get(key)!) : reviews.get(key)!;
       const verdict = behave.review(card, nth);
+      if (verdict.failAt === done) return new Response("the model crashed", { status: 500 });
       if (done === 0 && verdict.wait) await verdict.wait;
       const calls: [string, unknown][] = [];
+      for (const path of verdict.reads ?? []) calls.push(["read_file", { path }]);
+      if (verdict.search) calls.push(["search_files", { query: verdict.search }]);
       if (verdict.command) calls.push(["run_command", { command: verdict.command }]);
       calls.push([
         "review_card",

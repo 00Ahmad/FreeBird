@@ -19,6 +19,7 @@ const message = (over: Partial<Message>): Message => ({
   botId: "bot_a",
   moderator: false,
   parallel: false,
+  parallelTools: false,
   parts: [],
   status: "done",
   model: null,

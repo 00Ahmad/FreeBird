@@ -120,6 +120,7 @@ function toMessage(row: Row): Message | null {
     botId: row.bot_id ?? null,
     moderator: row.moderator === 1,
     parallel: row.parallel === 1,
+    parallelTools: row.parallel_tools === 1,
     parts: Array.isArray(raw) ? raw.map(repairPart) : raw,
     status: row.status,
     model: row.model ?? null,
@@ -161,6 +162,7 @@ export interface NewMessage {
   botId?: string | null;
   moderator?: boolean;
   parallel?: boolean;
+  parallelTools?: boolean;
   parts: MessagePart[];
   status?: MessageStatus;
   model?: string | null;
@@ -204,8 +206,8 @@ export class MessageRepo {
       at = new Date(new Date(String(last.at)).getTime() + 1);
     this.db
       .prepare(
-        `INSERT INTO messages (id, thread_id, role, bot_id, moderator, parallel, parts, status, model, reply_to_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, thread_id, role, bot_id, moderator, parallel, parallel_tools, parts, status, model, reply_to_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -214,6 +216,7 @@ export class MessageRepo {
         input.botId ?? null,
         input.moderator ? 1 : 0,
         input.parallel ? 1 : 0,
+        input.parallelTools ? 1 : 0,
         JSON.stringify(input.parts),
         input.status ?? "done",
         input.model ?? null,
@@ -254,7 +257,7 @@ export class MessageRepo {
     const current = patch.parts
       ? this.db
           .prepare(
-            "SELECT id, thread_id, role, bot_id, moderator, parallel, '[]' AS parts, status, model, usage, reply_to_id, reactions, created_at FROM messages WHERE id = ?",
+            "SELECT id, thread_id, role, bot_id, moderator, parallel, parallel_tools, '[]' AS parts, status, model, usage, reply_to_id, reactions, created_at FROM messages WHERE id = ?",
           )
           .get(id)
       : this.db.prepare("SELECT * FROM messages WHERE id = ?").get(id);

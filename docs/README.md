@@ -14,4 +14,4 @@
 
 - **[Development](development.md)**: setup, commands, layout, conventions, tests, evals, packaging.
 - **[Architecture](architecture.md)**: how the shell, interface, harness and engine fit together.
-- **[Contributing](../CONTRIBUTING.md)** and the **[roadmap](roadmap.md)**.
+- **[Contributing](../CONTRIBUTING.md)**.

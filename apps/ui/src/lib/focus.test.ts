@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { focusIsIdle, nextFocus, tabbable, type Focusable } from "./focus";
+import { firstFocus, focusIsIdle, nextFocus, tabbable, type Focusable } from "./focus";
+
+describe("where a dialog starts", () => {
+  it("is the first field Tab can reach, past the buttons before it", () => {
+    // Close, "Choose a file…", the paste box: the hidden file input isn't in the list at all.
+    expect(firstFocus([{ field: false }, { field: false }, { field: true }])).toBe(2);
+    expect(firstFocus([{ field: true }, { field: true }])).toBe(0);
+  });
+
+  it("is the first control when there is nothing to type into, and nothing when nothing can take focus", () => {
+    expect(firstFocus([{ field: false }, { field: false }])).toBe(0);
+    expect(firstFocus([])).toBe(-1);
+  });
+});
 
 const item = (over: Partial<Focusable> = {}): Focusable => ({ tabIndex: 0, rendered: true, ...over });
 

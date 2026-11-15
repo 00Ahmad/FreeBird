@@ -1,4 +1,6 @@
 import {
+  Briefcase,
+  Handshake,
   CodeXml,
   Flag,
   Keyboard,
@@ -17,6 +19,8 @@ import { BotAvatar, cn } from "@mrog/ui-kit";
 import { useBots } from "../hooks/bots";
 import { useThreads } from "../hooks/threads";
 import { useNewBot } from "../hooks/useNewBot";
+import { isTeamBot } from "../lib/codingTeam";
+import { chatFor } from "../lib/groups";
 import { useUi } from "../state";
 import { Modal } from "./Modal";
 import { SETTINGS_PAGES } from "./settings/pages";
@@ -51,20 +55,22 @@ export function CommandPalette() {
     const botMap = new Map((bots ?? []).map((bot) => [bot.id, bot]));
     return [
       ...(bots ?? [])
-        .filter((bot) => !bot.clusterId)
+        // A Coding Bot's Planner, Developer and QA are found as their conversations with it (listed below).
+        .filter((bot) => !bot.clusterId && !isTeamBot(bot, bots ?? []))
         .map((bot) => ({
           id: bot.id,
           label: bot.name,
           hint: bot.label ?? "Bot",
           icon: <BotAvatar avatar={bot.avatar} size={18} />,
-          run: () => select(bot.threadId),
+          // A helper's own chat stays empty: it opens its conversation with the bot that made it, as in the sidebar.
+          run: () => select(chatFor(bot, threads ?? [])),
         })),
       ...(threads ?? [])
         .filter((thread) => thread.kind === "group")
         .map((thread) => ({
           id: thread.id,
           label: groupTitle(thread, botMap),
-          hint: "Group chat",
+          hint: thread.pair ? "Bot conversation" : "Group chat",
           icon: <MessagesSquare size={16} />,
           run: () => select(thread.id),
         })),
@@ -93,6 +99,18 @@ export function CommandPalette() {
         label: "New Coding Bot",
         icon: <CodeXml size={16} />,
         run: () => setOverlay("newCodingBot"),
+      },
+      {
+        id: "new-job-bot",
+        label: "New Job Bot",
+        icon: <Briefcase size={16} />,
+        run: () => setOverlay("newJobBot"),
+      },
+      {
+        id: "new-client-bot",
+        label: "New Client Bot",
+        icon: <Handshake size={16} />,
+        run: () => setOverlay("newClientBot"),
       },
       {
         id: "new-race",

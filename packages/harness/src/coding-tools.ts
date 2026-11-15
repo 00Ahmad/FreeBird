@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { join } from "node:path";
 
 import { z } from "zod";
 
@@ -13,27 +14,45 @@ import { defineTool, resolvePath, safe, type ToolSpec } from "@mrog/tools";
 
 import { validatePlan } from "./coding-plan";
 
-/** Tools every role may use to look around; `update_plan` is the checklist the base prompt tells every bot to keep. */
-const LOOK = ["list_files", "read_file", "search_files", "update_plan"];
+/** Tools the Planner and QA use to look around. No `update_plan`: the loop is the team's checklist. */
+const LOOK = ["list_files", "read_file", "search_files"];
 
 /**
  * The tools each role has, and nothing else: no `spawn_bot`, `delegate`, `message_bot`, `dismiss_bot`, no web, no
  * browser. The planner cannot write files or run commands. The Developer writes files but runs nothing: QA runs and tests
- * the code (each command still asks the user) and changes no files itself.
+ * the code (each command still asks the user) and changes no files itself. The Developer only reads the files its card
+ * names: listing and searching the folder is how small models ended up reading 20 files and writing none.
  */
 export const ROLE_TOOLS: Record<CodingRole, string[]> = {
   planner: [...LOOK, "propose_plan"],
-  developer: [...LOOK, "write_file", "edit_file", "finish_card"],
+  developer: ["read_file", "write_file", "edit_file", "finish_card"],
   qa: [...LOOK, "run_command", "review_card", "finish_check"],
 };
 
-/** The most tool calls a Developer turn gets: one card is one file, so a turn that needs more is going round in circles. */
+/**
+ * The most model rounds a Developer turn gets (one reply and the tool calls in it is one round): one card is one file, so
+ * a turn that needs more is going round in circles.
+ */
 export const DEVELOPER_MAX_STEPS = 15;
+/** Rounds left when a Developer that hasn't written its file yet is told to write it now. */
+export const DEVELOPER_STEER_AT = 3;
+/** Distinct files a Developer try may read before it is told to write. */
+export const DEVELOPER_MAX_READS = 6;
 
 /** What a role's turn handed back, filled in by its own tools and read by the loop when the turn ends. */
 export interface TurnCapture {
   /** The card being worked on (for the Developer's check that the file is there). */
   card?: { id: string; kind: "file" | "connector"; path?: string };
+  /** QA's check of the whole project (it gets finish_check only), not a card review. */
+  finalCheck?: boolean;
+  /** The distinct files read so far, as the role named them (the Developer's read budget). */
+  reads?: string[];
+  /** Model rounds so far (counted by the Developer's steer hook). */
+  steps?: number;
+  /** The Developer was told it is running out of rounds. */
+  steered?: boolean;
+  /** A write_file or edit_file of the card's files went through in this turn. */
+  wrote?: boolean;
   plan?: Extract<ReturnType<typeof validatePlan>, { ok: true }>;
   /** What was wrong with the last plan the tool turned down, for the retry. */
   rejected?: string[];
@@ -280,7 +299,7 @@ const FORMAT_EXAMPLE = [
 /** The Planner's job for one turn: the brief, and for a retry or a revision what was wrong or asked for. */
 export function plannerMessage(
   project: CodingProject,
-  extra: { problems?: string[]; revision?: string } = {},
+  extra: { problems?: string[]; revision?: string; built?: boolean } = {},
 ): string {
   const parts = [
     `The user's brief:\n${project.brief}`,
@@ -296,9 +315,17 @@ export function plannerMessage(
         description: edge.description,
       })),
     };
+    // Files already built (Done cards) are kept only when the Planner keeps them word for word.
+    const keep = project.cards.some((card) => card.column === "done")
+      ? " Keep every file the change doesn't touch exactly as it is (the same path and purpose): only the files you add or whose purpose you change are written again."
+      : "";
     parts.push(
-      `Your current plan:\n\`\`\`json\n${JSON.stringify(current, null, 1)}\n\`\`\``,
-      `The user looked at it and asks for changes:\n${extra.revision}\nSend the whole updated plan, not only the changes.`,
+      extra.built
+        ? `The project was built from this plan, and its files are in the folder:\n\`\`\`json\n${JSON.stringify(current, null, 1)}\n\`\`\``
+        : `Your current plan:\n\`\`\`json\n${JSON.stringify(current, null, 1)}\n\`\`\``,
+      extra.built
+        ? `The user now asks for a change:\n${extra.revision}\nSend the whole updated plan, not only the changes.${keep}`
+        : `The user looked at it and asks for changes:\n${extra.revision}\nSend the whole updated plan, not only the changes.${keep}`,
     );
   } else if (extra.revision) parts.push(`The user asks for:\n${extra.revision}`);
   if (extra.problems?.length)
@@ -353,15 +380,82 @@ export function linkedPaths(project: CodingProject, card: CodingCard): string[] 
   );
 }
 
+/** Whether a planned file is in the output folder with something in it. */
+export const writtenIn =
+  (outputFolder: string) =>
+  (path: string): boolean => {
+    try {
+      const info = statSync(join(outputFolder, path));
+      return info.isFile() && info.size > 0;
+    } catch {
+      return false;
+    }
+  };
+
+/**
+ * The files a Developer turn may read: the linked files that are written (and the card's own file once it exists, so a
+ * fix can read what it fixes), and the linked files a later card writes, which there is nothing to read in yet.
+ */
+export function readableFiles(
+  project: CodingProject,
+  card: CodingCard,
+  written: (path: string) => boolean = writtenIn(project.outputFolder),
+): { written: string[]; later: string[] } {
+  const own = card.kind === "file" ? project.nodes.find((node) => node.id === card.ref)?.path : undefined;
+  const linked = linkedPaths(project, card);
+  return {
+    written: [...(own && written(own) ? [own] : []), ...linked.filter(written)],
+    later: linked.filter((path) => !written(path)),
+  };
+}
+
+/** What happened in a Developer try that didn't finish its card, for the next try's message. */
+export interface LastTry {
+  /** Distinct files it read. */
+  reads: number;
+  /** The card's file (or, for a connection, one of its files) changed. */
+  wrote: boolean;
+  /** It used up its rounds. */
+  stepLimit: boolean;
+  /** The model failed with this error. */
+  error?: string;
+}
+
+const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+
+function lastTryLine(card: CodingCard, own: string, last: LastTry): string {
+  const what = last.error
+    ? `stopped with an error (${last.error})`
+    : last.wrote
+      ? `${card.kind === "file" ? `wrote ${own}` : "changed the files"}, but finish_card was not called`
+      : `read ${files(last.reads)} and wrote nothing`;
+  return `Your last try ${what}${last.stepLimit && !last.error ? ", and it hit the step limit" : ""}.`;
+}
+
 /** The Developer's job for one card. It carries everything needed: the Developer reads no earlier chat. */
-export function developerMessage(project: CodingProject, card: CodingCard, retry = false): string {
+export function developerMessage(
+  project: CodingProject,
+  card: CodingCard,
+  last?: LastTry | null,
+  written: (path: string) => boolean = writtenIn(project.outputFolder),
+): string {
   const history = card.comments.length > 0 ? `Earlier notes on this card:\n${notes(card.comments)}` : "";
   const linked = linkedPaths(project, card);
   const own = project.nodes.find((node) => node.id === card.ref)?.path ?? card.title;
-  const readList =
-    linked.length > 0
-      ? `Files this card connects to (read these if you need them, and no others): ${linked.join(", ")}.`
-      : "This card connects to no other file, so you don't need to read anything else.";
+  const readable = readableFiles(project, card, written);
+  const readList = [
+    readable.written.length > 0
+      ? `Files already written (read these only if you need them, and no others): ${readable.written.join(", ")}.`
+      : linked.length === 0
+        ? "This card connects to no other file, so you don't need to read anything else."
+        : "",
+    readable.later.length > 0
+      ? `Not written yet (a later card writes them): ${readable.later.join(", ")}. Don't read them: follow the connection description instead.`
+      : "",
+    `Read at most ${DEVELOPER_MAX_READS} files in all, then write.`,
+  ]
+    .filter(Boolean)
+    .join(" ");
   const rules =
     card.kind === "file"
       ? [
@@ -374,7 +468,7 @@ export function developerMessage(project: CodingProject, card: CodingCard, retry
       : [
           `Make this connection work by editing only the files it links (${linked.join(", ")}): add the missing calls, imports or shared parts, and don't rewrite what already works.`,
           "Make no helper, scratch, verification, duplicate, backup or temporary files or scripts. You can't run commands: QA runs and tests the work.",
-          "Read only those files and don't re-read the rest of the project.",
+          `Read only those files and don't re-read the rest of the project. ${readList}`,
           "Call finish_card straight after the edits, with a one-sentence note.",
         ];
   return [
@@ -384,8 +478,20 @@ export function developerMessage(project: CodingProject, card: CodingCard, retry
     `YOUR CARD (${position(project, card)}, round ${project.round + 1}):\n${cardSpec(project, card)}`,
     history,
     `Rules for this card:\n${rules.map((rule) => `- ${rule}`).join("\n")}`,
-    retry
-      ? "Your last try ended without calling finish_card. If the work isn't done, do it now; then call finish_card."
+    last
+      ? [
+          lastTryLine(card, own, last),
+          readable.written.length > 0
+            ? `Written so far: ${readable.written.join(", ")}.`
+            : linked.length > 0
+              ? "None of the files it connects to is written yet."
+              : "",
+          card.kind === "file"
+            ? `Write ${own} now with at most 2 reads, then call finish_card.`
+            : "Make the edits now with at most 2 reads, then call finish_card.",
+        ]
+          .filter(Boolean)
+          .join(" ")
       : "",
   ]
     .filter(Boolean)
@@ -433,7 +539,7 @@ export function qaMessage(
   const history = card.comments.length > 0 ? `Notes on this card so far:${BSN}${notes(card.comments)}` : "";
   const what =
     card.kind === "file"
-      ? "Check that the file exists and its code does what the purpose says: complete, no placeholders, no obvious errors. Read it with read_file. You are the one who runs the code: install what it needs and run it or its tests with run_command (each command asks the user first) when that is how to know it works."
+      ? "Check that the file exists and its code does what the purpose says: complete (no unfinished parts, stubs or TODOs; a clearly marked placeholder for a secret only the user can supply is not one of those), no obvious errors. Read it with read_file. You are the one who runs the code: install what it needs and run it or its tests with run_command (each command asks the user first) when that is how to know it works."
       : "Check that the files really connect the way the connection says: read the files and make sure what one needs from the other is there and fits (names, arguments, imports). Run the project or a test with run_command (it asks the user first) when that is how to know the connection works.";
   return [
     `Project brief: ${project.brief}`,
@@ -470,7 +576,7 @@ export function finalCheckMessage(
     overview(project),
     `The connections:${BSN}${project.edges.map((edge) => `- ${edge.description} (${edge.files.map(path).join(", ")})`).join(BSN) || "(none)"}`,
     `The automatic checks: ${report}`,
-    "Every card has passed on its own, but each was looked at alone. Now look at the project as a whole: read the files that matter (the entry point first) and look for anything that would stop it working when it is opened or run, especially problems that span files (a page that loads a script the wrong way, a name one file uses that another doesn't provide, a missing file, a setting nobody filled in). Run something for real where that helps.",
+    "Every card has passed on its own, but each was looked at alone. Now look at the project as a whole: read the files that matter (the entry point first) and look for anything that would stop it working when it is opened or run, especially problems that span files (a page that loads a script the wrong way, a name one file uses that another doesn't provide, a missing file, a setting the code needs that was left empty, though a clearly marked placeholder for a secret only the user can supply is fine). Run something for real where that helps.",
     shellNote(platform),
     "A clearly marked placeholder (such as YOUR_API_KEY_HERE) for a secret only the user can provide is correct: accept it and never ask for a real key.",
     "Then call finish_check: ok true if the project would work, or ok false with each problem as a planned file path and a comment saying exactly what is wrong and how to fix it.",

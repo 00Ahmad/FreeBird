@@ -24,6 +24,20 @@ export function tabbable(element: Focusable): boolean {
   return element.type !== "hidden";
 }
 
+/** What can be typed into. */
+export const FIELD = "input, textarea, select";
+
+/**
+ * Where a dialog starts: the first field among its tabbable elements (in page order), or the first of them when it
+ * has no field. -1 when nothing can take focus. Only tabbable elements count, so a hidden file input or one with
+ * tabindex -1 is never where focus lands.
+ */
+export function firstFocus(tabbables: readonly { field: boolean }[]): number {
+  const field = tabbables.findIndex((element) => element.field);
+  if (field >= 0) return field;
+  return tabbables.length > 0 ? 0 : -1;
+}
+
 /**
  * The index to focus when Tab (or Shift+Tab) is pressed with focus at `current` among `count` tabbable elements, or
  * null to leave the browser to move focus on its own (it stays inside, in the middle of the list).

@@ -24,6 +24,7 @@ export {
 export {
   addressRisk,
   explainFetchError,
+  fetchReadable,
   htmlToText,
   isPrivateHost,
   isWebUrl,

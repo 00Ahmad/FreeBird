@@ -60,6 +60,12 @@ export type CodingEdge = z.infer<typeof CodingEdge>;
 export const CardComment = z.object({
   author: z.enum(["planner", "developer", "qa", "user"]),
   text: z.string(),
+  /**
+   * What the comment is: QA failing or passing the card, an automatic note that the card is back in QA because a file
+   * it depends on changed, a finding of the automatic whole-project check, or a plain note (the Developer's, yours).
+   * Missing on comments written before this existed.
+   */
+  kind: z.enum(["fail", "pass", "requeue", "check", "note"]).optional(),
   /** The QA round it was written in (0 before the first). */
   round: z.number().int().min(0),
   at: z.iso.datetime(),

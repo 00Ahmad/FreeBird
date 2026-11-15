@@ -25,6 +25,8 @@ import { registerConnectorRoutes } from "./connectors";
 import { registerDiscussionRoutes } from "./discussion";
 import { registerRaceRoutes } from "./race";
 import { registerCodingRoutes } from "./coding";
+import { registerJobRoutes } from "./jobs/routes";
+import { registerClientRoutes } from "./clients/routes";
 import { registerRoutineRoutes } from "./routines";
 import { registerTeamRoutes } from "./team";
 import { registerVaultRoutes } from "./vault";
@@ -173,6 +175,8 @@ export async function buildServer(services: Services, modules: RouteModule[] = [
   registerDiscussionRoutes(app, services);
   registerRaceRoutes(app, services);
   registerCodingRoutes(app, services);
+  registerJobRoutes(app, services);
+  registerClientRoutes(app, services);
   registerRuntimeRoutes(app, services);
   registerAgentRoutes(app, services.agent);
   registerProviderRoutes(app, services, services.providers);

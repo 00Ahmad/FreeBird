@@ -15,11 +15,19 @@ import {
   codingInput,
   composerCopy,
   DEFAULT_CODING_FORM,
+  defaultCodingName,
   edgeLabel,
+  fitPanel,
   folderProblem,
+  MAX_CODING_NAME,
+  MIN_CHAT_WIDTH,
   MIN_PANEL_WIDTH,
   nextTab,
+  panelFits,
   panelOnOpen,
+  sidebarWidth,
+  takenName,
+  teamNames,
   parseRounds,
   resumePlan,
   roundsProblem,
@@ -159,10 +167,30 @@ describe("the new Coding Bot form", () => {
       expect(folderProblem(path), path).not.toBeNull();
   });
 
-  it("needs a name that fits", () => {
+  it("needs a name that fits, with room for its roles' names", () => {
     expect(codingFormProblem({ ...good, name: "  " })).toBe("Give the bot a name.");
-    expect(codingFormProblem({ ...good, name: "x".repeat(61) })).toMatch(/shorter/);
-    expect(codingFormProblem({ ...good, name: "x".repeat(60) })).toBeNull();
+    // The server's limit, so "<name> Developer" is still a bot name of 60 characters at most.
+    expect(MAX_CODING_NAME).toBe(49);
+    expect(codingFormProblem({ ...good, name: "x".repeat(50) })).toMatch(/49 characters/);
+    expect(codingFormProblem({ ...good, name: "x".repeat(49) })).toBeNull();
+    for (const name of teamNames("x".repeat(MAX_CODING_NAME))) expect(name.length).toBeLessThanOrEqual(60);
+  });
+
+  it("refuses a name that the bot or one of its roles would share with another bot", () => {
+    const existing = ["Helper", "coding bot developer"];
+    expect(codingFormProblem({ ...good, name: "helper" }, existing)).toMatch(/“helper” already exists/);
+    expect(codingFormProblem({ ...good, name: "Coding Bot" }, existing)).toMatch(
+      /“Coding Bot Developer” already exists/,
+    );
+    expect(codingFormProblem({ ...good, name: "Builder" }, existing)).toBeNull();
+    expect(teamNames(" Builder ")).toEqual(["Builder", "Builder Planner", "Builder Developer", "Builder QA"]);
+    expect(takenName("Builder", existing)).toBeNull();
+  });
+
+  it("offers a default name nobody has yet", () => {
+    expect(defaultCodingName([])).toBe("Coding Bot");
+    expect(defaultCodingName(["Coding Bot", "Coding Bot Planner"])).toBe("Coding Bot 2");
+    expect(defaultCodingName(["coding bot", "Coding Bot 2 QA"])).toBe("Coding Bot 3");
   });
 
   it("checks the round limit", () => {
@@ -224,13 +252,41 @@ describe("the panel", () => {
   });
 
   it("keeps its width readable and leaves room for the chat", () => {
-    expect(clampPanelWidth(100, 1400)).toBe(MIN_PANEL_WIDTH);
-    expect(clampPanelWidth(560, 1400)).toBe(560);
-    expect(clampPanelWidth(5000, 1400)).toBe(Math.floor(1400 * 0.7));
-    expect(clampPanelWidth(5000, 400)).toBe(MIN_PANEL_WIDTH);
+    const sidebar = sidebarWidth(false);
+    expect(clampPanelWidth(100, 1400, sidebar)).toBe(MIN_PANEL_WIDTH);
+    expect(clampPanelWidth(560, 1400, sidebar)).toBe(560);
+    // The chat keeps its room next to the sidebar.
+    expect(clampPanelWidth(5000, 1400, sidebar)).toBe(1400 - sidebar - MIN_CHAT_WIDTH);
+    expect(clampPanelWidth(5000, 1400, sidebarWidth(true))).toBe(1400 - 60 - MIN_CHAT_WIDTH);
   });
 
-  it("opens with a Coding Bot's chat unless the user closed it", () => {
+  it("never squeezes the chat below its minimum beside the panel", () => {
+    for (const viewport of [760, 900, 1024, 1280, 1920])
+      for (const compact of [false, true])
+        for (const wanted of [0, 360, 560, 900, 5000]) {
+          const sidebar = sidebarWidth(compact);
+          const fit = fitPanel(wanted, viewport, sidebar);
+          const label = `${viewport} ${compact} ${wanted}`;
+          if (fit.overlay) expect(fit.width, label).toBeLessThanOrEqual(viewport - sidebar);
+          else {
+            expect(viewport - sidebar - fit.width, label).toBeGreaterThanOrEqual(MIN_CHAT_WIDTH);
+            expect(fit.width, label).toBeGreaterThanOrEqual(MIN_PANEL_WIDTH);
+          }
+        }
+  });
+
+  it("lies over the chat as a drawer when the window is too narrow for both", () => {
+    // The desktop app's narrowest window with the full sidebar.
+    expect(fitPanel(560, 760, sidebarWidth(false))).toEqual({ width: 496, overlay: true });
+    expect(panelFits(760, sidebarWidth(false))).toBe(false);
+    // The compact sidebar leaves room for both.
+    expect(fitPanel(560, 760, sidebarWidth(true))).toEqual({ width: 380, overlay: false });
+    expect(panelFits(760, sidebarWidth(true))).toBe(true);
+  });
+
+  it("opens with a Coding Bot's chat unless the user closed it, or it doesn't fit beside the chat", () => {
+    expect(panelOnOpen(true, true, null, false)).toBeNull();
+    expect(panelOnOpen(true, true, "details", false)).toBe("details");
     expect(panelOnOpen(true, true, null)).toBe("coding");
     expect(panelOnOpen(true, true, "details")).toBe("coding");
     expect(panelOnOpen(true, false, null)).toBeNull();

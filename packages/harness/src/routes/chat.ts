@@ -4,6 +4,7 @@ import { z } from "zod";
 import { BotId, MessageId, repeatsAction, SendMessageInput, ThreadId } from "@mrog/shared";
 
 import { fail, parse } from "../http";
+import { LANE_TOOLS } from "../parallel-lanes";
 import type { Services } from "../services";
 
 const ListQuery = z.object({
@@ -13,8 +14,29 @@ const ListQuery = z.object({
 
 export function registerChatRoutes(
   app: FastifyInstance,
-  { store, turns, bus, discussions, coding }: Services,
+  { store, turns, bus, discussions, coding, jobs, clients, agent }: Services,
 ) {
+  /** Why Allow tools can't be used for this message, or null. */
+  const parallelToolsRefusal = (
+    thread: { kind: string; memberIds: string[] },
+    parallel: boolean,
+  ): string | null => {
+    if (!parallel) return "Allow tools works together with Parallel Bots: turn Parallel on first.";
+    const bot = thread.kind === "group" ? undefined : store.bots.get(thread.memberIds[0] ?? "");
+    if (!bot) return "Allow tools works in a chat with one bot.";
+    if (bot.coding) return "Allow tools isn't available for a Coding Bot.";
+    if (bot.job) return "Allow tools isn't available for a Job Bot.";
+    if (bot.client) return "Allow tools isn't available for a Client Bot.";
+    if (bot.visual)
+      return "Allow tools isn't available for a Visual Bot: it uses the web by looking at the screen, not with search and fetch_url.";
+    const allowed = agent
+      .listTools(bot)
+      .filter((tool) => tool.enabled && LANE_TOOLS.some((name) => name === tool.name));
+    if (allowed.length === 0)
+      return "Allow tools needs web_search or fetch_url, and this bot has neither turned on (see its Tools).";
+    return null;
+  };
+
   app.get("/api/threads", async () => ({ threads: store.threads.list() }));
 
   app.get("/api/activity", async () => ({ activity: turns.activities() }));
@@ -41,6 +63,10 @@ export function registerChatRoutes(
     // Groups, clusters and races have several bots, and Parallel Bots is one bot answering as three.
     if (input.parallel && thread.kind === "group") {
       return fail(reply, 400, "invalid_request", "Parallel Bots works in a chat with one bot.");
+    }
+    if (input.parallelTools) {
+      const refusal = parallelToolsRefusal(thread, input.parallel === true);
+      if (refusal) return fail(reply, 400, "invalid_request", refusal);
     }
     const message = await turns.send(thread, input);
     return reply.code(201).send({ message });
@@ -69,6 +95,21 @@ export function registerChatRoutes(
         "not_retryable",
         "The Coding Bot's team is run from its own chat: use Resume there.",
       );
+    // A Job Bot's team is run by its scans, started from its own chat.
+    if (jobs.isTeamBot(bot))
+      return fail(
+        reply,
+        409,
+        "not_retryable",
+        "The Job Bot's team is run from its own chat: start a scan there.",
+      );
+    if (clients.isTeamBot(bot))
+      return fail(
+        reply,
+        409,
+        "not_retryable",
+        "The Client Bot's team is run from its own chat: start a scan there.",
+      );
     const target = store.messages.get(body.messageId);
     if (!target || target.threadId !== id || target.role !== "bot" || target.botId !== bot.id)
       return fail(reply, 404, "not_found", "That isn't a reply from this bot in this chat.");
@@ -80,7 +121,15 @@ export function registerChatRoutes(
       return fail(reply, 409, "stale", "That reply is no longer the latest one from this bot.");
     if (target.status === "done")
       return fail(reply, 409, "not_retryable", "That reply finished; there is nothing to try again.");
-    if (repeatsAction(target))
+    // A role's search or page fetch only reads: asking again does nothing twice.
+    const repeats = target.parallelTools
+      ? repeatsAction({
+          parts: target.parts.filter(
+            (part) => !(part.type === "tool" && LANE_TOOLS.some((name) => name === part.name)),
+          ),
+        })
+      : repeatsAction(target);
+    if (repeats)
       return fail(
         reply,
         409,

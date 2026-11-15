@@ -22,11 +22,14 @@ import {
   type SendMessageInput,
   type Thread,
   type ThreadActivity,
+  type Usage,
 } from "@mrog/shared";
 import type { Store } from "@mrog/store";
 
 import type { EventBus } from "./bus";
 import type { ModelCatalog } from "./catalog";
+import { forHistory, memoryWarning } from "./parallel-lanes";
+import { runLanes, withNote } from "./parallel-run";
 import { buildSystemPrompt } from "./prompt";
 import { withWatchdog, type WatchdogLimits } from "./watchdog";
 
@@ -45,6 +48,10 @@ export interface TurnInfo {
   surface?: Surface;
   /** Nobody is watching to answer an approval card (a racer): a call that needs one is refused at once. */
   unattended?: boolean;
+  /** Parallel Bots with tools, one role's own run: only these tools are offered, and it has a browser tab of its own. */
+  onlyTools?: string[];
+  /** The role (1 to 3) this run is for. */
+  lane?: number;
 }
 
 interface TurnOptions {
@@ -137,6 +144,8 @@ interface ActiveTurn {
   messageId?: string;
   /** Answering a Parallel Bots message: one request with no tools, nothing steered in. */
   parallel: boolean;
+  /** Parallel Bots with tools: the three roles each run on their own, with search and opening pages. */
+  parallelTools: boolean;
   steer: ChatMessage[];
   info: TurnInfo;
   /** How it was started, so a follow-up turn for a late message runs the same way. */
@@ -202,13 +211,6 @@ export function withoutFailedReplies(
   );
 }
 
-/** The history with a note added to its newest user message (or as one, when the newest message isn't the user's). */
-function withNote(history: ChatMessage[], note: string): ChatMessage[] {
-  const last = history.at(-1);
-  if (last?.role !== "user") return [...history, { role: "user", content: note }];
-  return [...history.slice(0, -1), { ...last, content: `${last.content}\n\n${note}` }];
-}
-
 export class TurnManager {
   /** Keyed by `${threadId}:${botId}` so several bots can work in one group thread. */
   private readonly active = new Map<string, ActiveTurn>();
@@ -218,6 +220,8 @@ export class TurnManager {
   extensions: TurnExtensions = {};
   /** How long preparing a turn may take, once the model is free (tests shorten it). */
   beforeTurnTimeoutMs = BEFORE_TURN_TIMEOUT_MS;
+  /** How far apart Parallel Bots roles start (tests shorten it). */
+  laneStaggerMs: number | undefined;
 
   constructor(
     private readonly deps: {
@@ -261,6 +265,7 @@ export class TurnManager {
       parts,
       replyToId: input.replyToId,
       parallel: input.parallel === true,
+      parallelTools: input.parallel === true && input.parallelTools === true,
     });
     bus.publish({ type: "message.created", message });
     if (this.extensions.handles?.(thread, message)) return message;
@@ -367,11 +372,15 @@ export class TurnManager {
       surface: options.surface,
       ...(options.unattended ? { unattended: true } : {}),
     };
+    // Only a turn answering the user's own message can be parallel: a routine or a handed-over task never answers it.
+    const asked =
+      priority === "user" && !options.delegated ? this.asksParallel(thread, bot, options.retryOf) : null;
     const turn: ActiveTurn = {
       controller: new AbortController(),
       botId: bot.id,
       // Only a turn answering the user's own message can be parallel: a routine or a handed-over task never answers it.
-      parallel: priority === "user" && !options.delegated && this.asksParallel(thread, bot, options.retryOf),
+      parallel: asked !== null,
+      parallelTools: asked?.parallelTools === true,
       steer: [],
       info,
       options,
@@ -413,17 +422,18 @@ export class TurnManager {
    * turn that waited, a retry and a model switch all answer it the same way. Only a reply of that kind answers it: a
    * routine that replied in between is not the answer.
    */
-  private asksParallel(thread: Thread, bot: Bot, retryOf?: string): boolean {
-    if (thread.kind === "group") return false;
+  private asksParallel(thread: Thread, bot: Bot, retryOf?: string): { parallelTools: boolean } | null {
+    if (thread.kind === "group") return null;
     const recent = this.deps.store.messages.list(thread.id, { limit: 30 });
     const asked = recent.findLastIndex((message) => message.role === "user");
-    if (asked === -1 || !recent[asked]!.parallel) return false;
-    return !recent
+    if (asked === -1 || !recent[asked]!.parallel) return null;
+    const answered = recent
       .slice(asked + 1)
       .some(
         (message) =>
           message.role === "bot" && message.botId === bot.id && message.parallel && message.id !== retryOf,
       );
+    return answered ? null : { parallelTools: recent[asked]!.parallelTools };
   }
 
   /**
@@ -487,6 +497,7 @@ export class TurnManager {
       role: "bot",
       botId: bot.id,
       parallel: turn.parallel,
+      parallelTools: turn.parallelTools,
       parts: [],
       status: "streaming",
       model: ref,
@@ -676,7 +687,8 @@ export class TurnManager {
       const toolTokens = estimateToolTokens(definitions);
       const budget = contextWindow - Math.ceil(system.length / 3.5) - toolTokens - 1024;
       const summaryKey = `summary:${thread.id}:${bot.id}`;
-      const chatHistory = toChatHistory(history, bot.id, names);
+      // A reply whose roles ran with tools goes back to the model as just their answers, never their searches.
+      const chatHistory = toChatHistory(forHistory(history), bot.id, names);
       // Parallel Bots is one request, so a long chat isn't summarized first (that would be a second one): the turn
       // keeps the newest messages that fit instead.
       const compacted = turn.parallel
@@ -733,27 +745,119 @@ export class TurnManager {
       // Parallel Bots asks the reply to take.
       const added = turn.parallel ? parallelInstructions() : note;
       const { thinkOff, ...turnOptions } = this.extensions.turnOptions?.(bot, thread, turn.info) ?? {};
-      const result = await runTurn({
-        provider,
-        model,
-        capabilities:
-          thinkOff && resolved.provider.kind === "ollama" && !info.capabilities.includes("thinking")
-            ? [...info.capabilities, "thinking"]
-            : info.capabilities,
-        system,
-        history: added ? withNote(compacted.messages, added) : compacted.messages,
-        contextWindow,
-        tools,
-        think: settings.think,
-        local,
-        signal,
-        sink,
-        steer: () => turn.steer.splice(0),
-        ...turnOptions,
-      });
+      let usage: Usage;
+      let status: "done" | "error" = "done";
+      // On a cloud model (no shared slot to hold), Parallel Bots asks the three roles in separate requests at the same
+      // time instead of one combined request; a local model keeps the single request.
+      const separate =
+        turn.parallel && !turn.parallelTools && !resolved.provider.local && settings.parallelSeparateOnCloud;
+      if (turn.parallelTools || separate) {
+        const laneSteps = settings.parallelSteps;
+        const lanes = settings.parallelLanes;
+        const lastUser = history.findLast((m) => m.role === "user");
+        // One slot for the whole turn, shared by the roles' requests (see RequestGroup).
+        const group = runtime.group(priority, {
+          lanes,
+          local: resolved.provider.local,
+          signal,
+          onQueued: () => this.setActivity(thread.id, bot.id, "queued"),
+        });
+        const grouped: ChatProvider = {
+          id: guarded.id,
+          label: guarded.label,
+          kind: guarded.kind,
+          local: guarded.local,
+          listModels: (listSignal) => guarded.listModels(listSignal),
+          async *chat(request) {
+            const release = await group.acquire(request.signal);
+            try {
+              yield* guarded.chat(request);
+            } finally {
+              release();
+            }
+          },
+        };
+        let warning: string | null = null;
+        if (turn.parallelTools && resolved.provider.kind === "ollama" && lanes > 1) {
+          const loaded = await runtime.ollama
+            .ps(AbortSignal.timeout(1500))
+            .then((list) => list.find((entry) => entry.name === model))
+            .catch(() => undefined);
+          warning = memoryWarning({ lanes, loaded, numCtx: settings.numCtx });
+        }
+        const outcome = await runLanes({
+          parts,
+          publish: publishFull,
+          delta: (partIndex, kind, text) => {
+            dirty = true;
+            if (exists)
+              bus.publish({
+                type: "message.delta",
+                threadId: thread.id,
+                messageId: message.id,
+                partIndex,
+                kind,
+                text,
+              });
+          },
+          working: () => this.setActivityOnce(thread.id, bot.id, "working"),
+          alive: () => exists,
+          signal,
+          provider: grouped,
+          model,
+          capabilities: info.capabilities,
+          contextWindow,
+          local,
+          think: settings.think,
+          system,
+          history: compacted.messages,
+          question: lastUser ? messageText(lastUser) : "",
+          steps: laneSteps,
+          staggerMs: this.laneStaggerMs,
+          ask: (instruction, question) =>
+            askWith(grouped, model, instruction, question, {
+              signal,
+              local,
+              maxTokens: 300,
+              ...(thinksAnyway ? { think: false } : {}),
+            }),
+          tools: turn.parallelTools
+            ? (lane, laneSignal) =>
+                this.extensions.tools?.(bot, thread, message.id, laneSignal, {
+                  ...turn.info,
+                  lane,
+                  onlyTools: ["web_search", "fetch_url"],
+                })
+            : undefined,
+          scrub: this.extensions.scrub,
+          warning,
+        });
+        usage = outcome.usage;
+        status = outcome.allFailed ? "error" : "done";
+      } else {
+        const result = await runTurn({
+          provider,
+          model,
+          capabilities:
+            thinkOff && resolved.provider.kind === "ollama" && !info.capabilities.includes("thinking")
+              ? [...info.capabilities, "thinking"]
+              : info.capabilities,
+          system,
+          history: added ? withNote(compacted.messages, added) : compacted.messages,
+          contextWindow,
+          tools,
+          think: settings.think,
+          local,
+          signal,
+          sink,
+          steer: () => turn.steer.splice(0),
+          ...turnOptions,
+        });
+        usage = result.usage;
+      }
 
       save();
-      persist({ parts, status: "done", usage: result.usage });
+      persist({ parts, status, usage });
     } catch (error) {
       const stopped = signal.aborted || (error instanceof ProviderError && error.code === "aborted");
       if (!stopped) {

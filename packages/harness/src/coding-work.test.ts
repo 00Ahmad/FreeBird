@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { messageText, SLOW_CARD_SECONDS, type CodingProject } from "@mrog/shared";
 
 import { alreadyWritten, cardsFor, zeroWork } from "./coding-plan";
-import { DEVELOPER_MAX_STEPS, developerMessage, ROLE_TOOLS } from "./coding-tools";
+import { DEVELOPER_MAX_READS, DEVELOPER_MAX_STEPS, developerMessage, ROLE_TOOLS } from "./coding-tools";
 import {
   cleanTmp,
   codingTeam,
@@ -57,12 +57,17 @@ describe("one card per turn", () => {
       "Make no helper, scratch, verification, duplicate, backup or temporary files or scripts",
     );
     expect(util).toContain("You can't run commands: QA runs and tests the work");
-    // Only the files it connects to are named for reading.
+    // Only the files it connects to are named for reading, and one that isn't written yet is named as such.
+    expect(util).not.toContain("Files already written");
     expect(util).toContain(
-      "Files this card connects to (read these if you need them, and no others): src/main.ts.",
+      "Not written yet (a later card writes them): src/main.ts. Don't read them: follow the connection description instead.",
     );
+    expect(util).toContain("Read at most 6 files in all, then write.");
     expect(main).toContain("Write only this file: src/main.ts.");
-    expect(main).toContain("connects to (read these if you need them, and no others): src/util.ts.");
+    expect(main).toContain(
+      "Files already written (read these only if you need them, and no others): src/util.ts.",
+    );
+    expect(main).not.toContain("Not written yet");
     expect(main).toContain("Call finish_card straight after writing");
     // A connection may edit the files it links, and still makes no scripts.
     expect(connection).toContain("editing only the files it links (src/main.ts, src/util.ts)");
@@ -122,19 +127,84 @@ describe("thinking and steps", () => {
     expect(thinks("qa")).toEqual([undefined]);
   });
 
-  it("stops a Developer turn that loops after DEVELOPER_MAX_STEPS tool calls, and retries it like any turn without finish_card", async () => {
+  it("stops a Developer turn that loops after DEVELOPER_MAX_STEPS rounds, and retries it saying what happened", async () => {
     expect(DEVELOPER_MAX_STEPS).toBe(15);
     const team = codingTeam({ plans: [{ tool: ONE_FILE }], develop: () => ({ loop: true }) });
     h = await startTeam(team);
     const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
     await type(h, bot, "Make a note");
     const failed = await until(h, bot.id, (p) => p.status === "error");
-    expect(failed.error).toContain("never called finish_card");
-    // Each of the 3 tries makes at most 15 tool calls and the one closing reply.
+    expect(failed.error).toContain("never called finish_card and wrote nothing after reading 6 files");
+    // Each of the 3 tries makes at most 15 rounds and the one closing reply.
     const requests = team.seen.filter((s) => s.role === "developer").length;
     expect(requests).toBeLessThanOrEqual(3 * (DEVELOPER_MAX_STEPS + 1));
     expect(requests).toBeGreaterThan(3 * 10);
-    expect(turnsOf(team, "developer").filter((s) => s.task.includes("Your last try ended"))).toHaveLength(2);
+    const retries = turnsOf(team, "developer").filter((s) => s.task.includes("Your last try"));
+    expect(retries).toHaveLength(2);
+    expect(retries[0]!.task).toContain(
+      "Your last try read 6 files and wrote nothing, and it hit the step limit. Write a.txt now with at most 2 reads, then call finish_card.",
+    );
+  });
+
+  it("refuses a 7th file to read, says a planned file isn't written yet, and steers once with 3 steps left", async () => {
+    expect(DEVELOPER_MAX_READS).toBe(6);
+    const team = codingTeam({ plans: [{ tool: THREE_FILES }], develop: () => ({ loop: true }) });
+    h = await startTeam(team);
+    const out = tmp("out");
+    const { bot } = await makeCoding(h, out, { autoApprove: true });
+    for (let i = 0; i < 8; i++) {
+      mkdirSync(join(out, "notes"), { recursive: true });
+      writeFileSync(join(out, "notes", `${i}.txt`), `note ${i}\n`);
+    }
+    await type(h, bot, "Build a greeter");
+    await until(h, bot.id, (p) => p.status === "error");
+    const firstTry = team.seen.filter((s) => s.role === "developer" && !s.task.includes("Your last try"));
+    const results = firstTry.map((s) => s.lastTool);
+    // Six different files are read; the seventh is refused.
+    expect(new Set(results.filter((r) => /^1\| note \d/.test(r)))).toHaveProperty("size", 6);
+    expect(results).toContainEqual(
+      "You have read enough. Write src/util.ts now with write_file, then call finish_card.",
+    );
+    // With 3 of the 15 rounds left, one note says to write the file now.
+    const steered = firstTry.filter((s) => s.notes.length > 0);
+    expect(steered.length).toBeGreaterThan(0);
+    // (The engine's own out-of-steps note, in brackets, is the closing request's.)
+    expect(new Set(firstTry.flatMap((s) => s.notes.filter((n) => !n.startsWith("("))))).toEqual(
+      new Set(["3 steps left: write src/util.ts now with write_file, then call finish_card."]),
+    );
+    expect(firstTry.findIndex((s) => s.notes.length > 0)).toBe(DEVELOPER_MAX_STEPS - 3);
+  });
+
+  it("answers a read of a planned file nobody wrote yet with where it comes from, not an error", async () => {
+    const team = codingTeam({
+      develop: (card) => (card.key === "src/util.ts" ? { reads: ["src/main.ts", "./src/util.ts"] } : {}),
+    });
+    h = await startTeam(team);
+    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
+    await type(h, bot, "Build a greeter");
+    await until(h, bot.id, (p) => p.status === "done");
+    const told = team.seen.map((s) => s.lastTool);
+    expect(told).toContain(
+      "src/main.ts is not written yet; another card writes it later. Don't read it: use the connection description.",
+    );
+    expect(told).toContain(
+      "src/util.ts is not written yet: writing it is this card's job. Write it now with write_file.",
+    );
+    expect(told.some((t) => /ENOENT|no such file/i.test(t))).toBe(false);
+  });
+
+  it("names the card's own file to read on a fix, once it exists", () => {
+    const out = tmp("out");
+    const nodes = [
+      { id: "n1", path: "a.txt", purpose: "a" },
+      { id: "n2", path: "b.txt", purpose: "b" },
+    ];
+    const edges = [{ id: "e1", files: ["n1", "n2"], description: "a uses b" }];
+    const project = { brief: "b", outputFolder: out, round: 1, nodes, edges, cards: cardsFor(nodes, edges) };
+    writeFileSync(join(out, "a.txt"), "written");
+    const text = developerMessage(project as unknown as CodingProject, project.cards[0]!);
+    expect(text).toContain("Files already written (read these only if you need them, and no others): a.txt.");
+    expect(text).toContain("Not written yet (a later card writes them): b.txt.");
   });
 });
 
@@ -227,6 +297,10 @@ describe("a file that is already written", () => {
     const { bot } = await makeCoding(h, out, { autoApprove: true });
     mkdirSync(join(out, "src"), { recursive: true });
     writeFileSync(join(out, "src", "util.ts"), "// written earlier\n");
+    // Windows stamps files from a clock that ticks every ~15 ms, so a file written just after the project began can
+    // look older than it; this one is clearly from after.
+    const later = new Date(Date.now() + 2000);
+    utimesSync(join(out, "src", "util.ts"), later, later);
     await type(h, bot, "Build a greeter");
     const done = await until(h, bot.id, (p) => p.status === "done");
 
@@ -347,14 +421,14 @@ describe("time and tokens per card", () => {
     await type(h, bot, "Make a note");
     const done = await until(h, bot.id, (p) => p.status === "done");
 
-    const lines = done.log!.map((l) => l.text).filter((text) => text.startsWith("Developer has spent"));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^Developer has spent 1 minute on a\.txt$/);
     expect(
       published.some((p) => /^Developer is working on a\.txt \(\d+ min so far\)$/.test(p.note ?? "")),
     ).toBe(true);
-    // A card that finishes in time is never mentioned.
-    expect(done.log!.map((l) => l.text).filter((text) => text.includes("has spent"))).toHaveLength(1);
+    // Once while each role has it: the time is the card's, so QA isn't said to have spent the Developer's minutes.
+    expect(done.log!.map((l) => l.text).filter((text) => text.includes("has taken"))).toEqual([
+      "a.txt has taken 1 minute so far (Developer is on it)",
+      "a.txt has taken 1 minute so far (QA is on it)",
+    ]);
   });
 
   it("says nothing about a card that is quick", async () => {
@@ -362,7 +436,7 @@ describe("time and tokens per card", () => {
     const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
     await type(h, bot, "Make a note");
     const done = await until(h, bot.id, (p) => p.status === "done");
-    expect(done.log!.some((l) => l.text.includes("has spent"))).toBe(false);
+    expect(done.log!.some((l) => l.text.includes("has taken"))).toBe(false);
     expect(existsSync(done.outputFolder)).toBe(true);
     expect(messageText(h.store.messages.list(bot.threadId).at(-1)!)).toContain("Done");
   });

@@ -42,6 +42,7 @@ const message = (threadId: string, text: string, over: object = {}) =>
     botId: null,
     moderator: false,
     parallel: false,
+    parallelTools: false,
     parts: [{ type: "text", text }],
     status: "done",
     model: null,

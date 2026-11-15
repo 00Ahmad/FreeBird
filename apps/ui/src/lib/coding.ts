@@ -1,4 +1,5 @@
 import {
+  CODING_ROLES,
   DEFAULT_MAX_ROUNDS,
   isCodingBusy,
   MAX_ROUNDS_LIMIT,
@@ -158,10 +159,40 @@ export const DEFAULT_CODING_FORM: CodingForm = {
   maxRounds: String(DEFAULT_MAX_ROUNDS),
 };
 
-/** What's wrong with the dialog's fields, or null when the bot can be created. */
-export function codingFormProblem(form: CodingForm): string | null {
+/**
+ * The longest Coding Bot name, the server's limit: its roles are named after it ("<name> Developer" is the longest),
+ * and a bot's name is at most 60 characters.
+ */
+export const MAX_CODING_NAME = 49;
+
+/** The Coding Bot's name and its three roles' names, each of which must be free. */
+export const teamNames = (name: string): string[] => {
+  const base = name.trim();
+  return [base, ...CODING_ROLES.map((role) => `${base} ${roleLabel(role)}`)];
+};
+
+/** The first name of the team that another bot already has (the server compares without case), or null. */
+export function takenName(name: string, existing: readonly string[]): string | null {
+  const taken = new Set(existing.map((other) => other.trim().toLowerCase()));
+  return teamNames(name).find((candidate) => taken.has(candidate.toLowerCase())) ?? null;
+}
+
+/** "Coding Bot", or "Coding Bot 2", 3, … when that one (or one of its roles' names) is taken. */
+export function defaultCodingName(existing: readonly string[]): string {
+  const base = DEFAULT_CODING_FORM.name;
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : `${base} ${n}`;
+    if (!takenName(name, existing)) return name;
+  }
+}
+
+/** What's wrong with the dialog's fields, or null when the bot can be created. `existing` are the other bots' names. */
+export function codingFormProblem(form: CodingForm, existing: readonly string[] = []): string | null {
   if (!form.name.trim()) return "Give the bot a name.";
-  if (form.name.trim().length > 60) return "Use a shorter name (60 characters at most).";
+  if (form.name.trim().length > MAX_CODING_NAME)
+    return `Use a shorter name (${MAX_CODING_NAME} characters at most): the team's bots are named after it.`;
+  const taken = takenName(form.name, existing);
+  if (taken) return `A bot called “${taken}” already exists. Pick another name.`;
   return folderProblem(form.outputFolder) ?? roundsProblem(form.maxRounds);
 }
 
@@ -203,19 +234,49 @@ export function composerCopy(
 
 export const MIN_PANEL_WIDTH = 360;
 export const DEFAULT_PANEL_WIDTH = 560;
+/** The chat beside the panel keeps at least this much room: its messages and the message box stay usable. */
+export const MIN_CHAT_WIDTH = 320;
 
-/** Keeps the panel wide enough to read and leaves at least 30% of the window for the chat. */
-export function clampPanelWidth(width: number, viewport: number): number {
-  const max = Math.max(MIN_PANEL_WIDTH, Math.floor(viewport * 0.7));
-  return Math.min(max, Math.max(MIN_PANEL_WIDTH, Math.round(width)));
+/** The sidebar's width, as App lays it out (`grid-cols-[264px_…]`, or 60px when compact). */
+export const sidebarWidth = (compact: boolean): number => (compact ? 60 : 264);
+
+export interface PanelFit {
+  width: number;
+  /**
+   * The window is too narrow for the panel beside the chat: it lies over the chat as a drawer instead (opened and
+   * closed with the Coding panel button), rather than squeezing the chat to nothing.
+   */
+  overlay: boolean;
 }
 
 /**
- * The panel to show when a chat opens. A Coding Bot's chat opens with its Coding panel unless the user closed it
- * before; any other chat keeps whatever panel was open.
+ * How wide the panel can be. Beside the chat it is at least MIN_PANEL_WIDTH and leaves the chat MIN_CHAT_WIDTH of
+ * what the sidebar leaves; when both can't fit, it becomes a drawer over the chat, as wide as asked but never wider
+ * than the room there is.
  */
-export function panelOnOpen<P>(isCoding: boolean, codingOpen: boolean, panel: P): P | "coding" {
-  return isCoding && codingOpen ? "coding" : panel;
+export function fitPanel(width: number, viewport: number, sidebar: number): PanelFit {
+  const room = Math.max(0, Math.floor(viewport - sidebar));
+  const wanted = Math.max(MIN_PANEL_WIDTH, Math.round(width));
+  const besideMax = room - MIN_CHAT_WIDTH;
+  if (besideMax >= MIN_PANEL_WIDTH) return { width: Math.min(wanted, besideMax), overlay: false };
+  return { width: Math.min(wanted, room), overlay: true };
+}
+
+/** The panel width for a window and sidebar: see fitPanel. */
+export const clampPanelWidth = (width: number, viewport: number, sidebar: number): number =>
+  fitPanel(width, viewport, sidebar).width;
+
+/** Whether the panel fits beside the chat in this window. */
+export const panelFits = (viewport: number, sidebar: number): boolean =>
+  !fitPanel(MIN_PANEL_WIDTH, viewport, sidebar).overlay;
+
+/**
+ * The panel to show when a chat opens. A Coding Bot's chat opens with its Coding panel unless the user closed it
+ * before, or the window is too narrow for it beside the chat (it would cover the chat); any other chat keeps
+ * whatever panel was open.
+ */
+export function panelOnOpen<P>(isCoding: boolean, codingOpen: boolean, panel: P, fits = true): P | "coding" {
+  return isCoding && codingOpen && fits ? "coding" : panel;
 }
 
 /** A plan can be imported, or the models changed, whenever the team isn't in the middle of a step. */

@@ -50,6 +50,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HarnessConfig 
     Number.isInteger(preferred) && preferred > 0 && preferred <= 65_535 ? preferred : undefined;
 
   let token = env.MROG_TOKEN ?? "";
+  // Read once and forgotten: anything this process starts (a bot's command, Docker, Ollama) inherits its environment,
+  // and with the token it could use the app's API as the user.
+  delete env.MROG_TOKEN;
+  delete process.env.MROG_TOKEN;
   if (!token) {
     token = randomBytes(32).toString("hex");
     console.warn("[harness] MROG_TOKEN not set; generated a one-off token for this run.");

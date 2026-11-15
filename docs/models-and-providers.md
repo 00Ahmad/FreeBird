@@ -56,6 +56,14 @@ Add these in **Settings → Models & Providers**. They're marked as local, so th
 
 Bring your own API key. Keys are stored in your operating system's keychain, never in a file, and the app only ever shows their names. A key can be up to 1,280 characters. A server that needs no key (LM Studio, vLLM, another computer running Ollama) never gets one: a key typed for it is ignored.
 
+**Keys already on your computer.** If a key is set as an environment variable for your user account, **Settings → Models & Providers** lists it under **Found on this computer**, for example "Anthropic (from ANTHROPIC_API_KEY)", with an **Add** button. One click adds the provider exactly as if you had pasted the key: it is copied into the keychain and checked the same way. FreeBird looks for `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (then `GOOGLE_API_KEY`), `GROQ_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, `CEREBRAS_API_KEY` and `OLLAMA_API_KEY`.
+
+- The screen only learns which provider was found and the variable's name, never the key. Nothing is used until you press **Add**.
+- Empty values, values with spaces, values over 1,280 characters and obvious placeholders (`your-api-key`, `xxx`, `<key>`) are skipped, and a provider you already added (even switched off) isn't offered again.
+- Set the variable for your **user account** (on Windows: Settings → System → About → Advanced system settings → Environment Variables, under "User variables"), then restart FreeBird. A key set only in a terminal profile (`.bashrc`, `.zshrc`, a PowerShell profile) isn't visible to a desktop app, and on macOS apps opened from Finder or the Dock don't see shell variables at all.
+- It's a one-time copy: changing the variable later doesn't change FreeBird's copy (use **Replace key**). Removing the provider deletes FreeBird's copy, not the variable, so it is offered again.
+- Azure OpenAI (which also needs an endpoint) and local servers are never found this way; add them as before.
+
 | Provider                 | Notes                                       |
 | ------------------------ | ------------------------------------------- |
 | OpenAI                   |                                             |

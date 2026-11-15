@@ -2,6 +2,8 @@ import {
   AlertTriangle,
   ArrowLeftRight,
   BookOpen,
+  Briefcase,
+  Handshake,
   ScanEye,
   Bell,
   BellOff,
@@ -43,6 +45,7 @@ import { useDeleteGroup, useDuplicateBot, useUpdateGroup } from "../hooks/team";
 import { messagesKey, useThreads } from "../hooks/threads";
 import { useNewBot, useNewVisualBot } from "../hooks/useNewBot";
 import { api } from "../lib/api";
+import { botActions, teamThreadIds } from "../lib/codingTeam";
 import { chatFor, splitGroups } from "../lib/groups";
 import { isMac } from "../lib/harness";
 import { importTemplate } from "../lib/templates";
@@ -144,22 +147,29 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
       .filter((thread) => !needle || groupTitle(thread, botMap).toLowerCase().includes(needle))
       .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }, [threads, botMap, query]);
+  // A Coding Bot's conversations with its roles fill up with every step of a build: they never count as unread.
+  const teamThreads = useMemo(() => teamThreadIds(threads ?? [], bots ?? []), [threads, bots]);
   // The count in the window title covers the chats this sidebar shows, whatever is typed in its search box.
   const shownThreadIds = useMemo(
     () => [
       ...visibleBots(bots, "").map((bot) => bot.threadId),
-      ...(threads ?? []).filter((thread) => thread.kind === "group").map((thread) => thread.id),
+      ...(threads ?? [])
+        .filter((thread) => thread.kind === "group" && !teamThreads.has(thread.id))
+        .map((thread) => thread.id),
     ],
-    [bots, threads],
+    [bots, threads, teamThreads],
   );
   const unreadTotal = useUnread((store) => totalUnread(store.state, shownThreadIds));
   useEffect(() => {
     document.title = titleWithUnread(WINDOW_TITLE, unreadTotal);
   }, [unreadTotal]);
-  // Counts for chats that are gone.
+  // Counts for chats that are gone, and any a team conversation collected before it stopped counting.
   useEffect(() => {
-    if (threads) useUnread.getState().prune(new Set(threads.map((thread) => thread.id)));
-  }, [threads]);
+    if (threads && bots)
+      useUnread
+        .getState()
+        .prune(new Set(threads.filter((thread) => !teamThreads.has(thread.id)).map((thread) => thread.id)));
+  }, [threads, bots, teamThreads]);
 
   const { races, clusters, groupChats, botTalks } = useMemo(() => splitGroups(groups), [groups]);
 
@@ -186,22 +196,22 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
     const existingSections = [...new Set((bots ?? []).map((b) => b.section).filter((s): s is string => !!s))];
     const patch = (value: Parameters<typeof update.mutate>[0]["patch"]) =>
       update.mutate({ id: bot.id, patch: value });
-    return [
-      bot.pinned
-        ? { label: "Unpin", icon: <PinOff size={14} />, onSelect: () => patch({ pinned: false }) }
-        : { label: "Pin", icon: <Pin size={14} />, onSelect: () => patch({ pinned: true }) },
-      { label: "Rename Bot", icon: <Pencil size={14} />, onSelect: () => startRename(bot.id) },
+    // A Coding Bot's Planner, Developer and QA come and go with it: nothing here may rename, copy or remove them.
+    const can = botActions(bot, bots ?? []);
+    const entries: (MenuEntry | false)[] = [
+      can.arrange &&
+        (bot.pinned
+          ? { label: "Unpin", icon: <PinOff size={14} />, onSelect: () => patch({ pinned: false }) }
+          : { label: "Pin", icon: <Pin size={14} />, onSelect: () => patch({ pinned: true }) }),
+      can.rename && { label: "Rename Bot", icon: <Pencil size={14} />, onSelect: () => startRename(bot.id) },
       { label: "Clear chat", icon: <Eraser size={14} />, onSelect: () => clearChat(bot.threadId, bot.name) },
-      ...(bot.isPrimary
-        ? []
-        : [
-            {
-              label: "Make Primary Bot",
-              icon: <Star size={14} />,
-              onSelect: () => patch({ isPrimary: true }),
-            },
-          ]),
-      {
+      can.makePrimary &&
+        !bot.isPrimary && {
+          label: "Make Primary Bot",
+          icon: <Star size={14} />,
+          onSelect: () => patch({ isPrimary: true }),
+        },
+      can.arrange && {
         label: "Move to new section…",
         icon: <FolderPlus size={14} />,
         onSelect: () => {
@@ -209,89 +219,114 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
           if (name) patch({ section: name.slice(0, 40) });
         },
       },
-      ...existingSections
-        .filter((name) => name !== bot.section)
-        .map((name) => ({
-          label: `Move to ${name}`,
-          icon: <FolderInput size={14} />,
-          onSelect: () => patch({ section: name }),
-        })),
-      ...(bot.section
-        ? [
-            {
-              label: "Remove from section",
-              icon: <FolderMinus size={14} />,
-              onSelect: () => patch({ section: null }),
-            },
-          ]
+      ...(can.arrange
+        ? existingSections
+            .filter((name) => name !== bot.section)
+            .map((name) => ({
+              label: `Move to ${name}`,
+              icon: <FolderInput size={14} />,
+              onSelect: () => patch({ section: name }),
+            }))
         : []),
-      bot.notifications
-        ? {
-            label: "Turn off notifications",
-            icon: <BellOff size={14} />,
-            onSelect: () => patch({ notifications: false }),
-          }
-        : {
-            label: "Turn on notifications",
-            icon: <Bell size={14} />,
-            onSelect: () => patch({ notifications: true }),
-          },
-      { label: "Duplicate", icon: <Copy size={14} />, onSelect: () => duplicate.mutate(bot.id) },
-      bot.hidden
-        ? { label: "Show in sidebar", icon: <Eye size={14} />, onSelect: () => patch({ hidden: false }) }
-        : { label: "Hide from sidebar", icon: <EyeOff size={14} />, onSelect: () => patch({ hidden: true }) },
-      "separator",
-      {
+      can.arrange &&
+        bot.section !== null && {
+          label: "Remove from section",
+          icon: <FolderMinus size={14} />,
+          onSelect: () => patch({ section: null }),
+        },
+      can.arrange &&
+        (bot.notifications
+          ? {
+              label: "Turn off notifications",
+              icon: <BellOff size={14} />,
+              onSelect: () => patch({ notifications: false }),
+            }
+          : {
+              label: "Turn on notifications",
+              icon: <Bell size={14} />,
+              onSelect: () => patch({ notifications: true }),
+            }),
+      can.duplicate && {
+        label: "Duplicate",
+        icon: <Copy size={14} />,
+        onSelect: () => duplicate.mutate(bot.id),
+      },
+      can.hide &&
+        (bot.hidden
+          ? { label: "Show in sidebar", icon: <Eye size={14} />, onSelect: () => patch({ hidden: false }) }
+          : {
+              label: "Hide from sidebar",
+              icon: <EyeOff size={14} />,
+              onSelect: () => patch({ hidden: true }),
+            }),
+      can.delete && "separator",
+      can.delete && {
         label: "Delete",
         icon: <Trash2 size={14} />,
         danger: true,
         onSelect: () => {
           if (
-            window.confirm(`Delete “${bot.name}”? This can't be undone. Hide it instead to keep its work.`)
+            window.confirm(
+              bot.coding
+                ? `Delete “${bot.name}”? Its Planner, Developer and QA and their conversations go too. The files it wrote stay in the output folder. This can't be undone.`
+                : bot.job
+                  ? `Delete “${bot.name}”? Its team, your job profile and its board go too. This can't be undone.`
+                  : bot.client
+                    ? `Delete “${bot.name}”? Its team, your client profile, its leads and your lists go too. This can't be undone.`
+                    : `Delete “${bot.name}”? This can't be undone. Hide it instead to keep its work.`,
+            )
           ) {
             remove.mutate(bot.id);
           }
         },
       },
     ];
+    return entries.filter((entry): entry is MenuEntry => entry !== false);
   };
 
-  const groupEntries = (thread: Thread): MenuEntry[] => [
-    {
+  const groupEntries = (thread: Thread): MenuEntry[] => {
+    const clear: MenuEntry = {
       label: "Clear chat",
       icon: <Eraser size={14} />,
       onSelect: () => clearChat(thread.id, groupTitle(thread, botMap)),
-    },
-    {
-      label: "Rename chat",
-      icon: <Pencil size={14} />,
-      onSelect: () => {
-        const title = window.prompt("Chat name", thread.title ?? "")?.trim();
-        if (title !== undefined) updateGroup.mutate({ id: thread.id, patch: { title: title || null } });
+    };
+    // A Coding Bot's conversation with one of its roles is the team's own: it is named and deleted with the team.
+    if (teamThreads.has(thread.id)) return [clear];
+    return [
+      clear,
+      {
+        label: "Rename chat",
+        icon: <Pencil size={14} />,
+        onSelect: () => {
+          const title = window.prompt("Chat name", thread.title ?? "")?.trim();
+          if (title !== undefined) updateGroup.mutate({ id: thread.id, patch: { title: title || null } });
+        },
       },
-    },
-    "separator",
-    {
-      label: "Delete chat",
-      icon: <Trash2 size={14} />,
-      danger: true,
-      onSelect: () =>
-        window.confirm(
-          thread.race
-            ? "Delete this race, its racers and their work?"
-            : thread.cluster
-              ? "Delete this cluster, its experts and its messages?"
-              : thread.pair
-                ? "Delete this conversation between bots and its messages?"
-                : "Delete this group chat and its messages?",
-        ) && deleteGroup.mutate(thread.id),
-    },
-  ];
+      "separator",
+      {
+        label: "Delete chat",
+        icon: <Trash2 size={14} />,
+        danger: true,
+        onSelect: () =>
+          window.confirm(
+            thread.race
+              ? "Delete this race, its racers and their work?"
+              : thread.cluster
+                ? "Delete this cluster, its experts and its messages?"
+                : thread.pair
+                  ? "Delete this conversation between bots and its messages?"
+                  : "Delete this group chat and its messages?",
+          ) && deleteGroup.mutate(thread.id),
+      },
+    ];
+  };
 
   const plusEntries: MenuEntry[] = [
     { label: "Create a Bot", icon: <UserPlus size={14} />, onSelect: () => void newBot() },
     { label: "New Visual Bot", icon: <ScanEye size={14} />, onSelect: () => void newVisualBot() },
     { label: "New Coding Bot", icon: <CodeXml size={14} />, onSelect: () => setOverlay("newCodingBot") },
+    { label: "New Job Bot", icon: <Briefcase size={14} />, onSelect: () => setOverlay("newJobBot") },
+    { label: "New Client Bot", icon: <Handshake size={14} />, onSelect: () => setOverlay("newClientBot") },
     { label: "New group chat", icon: <Users size={14} />, onSelect: () => setOverlay("newGroup") },
     { label: "New cluster", icon: <Network size={14} />, onSelect: () => setOverlay("newCluster") },
     { label: "New race", icon: <Flag size={14} />, onSelect: () => setOverlay("newRace") },
@@ -305,6 +340,7 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
       bot={bot}
       compact={compactSidebar}
       chatId={chatFor(bot, groups)}
+      canRename={botActions(bot, bots ?? []).rename}
       selected={bot.threadId === selectedThreadId || chatFor(bot, groups) === selectedThreadId}
       onContextMenu={(event) => open(event, botEntries(bot))}
     />
@@ -316,7 +352,7 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
         {!compactSidebar && (
           <span className="flex flex-1 items-center gap-2 text-[13px] font-semibold tracking-tight text-ink-2">
             <img
-              src="/favicon.svg"
+              src="/favicon.png"
               alt=""
               width={20}
               height={20}
@@ -459,7 +495,9 @@ export function Sidebar({ query, onQuery }: { query: string; onQuery(query: stri
                         {groupTitle(thread, botMap)}
                       </span>
                     )}
-                    <GroupUnread threadId={thread.id} compact={compactSidebar} />
+                    {!teamThreads.has(thread.id) && (
+                      <GroupUnread threadId={thread.id} compact={compactSidebar} />
+                    )}
                   </button>
                 ))}
               </div>

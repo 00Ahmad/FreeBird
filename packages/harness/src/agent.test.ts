@@ -240,6 +240,37 @@ describe("agent tools", () => {
     expect(requests[1].messages.at(-1).content).not.toContain("denied");
     expect(existsSync(join(dataDir, "workspaces"))).toBe(false);
   });
+
+  it("lets a typed command rule run a plain command in a group chat, but not one with more chained to it", async () => {
+    const { bot } = await setup([
+      [toolCall("run_command", { command: "echo ruled; echo smuggled" })],
+      [{ message: { content: "one" } }],
+      // With a folder the card has a second line; the rule is still about the command itself.
+      [toolCall("run_command", { command: "echo ruled", cwd: "." })],
+      [{ message: { content: "two" } }],
+    ]);
+    await h!.app.inject({
+      method: "POST",
+      url: "/api/permissions/rules",
+      headers: auth,
+      payload: { tool: "run_command", match: "echo ruled", decision: "allow" },
+    });
+    const thread = h!.store.threads.createGroup("Team", [bot.id]);
+    h!.services.turns.extensions.responders = async () => [bot];
+    const say = async (text: string) => {
+      const done = finished();
+      await h!.app.inject({
+        method: "POST",
+        url: `/api/threads/${thread.id}/messages`,
+        headers: auth,
+        payload: { text },
+      });
+      return toolPart(await done)?.result ?? "";
+    };
+    // The rule matches the start, but what follows it would run too: that still needs a card, which a group can't show.
+    expect(await say("go")).toContain("Not available in group chats");
+    expect(await say("again")).toContain("ruled");
+  });
 });
 
 describe("stopped turns", () => {

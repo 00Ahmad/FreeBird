@@ -1,3 +1,5 @@
+import type { MessagePart } from "./messages";
+
 /**
  * Parallel Bots: one request, one reply. The model picks three roles that fit the message and answers as each of
  * them in a single reply, in three sections. This module is the instruction that asks for it and the reader that
@@ -93,4 +95,22 @@ export function parseParallel(text: string): ParallelReply {
       text: section.body.join("\n").trim(),
     })),
   };
+}
+
+/**
+ * The parts of a Parallel Bots reply that ran with tools, grouped by lane. `lanes[0]` is lane 1. A part with no lane
+ * (a note, or a reply written before lanes existed) is returned in `shared`, in order.
+ */
+export function groupByLane(parts: readonly MessagePart[]): {
+  lanes: MessagePart[][];
+  shared: MessagePart[];
+} {
+  const lanes: MessagePart[][] = Array.from({ length: PARALLEL_SECTIONS }, () => []);
+  const shared: MessagePart[] = [];
+  for (const part of parts) {
+    const lane = "lane" in part ? part.lane : undefined;
+    if (lane !== undefined && lane >= 1 && lane <= PARALLEL_SECTIONS) lanes[lane - 1]!.push(part);
+    else shared.push(part);
+  }
+  return { lanes, shared };
 }

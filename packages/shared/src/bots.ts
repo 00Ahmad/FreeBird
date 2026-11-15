@@ -157,6 +157,10 @@ export const Bot = z.object({
   visual: z.boolean(),
   /** A Coding Bot: a team of planner, developer and QA roles that builds a project in an output folder. */
   coding: z.boolean().default(false),
+  /** A Job Bot: interviews you, then finds and checks jobs that fit you when you start a scan. */
+  job: z.boolean().default(false),
+  /** A Client Bot: interviews you about what you sell, then finds and checks businesses that may need it when you start a scan. */
+  client: z.boolean().default(false),
   /** The cluster (group discussion) this bot was made for; it lives only there. */
   clusterId: ThreadId.nullable().default(null),
   /** Which tools it may use (all by default). Fewer tools means a shorter prompt, which small models need. */

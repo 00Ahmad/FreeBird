@@ -1,17 +1,34 @@
-import { Globe, MessageCircle, MessagesSquare, Monitor, PanelRight, Square, Workflow } from "lucide-react";
+import {
+  Briefcase,
+  Handshake,
+  Globe,
+  MessageCircle,
+  MessagesSquare,
+  Monitor,
+  PanelRight,
+  Square,
+  Workflow,
+} from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Bot, Message, Thread } from "@mrog/shared";
 import { BotAvatar, Button, cn, IconButton } from "@mrog/ui-kit";
 
 import { useBots } from "../../hooks/bots";
-import { useCodingProject } from "../../hooks/coding";
+import { useCodingSeen } from "../../codingSeen";
+import { useCodingProject, useStopCoding } from "../../hooks/coding";
 import { useDiscussion, useStopDiscussion } from "../../hooks/discussion";
+import { useClientProject, useStopClient } from "../../hooks/clients";
+import { useJobProject, useStopJob } from "../../hooks/jobs";
 import { useRuntime } from "../../hooks/runtime";
 import { useSkills } from "../../hooks/team";
 import { useMessageHistory, useSendMessage, useStopThread } from "../../hooks/threads";
-import { composerCopy, panelOnOpen } from "../../lib/coding";
+import { canStop, composerCopy, panelFits, panelOnOpen, sidebarWidth } from "../../lib/coding";
+import { attentionMark, canSee } from "../../lib/codingAttention";
 import { noModelFor } from "../../lib/groups";
+import { clientComposer, isScanning as isClientScanning } from "../../lib/clients";
+import { isScanning, jobComposer } from "../../lib/jobs";
+import { canAllowTools, sendsParallelTools } from "../../lib/parallelLanes";
 import { isMac } from "../../lib/harness";
 import { layerOpen } from "../../lib/layers";
 import { quoteInto } from "../../lib/quote";
@@ -23,7 +40,7 @@ import { ComputerPanel } from "../computer/ComputerPanel";
 import { DetailsPanel } from "../details/DetailsPanel";
 import { groupTitle } from "../Sidebar";
 import { VoiceButton } from "../voice/VoiceButton";
-import { ParallelToggle } from "./ParallelToggle";
+import { ParallelToggle, ToolsToggle } from "./ParallelToggle";
 import { Composer, COMPOSER_ID } from "./Composer";
 import { DiscussDialog } from "./DiscussDialog";
 import { useComposerAssist } from "./ComposerAssist";
@@ -34,6 +51,12 @@ import { ModelMenu } from "./ModelMenu";
 const DiscussionView = lazy(() =>
   import("../discussion/DiscussionView").then((module) => ({ default: module.DiscussionView })),
 );
+// Only a Client Bot's chat shows this.
+const ClientPanel = lazy(() =>
+  import("../clients/ClientPanel").then((module) => ({ default: module.ClientPanel })),
+);
+// Only a Job Bot's chat shows this.
+const JobPanel = lazy(() => import("../jobs/JobPanel").then((module) => ({ default: module.JobPanel })));
 const RaceView = lazy(() => import("../race/RaceView").then((module) => ({ default: module.RaceView })));
 // Only a Coding Bot's chat shows this.
 const CodingPanel = lazy(() =>
@@ -54,11 +77,15 @@ export function ChatView({ thread }: { thread: Thread }) {
   const send = useSendMessage(thread.id);
   // Parallel Bots: while on, each message goes out as one request answered in three sections.
   const [parallel, setParallel] = useState(false);
+  // Allow tools: with Parallel Bots on, each of the three roles may search the web in its own lane.
+  const [allowTools, setAllowTools] = useState(false);
   const stop = useStopThread(thread.id);
   const activity = useUi((state) => state.activity[thread.id]);
   const panel = useUi((state) => state.panel);
   const setPanel = useUi((state) => state.setPanel);
   const toggleCoding = useUi((state) => state.toggleCoding);
+  const toggleJob = useUi((state) => state.toggleJob);
+  const toggleClient = useUi((state) => state.toggleClient);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Where what arrived while the user was away begins, taken before the chat counts as read. The line stays until the
   // user sends something. (ChatView is made anew for each chat, so this is read once per chat opened.)
@@ -84,10 +111,25 @@ export function ChatView({ thread }: { thread: Thread }) {
   const { data: skills } = useSkills(bot?.id);
   const title = bot?.name ?? groupTitle(thread, botMap);
   const coding = bot?.coding === true;
+  const toolsChoice = bot ? canAllowTools(bot) : { ok: false, reason: null };
   const { data: project } = useCodingProject(bot?.id ?? "", coding);
+  const stopCoding = useStopCoding(bot?.id ?? "");
+  // A Job Bot, like a Coding Bot, runs a team: what you type goes to it, not to a model of its own.
+  const job = bot?.job === true;
+  const { data: jobProject } = useJobProject(bot?.id ?? "", job);
+  const stopJob = useStopJob(bot?.id ?? "");
+  // A Client Bot runs a team the same way.
+  const clientBot = bot?.client === true;
+  const { data: clientProject } = useClientProject(bot?.id ?? "", clientBot);
+  const stopClient = useStopClient(bot?.id ?? "");
+  const team = coding || job || clientBot;
   // A Coding Bot has no model of its own: what you type goes to its team, whose roles have models.
-  const noModel = !coding && noModelFor(runtime?.settings.sharedModel, members);
-  const codingCopy = composerCopy(coding ? project?.status : undefined, title);
+  const noModel = !team && noModelFor(runtime?.settings.sharedModel, members);
+  const codingCopy = clientBot
+    ? clientComposer(clientProject, title)
+    : job
+      ? jobComposer(jobProject, title)
+      : composerCopy(coding ? project?.status : undefined, title);
   const activeBot = activity?.botId ? botMap.get(activity.botId) : undefined;
   const assist = useComposerAssist({
     members: thread.kind === "group" ? members : [],
@@ -100,12 +142,57 @@ export function ChatView({ thread }: { thread: Thread }) {
   const setText = assist.setText;
   const composing = !thread.race && (view === "chat" || thread.kind !== "group");
 
-  // A Coding Bot's chat opens with its Coding panel, unless the user closed it before.
+  // A Coding Bot's chat opens with its Coding panel, unless the user closed it before, or the window is too narrow
+  // for it beside the chat (it would cover the chat; the Coding panel button opens it over the chat).
   useEffect(() => {
     const ui = useUi.getState();
-    const next = panelOnOpen(coding, ui.codingOpen, ui.panel);
+    const fits = panelFits(window.innerWidth, sidebarWidth(ui.compactSidebar));
+    const next = panelOnOpen(coding, ui.codingOpen, ui.panel, fits);
     if (next !== ui.panel) useUi.setState({ panel: next });
   }, [coding]);
+
+  // A Job Bot's chat opens with its Job panel, unless the user closed it before or the window is too narrow.
+  useEffect(() => {
+    const ui = useUi.getState();
+    if (
+      job &&
+      ui.jobOpen &&
+      ui.panel === null &&
+      panelFits(window.innerWidth, sidebarWidth(ui.compactSidebar))
+    )
+      useUi.setState({ panel: "job" });
+    else if (!job && ui.panel === "job") useUi.setState({ panel: null });
+  }, [job]);
+
+  // A Client Bot's chat opens with its Client panel, unless the user closed it before or the window is too narrow.
+  useEffect(() => {
+    const ui = useUi.getState();
+    if (
+      clientBot &&
+      ui.clientOpen &&
+      ui.panel === null &&
+      panelFits(window.innerWidth, sidebarWidth(ui.compactSidebar))
+    )
+      useUi.setState({ panel: "client" });
+    else if (!clientBot && ui.panel === "client") useUi.setState({ panel: null });
+  }, [clientBot]);
+
+  // Opening a Coding Bot's chat after it finished (or failed) is seeing that: its sidebar badge goes. The same when
+  // it finishes while the chat is in front.
+  const seenMark = coding && project && canSee(project) ? attentionMark(project) : null;
+  useEffect(() => {
+    if (!seenMark || !project) return;
+    const see = () => {
+      if (document.hasFocus() && !document.hidden) useCodingSeen.getState().see(project);
+    };
+    see();
+    window.addEventListener("focus", see);
+    document.addEventListener("visibilitychange", see);
+    return () => {
+      window.removeEventListener("focus", see);
+      document.removeEventListener("visibilitychange", see);
+    };
+  }, [seenMark, project]);
 
   // Looking at the chat reads it: now, and again whenever this window comes back to the front.
   useEffect(() => {
@@ -138,7 +225,8 @@ export function ChatView({ thread }: { thread: Thread }) {
   }, [composing, setText]);
 
   return (
-    <div className="flex h-full min-h-0">
+    // Relative: on a narrow window the Coding panel lies over the chat.
+    <div className="relative flex h-full min-h-0">
       <main className="flex min-w-0 flex-1 flex-col bg-bg">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border px-5">
           <button
@@ -168,7 +256,27 @@ export function ChatView({ thread }: { thread: Thread }) {
               </span>
             </span>
           </button>
-          {bot && !coding && <ModelMenu bot={bot} />}
+          {bot && !team && <ModelMenu bot={bot} />}
+          {clientBot && (
+            <IconButton
+              label="Client panel"
+              onClick={toggleClient}
+              className={panel === "client" ? "bg-selected" : ""}
+              aria-pressed={panel === "client"}
+            >
+              <Handshake size={16} />
+            </IconButton>
+          )}
+          {job && (
+            <IconButton
+              label="Job panel"
+              onClick={toggleJob}
+              className={panel === "job" ? "bg-selected" : ""}
+              aria-pressed={panel === "job"}
+            >
+              <Briefcase size={16} />
+            </IconButton>
+          )}
           {coding && (
             <IconButton
               label="Coding panel"
@@ -188,7 +296,7 @@ export function ChatView({ thread }: { thread: Thread }) {
               <Globe size={16} />
             </IconButton>
           )}
-          {bot && !coding && (
+          {bot && !team && (
             <IconButton
               label="Computer"
               onClick={() => setPanel("computer")}
@@ -322,24 +430,43 @@ export function ChatView({ thread }: { thread: Thread }) {
               placeholder={
                 noModel
                   ? "Pick a model in Settings to start"
-                  : coding
+                  : team
                     ? codingCopy.placeholder
                     : discussing
                       ? "Add to the discussion: the next speaker answers you"
                       : parallel && thread.kind === "direct"
-                        ? `Ask ${title} once: three roles answer`
+                        ? sendsParallelTools(parallel, allowTools, toolsChoice)
+                          ? `Ask ${title} once: three roles search and answer`
+                          : `Ask ${title} once: three roles answer`
                         : `Message ${title}`
               }
               disabled={noModel}
-              busy={Boolean(activity)}
+              // A Coding Bot's work runs in its roles' turns, which this chat's Stop can't reach: its Stop is the
+              // team's (the panel's), shown while the team is at work. Sending stays open: a message steers the team.
+              busy={
+                clientBot
+                  ? Boolean(clientProject && isClientScanning(clientProject))
+                  : job
+                    ? Boolean(jobProject && isScanning(jobProject))
+                    : coding
+                      ? Boolean(project && canStop(project.status))
+                      : Boolean(activity)
+              }
               text={assist.text}
               onText={assist.setText}
               onKeyDown={assist.onKeyDown}
               above={assist.above}
               tools={
                 <>
-                  {thread.kind === "direct" && !coding && (
+                  {thread.kind === "direct" && !team && (
                     <ParallelToggle on={parallel} onToggle={() => setParallel((on) => !on)} />
+                  )}
+                  {thread.kind === "direct" && !team && parallel && bot && (
+                    <ToolsToggle
+                      on={allowTools}
+                      choice={toolsChoice}
+                      onToggle={() => setAllowTools((on) => !on)}
+                    />
                   )}
                   <VoiceButton
                     onTranscript={(text) => setText((current) => (current ? `${current} ${text}` : text))}
@@ -351,11 +478,22 @@ export function ChatView({ thread }: { thread: Thread }) {
                   ...input,
                   ...(replyTo ? { replyToId: replyTo.id } : {}),
                   ...(parallel && thread.kind === "direct" ? { parallel: true } : {}),
+                  ...(thread.kind === "direct" && sendsParallelTools(parallel, allowTools, toolsChoice)
+                    ? { parallelTools: true }
+                    : {}),
                 });
                 setReplyTo(null);
                 setNewFromId(null);
               }}
-              onStop={() => stop.mutate()}
+              onStop={() =>
+                clientBot
+                  ? stopClient.mutate()
+                  : job
+                    ? stopJob.mutate()
+                    : coding
+                      ? stopCoding.mutate()
+                      : stop.mutate()
+              }
             />
           </>
         )}
@@ -366,6 +504,16 @@ export function ChatView({ thread }: { thread: Thread }) {
       )}
       {panel === "computer" && bot && <ComputerPanel bot={bot} />}
       {panel === "browser" && bot && <BrowserPanel bot={bot} />}
+      {panel === "client" && bot && clientBot && (
+        <Suspense fallback={null}>
+          <ClientPanel bot={bot} />
+        </Suspense>
+      )}
+      {panel === "job" && bot && job && (
+        <Suspense fallback={null}>
+          <JobPanel bot={bot} />
+        </Suspense>
+      )}
       {panel === "coding" && bot && coding && (
         <Suspense fallback={null}>
           <CodingPanel bot={bot} />

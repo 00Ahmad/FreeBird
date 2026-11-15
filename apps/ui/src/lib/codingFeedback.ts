@@ -9,7 +9,7 @@ import {
 
 import { roleLabel, roundText, type StatusTone } from "./coding";
 import { isSlowCard } from "./codingWork";
-import { cardsByRef, needsFixing, progressText } from "./codingBoard";
+import { cardsByRef, needsFixing, progressText, qaFailures } from "./codingBoard";
 
 /** What the screen shows about the work going on, drawn from the project alone (the server sets `active` and `log`). */
 type Feedback = Pick<CodingProject, "status" | "nodes" | "edges" | "cards" | "active" | "log">;
@@ -82,15 +82,14 @@ export function cardProgress(project: Pick<Feedback, "cards">): Progress {
 }
 
 /**
- * Cards QA sent back: those with a QA comment from the round that counts. While QA is checking, that is the round in
- * progress (its comments carry the next number, so far); otherwise it is the last round finished.
+ * Cards QA sent back: those with a failing QA comment (or a finding of the whole-project check) from the round that
+ * counts. A pass, or a note that a card is back in QA, is no failure. While QA is checking, the round that counts is
+ * the one in progress (its comments carry the next number, so far); otherwise it is the last round finished.
  */
 export function roundFailures(project: Pick<CodingProject, "cards" | "round" | "status">): number {
   const counted = project.status === "qa" ? project.round + 1 : project.round;
   if (counted <= 0) return 0;
-  return project.cards.filter((card) =>
-    card.comments.some((comment) => comment.author === "qa" && comment.round === counted),
-  ).length;
+  return project.cards.filter((card) => qaFailures(card).some((comment) => comment.round === counted)).length;
 }
 
 /** "Round 2 of 5", with how many cards failed: "Round 2 of 5 · 3 cards failed so far" (or "in the last round"). */

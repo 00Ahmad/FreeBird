@@ -227,4 +227,22 @@ export const MIGRATIONS: readonly Migration[] = [
     // A Coding Bot: a team of planner, developer and QA roles that builds a project in a folder.
     sql: `ALTER TABLE bots ADD COLUMN coding INTEGER NOT NULL DEFAULT 0;`,
   },
+  {
+    id: 16,
+    name: "parallel-bots-tools",
+    // A Parallel Bots reply whose three roles each ran as their own conversation, with tools.
+    sql: `ALTER TABLE messages ADD COLUMN parallel_tools INTEGER NOT NULL DEFAULT 0;`,
+  },
+  {
+    id: 17,
+    name: "job-bots",
+    // A Job Bot: interviews you, then finds and checks jobs that fit you when you start a scan.
+    sql: `ALTER TABLE bots ADD COLUMN job INTEGER NOT NULL DEFAULT 0;`,
+  },
+  {
+    id: 18,
+    name: "client-bots",
+    // A Client Bot: interviews you about what you sell, then finds and checks businesses that may need it.
+    sql: `ALTER TABLE bots ADD COLUMN client INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];

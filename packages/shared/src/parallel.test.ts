@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { parallelInstructions, parseParallel } from "./parallel";
+import type { MessagePart } from "./messages";
+import { groupByLane, parallelInstructions, parseParallel } from "./parallel";
 import { REAL_REPLIES } from "./parallel.fixtures";
 
 const reply = [
@@ -146,5 +147,27 @@ describe("parallelInstructions", () => {
     // The form it asks for is one its own reader accepts.
     const form = text.slice(text.indexOf("## 1."));
     expect(parseParallel(form).sections.map((s) => s.index)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("groupByLane", () => {
+  it("keeps each lane's parts together, in order, and the rest apart", () => {
+    const parts = [
+      { type: "text", text: "note" },
+      { type: "text", text: "a1", lane: 1 },
+      { type: "tool", callId: "x", name: "web_search", args: {}, status: "done", lane: 2 },
+      { type: "text", text: "a2", lane: 1 },
+      { type: "error", code: "e", message: "m", lane: 3 },
+    ] as MessagePart[];
+    const { lanes, shared } = groupByLane(parts);
+    expect(lanes.map((lane) => lane.length)).toEqual([2, 1, 1]);
+    expect(lanes[0]!.map((p) => (p.type === "text" ? p.text : ""))).toEqual(["a1", "a2"]);
+    expect(shared).toHaveLength(1);
+  });
+
+  it("treats a lane outside 1 to 3 or a part without one as shared", () => {
+    const { lanes, shared } = groupByLane([{ type: "text", text: "x", lane: 4 } as unknown as MessagePart]);
+    expect(lanes.flat()).toHaveLength(0);
+    expect(shared).toHaveLength(1);
   });
 });

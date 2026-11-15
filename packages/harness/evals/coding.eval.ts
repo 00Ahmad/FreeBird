@@ -4,9 +4,14 @@
  *   pnpm --filter @mrog/harness exec tsx evals/coding.eval.ts qwen3.5:9b
  *   pnpm --filter @mrog/harness exec tsx evals/coding.eval.ts qwen3.5:9b planner=qwen3.5:9b developer=qwen3-coder:30b qa=qwen3.5:9b
  * The first bare argument is the model every role uses unless a role=model argument names another. EVAL_OLLAMA_URL
- * points the run at an Ollama on another address; EVAL_MAX_ROUNDS (default 3) is the QA round limit. Commands are
- * refused ("never allow"), so QA reads the code instead of running it. Prints, per role, the turns it took and what it
- * did, then the board, the files and PASS or FAIL: the project is done and every planned file exists and isn't empty.
+ * points the run at an Ollama on another address; EVAL_MAX_ROUNDS (default 3) is the QA round limit.
+ *   EVAL_PROJECT=cli (default) is a three-file Node tool; EVAL_PROJECT=web is the four-page website brief that made a
+ *   9B Developer loop on its CSS cards; EVAL_BRIEF replaces either with your own words.
+ *   EVAL_COMMANDS=never (default) refuses commands, so QA reads the code; EVAL_COMMANDS=allow answers every command card
+ *   "allow once", as a user would, so QA really runs things (in a throwaway folder).
+ * Prints, per role, the turns it took and what it did, then the board with each card's time, tokens and turns, the
+ * retries, the files, the whole-project check, and PASS or FAIL: the project is done, every planned file exists and
+ * isn't empty, and the automatic whole-project check finds nothing.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,11 +27,15 @@ import {
 import { openStore } from "@mrog/store";
 import { MemoryBackend, Vault } from "@mrog/vault";
 
+import { checkProject } from "../src/coding-check";
 import { buildServer, createServices, EventBus, settingsNameIndex } from "../src/index";
 
-const BRIEF =
-  process.env.EVAL_BRIEF ??
-  "Build a tiny command-line tool in plain JavaScript (Node, no dependencies): `node src/main.js 3 4` prints the sum of its two number arguments, and an error message if an argument isn't a number. Keep the maths in its own file src/math.js (export add), the argument checking in src/args.js (export parseNumbers), and src/main.js ties them together. A README.md is not needed. Exactly three files.";
+const PROJECTS: Record<string, string> = {
+  cli: "Build a tiny command-line tool in plain JavaScript (Node, no dependencies): `node src/main.js 3 4` prints the sum of its two number arguments, and an error message if an argument isn't a number. Keep the maths in its own file src/math.js (export add), the argument checking in src/args.js (export parseNumbers), and src/main.js ties them together. A README.md is not needed. Exactly three files.",
+  web: "create a static 4 page gaming website for me. it should look professional and modern. create a proper website plan and website pages.",
+};
+const BRIEF = process.env.EVAL_BRIEF ?? PROJECTS[process.env.EVAL_PROJECT ?? "cli"] ?? PROJECTS.cli!;
+const COMMANDS = process.env.EVAL_COMMANDS === "allow" ? "allow" : "never";
 const MAX_ROUNDS = Number(process.env.EVAL_MAX_ROUNDS ?? 3);
 const TIME_LIMIT_MS = Number(process.env.EVAL_TIME_LIMIT_MS ?? 30 * 60_000);
 
@@ -60,6 +69,8 @@ async function run() {
       heartbeatMs: 60_000,
       vault: "memory",
       keyringService: "eval",
+      previousKeyringService: null,
+      eventLog: false,
     },
     store,
     vault,
@@ -71,7 +82,11 @@ async function run() {
     ...(process.env.EVAL_OLLAMA_URL ? { ollamaUrl: process.env.EVAL_OLLAMA_URL } : {}),
     numCtx: 16_384,
   });
-  services.agent.approvals.savePermissions({ localExecution: "never", rules: [] });
+  // "allow" still shows every card (the team's commands always ask): the run answers them below, as a user would.
+  services.agent.approvals.savePermissions({
+    localExecution: COMMANDS === "allow" ? "ask" : "never",
+    rules: [],
+  });
   const app = await buildServer(services);
 
   const model = (role: string) => (perRole[role] ? { model: `ollama:${perRole[role]}` } : {});
@@ -100,6 +115,29 @@ async function run() {
           stats.tools.push(`${event.message.id}:${part.callId}:${part.name}:${part.status}`);
   });
 
+  const answered = new Set<string>();
+  let commands = 0;
+  if (COMMANDS === "allow")
+    bus.subscribe((event) => {
+      if (event.type !== "message.updated" || event.message.threadId !== bot.threadId) return;
+      for (const part of event.message.parts)
+        if (
+          part.type === "tool" &&
+          part.status === "pending_approval" &&
+          part.approval &&
+          !answered.has(part.approval.id)
+        ) {
+          answered.add(part.approval.id);
+          commands += 1;
+          void app.inject({
+            method: "POST",
+            url: `/api/approvals/${part.approval.id}`,
+            headers: { authorization: "Bearer eval" },
+            payload: { decision: "allow_once" },
+          });
+        }
+    });
+
   const started = Date.now();
   await services.turns.send(store.threads.get(bot.threadId)!, { text: BRIEF });
   let final: CodingProject = project;
@@ -115,12 +153,28 @@ async function run() {
     const path = join(outDir, node.path);
     return { path: node.path, exists: existsSync(path), bytes: existsSync(path) ? statSync(path).size : 0 };
   });
+  const read = (path: string) => {
+    const full = join(outDir, path);
+    return existsSync(full) && statSync(full).isFile() ? readFileSync(full, "utf8") : null;
+  };
+  const findings = checkProject({ files: final.nodes.map((node) => node.path), read });
+  const retries = (final.log ?? []).filter((line) => /again|didn't finish|failed/i.test(line.text)).length;
   const pass =
-    final.status === "done" && files.length > 0 && files.every((file) => file.exists && file.bytes > 0);
+    final.status === "done" &&
+    files.length > 0 &&
+    files.every((file) => file.exists && file.bytes > 0) &&
+    findings.length === 0;
   console.log(
     `\n=== ${pass ? "PASS" : "FAIL"} in ${Math.round((Date.now() - started) / 1000)}s: ${final.status}, ${final.round} round(s) ===`,
   );
   if (final.error) console.log(`error: ${final.error}`);
+  console.log(
+    `commands: ${COMMANDS}${COMMANDS === "allow" ? ` (${commands} approved)` : ""}; retries and failures in the log: ${retries}`,
+  );
+  console.log(
+    `whole-project check: ${findings.length === 0 ? "nothing found" : `${findings.length} finding(s)`}`,
+  );
+  for (const finding of findings) console.log(`  ${finding.file}: ${finding.problem}`);
   for (const role of CODING_ROLES) {
     const calls = turns[role]!.tools.map((entry) => entry.split(":").slice(2).join(":"));
     const failed = calls.filter((call) => !call.endsWith(":done")).length;
@@ -136,7 +190,10 @@ async function run() {
     );
   console.log("board:");
   for (const card of final.cards) {
-    console.log(`  [${card.column}] ${card.title}`);
+    const work = card.work;
+    console.log(
+      `  [${card.column}] ${card.title}${work ? ` (${Math.round(work.seconds)} s, ${work.inputTokens} in, ${work.outputTokens} out, ${work.turns} turn(s))` : ""}`,
+    );
     for (const comment of card.comments)
       console.log(
         `      ${comment.author} (round ${comment.round}): ${comment.text.replace(/\s+/g, " ").slice(0, 160)}`,
