@@ -4,6 +4,11 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  /**
+   * The provider's signature for this call, sent back with it exactly as it came. Gemini 3 gives one (a "thought
+   * signature") and rejects the next request if the call comes back without it.
+   */
+  signature?: string;
 }
 
 export type ChatMessage =

@@ -11,7 +11,6 @@ import {
   useDeleteGroup,
   useMemory,
   useMemoryActions,
-  useSkillActions,
   useSkills,
   useUpdateGroup,
 } from "../../hooks/team";
@@ -23,6 +22,7 @@ import { useUi } from "../../state";
 import { ModelMenu } from "../chat/ModelMenu";
 import { groupTitle } from "../Sidebar";
 import { BotRoutines } from "../routines/BotRoutines";
+import { SkillsBlock } from "./SkillsBlock";
 import { ToolsBlock } from "./ToolsBlock";
 
 /** Single-column details pane. */
@@ -390,88 +390,6 @@ function MemoryBlock({ bot }: { bot: Bot }) {
             </Button>
           </div>
         </div>
-      )}
-    </Block>
-  );
-}
-
-function SkillsBlock({ bot }: { bot: Bot }) {
-  const { data: skills } = useSkills(bot.id);
-  const { add, remove } = useSkillActions();
-  const [form, setForm] = useState<{ name: string; prompt: string } | null>(null);
-  return (
-    <Block
-      title="Skills"
-      action={
-        <IconButton label="Add skill" onClick={() => setForm({ name: "", prompt: "" })}>
-          <Plus size={14} />
-        </IconButton>
-      }
-    >
-      {skills?.length === 0 && !form && (
-        <p className="text-[12.5px] text-ink-3">
-          Save prompts you reuse, then type / in the chat to run one.
-        </p>
-      )}
-      <ul className="flex flex-col gap-1">
-        {skills?.map((skill) => (
-          <li key={skill.id} className="group flex items-center gap-2 text-[13px]">
-            <span className="font-mono text-[12px] text-accent">/{skill.name}</span>
-            <span className="min-w-0 flex-1 truncate text-ink-3">
-              {skill.botId ? skill.prompt : `(all bots) ${skill.prompt}`}
-            </span>
-            <IconButton
-              label={`Delete ${skill.name}`}
-              className="size-6 opacity-0 group-hover:opacity-100 focus:opacity-100"
-              onClick={() => remove.mutate(skill.id)}
-            >
-              <Trash2 size={12} />
-            </IconButton>
-          </li>
-        ))}
-      </ul>
-      {form && (
-        <form
-          className="mt-2 flex flex-col gap-1.5"
-          onSubmit={(event) => {
-            event.preventDefault();
-            add.mutate(
-              { botId: bot.id, name: form.name.trim(), prompt: form.prompt.trim() },
-              { onSuccess: () => setForm(null) },
-            );
-          }}
-        >
-          <input
-            autoFocus
-            value={form.name}
-            onChange={(event) => setForm({ ...form, name: event.target.value })}
-            placeholder="name (e.g. standup)"
-            aria-label="Skill name"
-            className="h-8 rounded-lg border border-border bg-bg px-2 font-mono text-[12.5px] outline-none focus:border-accent"
-          />
-          <textarea
-            value={form.prompt}
-            onChange={(event) => setForm({ ...form, prompt: event.target.value })}
-            rows={3}
-            placeholder="The prompt this skill sends"
-            aria-label="Skill prompt"
-            className="rounded-lg border border-border bg-bg px-2 py-1.5 text-[12.5px] outline-none focus:border-accent"
-          />
-          {add.error && <p className="text-xs text-danger">{add.error.message}</p>}
-          <div className="flex gap-1.5">
-            <Button
-              size="sm"
-              type="submit"
-              variant="primary"
-              disabled={!form.name.trim() || !form.prompt.trim()}
-            >
-              Save skill
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setForm(null)}>
-              Cancel
-            </Button>
-          </div>
-        </form>
       )}
     </Block>
   );

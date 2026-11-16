@@ -185,17 +185,31 @@ describe("QA's commands", () => {
 });
 
 describe("what each role is told and given", () => {
-  it("gives the Developer four tools and no generic lines about plans, memory or the shell", async () => {
+  it("gives the Developer its four tools plus the two skill tools, and no generic lines about plans, memory or the shell", async () => {
     const team = codingTeam({ plans: [{ tool: ONE_FILE }] });
     h = await startTeam(team);
     const { bot, project } = await makeCoding(h, tmp("out"), { autoApprove: true });
     await type(h, bot, "Make a note");
     await until(h, bot.id, (p) => p.status === "done");
-    expect(ROLE_TOOLS.developer.toSorted()).toEqual(["edit_file", "finish_card", "read_file", "write_file"]);
+    expect(ROLE_TOOLS.developer.toSorted()).toEqual([
+      "edit_file",
+      "find_skills",
+      "finish_card",
+      "read_file",
+      "use_skill",
+      "write_file",
+    ]);
     for (const role of ["planner", "developer", "qa"] as const)
       expect(ROLE_TOOLS[role]).not.toContain("update_plan");
     const developer = team.seen.find((s) => s.role === "developer")!;
-    expect(developer.tools.toSorted()).toEqual(["edit_file", "finish_card", "read_file", "write_file"]);
+    expect(developer.tools.toSorted()).toEqual([
+      "edit_file",
+      "find_skills",
+      "finish_card",
+      "read_file",
+      "use_skill",
+      "write_file",
+    ]);
     for (const role of ["planner", "developer", "qa"] as const) {
       const system = team.seen.find((s) => s.role === role)!.system;
       expect(system).not.toContain("update_plan");

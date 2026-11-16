@@ -327,6 +327,36 @@ describe("history", () => {
     ]);
   });
 
+  it("replays a tool call with the signature Gemini gave it", () => {
+    const self = "bot_" + "1".repeat(32);
+    const history = toChatHistory(
+      [
+        msg({
+          role: "bot",
+          botId: self,
+          parts: [
+            {
+              type: "tool",
+              callId: "c1",
+              name: "list_files",
+              args: { path: "." },
+              status: "done",
+              result: "(empty folder)",
+              signature: "sig-abc",
+            },
+          ],
+        }),
+      ],
+      self,
+      new Map(),
+    );
+    expect(history[0]).toEqual({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "list_files", arguments: { path: "." }, signature: "sig-abc" }],
+    });
+  });
+
   it("tells a moderator's summary from a deleted bot's message", () => {
     const self = "bot_" + "1".repeat(32);
     const history = toChatHistory(

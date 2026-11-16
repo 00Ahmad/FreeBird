@@ -7,6 +7,8 @@
  * points the run at an Ollama on another address; EVAL_MAX_ROUNDS (default 3) is the QA round limit.
  *   EVAL_PROJECT=cli (default) is a three-file Node tool; EVAL_PROJECT=web is the four-page website brief that made a
  *   9B Developer loop on its CSS cards; EVAL_BRIEF replaces either with your own words.
+ *   EVAL_PROJECT=todo is a one-page to-do list (HTML, CSS, JS), the kind of app Visual QA is for.
+ *   EVAL_VISUAL=1 turns Visual QA on: QA opens the finished app in a hidden browser and uses it.
  *   EVAL_COMMANDS=never (default) refuses commands, so QA reads the code; EVAL_COMMANDS=allow answers every command card
  *   "allow once", as a user would, so QA really runs things (in a throwaway folder).
  * Prints, per role, the turns it took and what it did, then the board with each card's time, tokens and turns, the
@@ -19,6 +21,7 @@ import { join } from "node:path";
 
 import {
   CODING_ROLES,
+  DEFAULT_BROWSER_SETTINGS,
   DEFAULT_RUNTIME_SETTINGS,
   isCodingBusy,
   messageText,
@@ -33,7 +36,9 @@ import { buildServer, createServices, EventBus, settingsNameIndex } from "../src
 const PROJECTS: Record<string, string> = {
   cli: "Build a tiny command-line tool in plain JavaScript (Node, no dependencies): `node src/main.js 3 4` prints the sum of its two number arguments, and an error message if an argument isn't a number. Keep the maths in its own file src/math.js (export add), the argument checking in src/args.js (export parseNumbers), and src/main.js ties them together. A README.md is not needed. Exactly three files.",
   web: "create a static 4 page gaming website for me. it should look professional and modern. create a proper website plan and website pages.",
+  todo: "Build a small to-do list web page in plain HTML, CSS and JavaScript (no frameworks, no build step), with exactly three files: index.html, style.css and app.js. You type a task and click Add to put it in the list; clicking a task's Done button marks it done (struck through); its Delete button removes it.",
 };
+const VISUAL = process.env.EVAL_VISUAL === "1";
 const BRIEF = process.env.EVAL_BRIEF ?? PROJECTS[process.env.EVAL_PROJECT ?? "cli"] ?? PROJECTS.cli!;
 const COMMANDS = process.env.EVAL_COMMANDS === "allow" ? "allow" : "never";
 const MAX_ROUNDS = Number(process.env.EVAL_MAX_ROUNDS ?? 3);
@@ -88,6 +93,8 @@ async function run() {
     rules: [],
   });
   const app = await buildServer(services);
+  // Visual QA's browser runs hidden, in one shared profile, like the tests.
+  if (VISUAL) store.settings.set("browser", { ...DEFAULT_BROWSER_SETTINGS, show: false, profiles: "shared" });
 
   const model = (role: string) => (perRole[role] ? { model: `ollama:${perRole[role]}` } : {});
   const { bot, project } = await services.coding.create({
@@ -95,6 +102,7 @@ async function run() {
     outputFolder: outDir,
     roles: { planner: model("planner"), developer: model("developer"), qa: model("qa") },
     autoApprove: true,
+    visualQa: VISUAL,
     maxRounds: MAX_ROUNDS,
   });
 
@@ -205,10 +213,28 @@ async function run() {
     console.log(`first file:\n${readFileSync(join(outDir, files[0].path), "utf8").slice(0, 600)}`);
   console.log("activity:");
   for (const line of final.log ?? []) console.log(`  ${line.text}`);
+  if (VISUAL) {
+    console.log("Visual QA turns (QA's tool calls, in order):");
+    const qa = store.bots.get(project.roles.qa.botId)!;
+    for (const thread of store.threads.list())
+      for (const message of store.messages.list(thread.id))
+        if (
+          message.botId === qa.id &&
+          message.parts.some(
+            (part) => part.type === "tool" && /^(app_|screen_|finish_visual)/.test(part.name),
+          )
+        )
+          for (const part of message.parts)
+            if (part.type === "tool")
+              console.log(
+                `  ${part.name}(${JSON.stringify(part.args).slice(0, 80)}) → ${part.status}: ${(part.result ?? "").replace(/\s+/g, " ").slice(0, 140)}`,
+              );
+  }
   console.log("chat with the Coding Bot:");
   for (const message of store.messages.list(bot.threadId))
     if (message.role === "bot") console.log(`  ${messageText(message).replace(/\s+/g, " ").slice(0, 160)}`);
 
+  await services.browser.close();
   await app.close();
   store.close();
   rmSync(dataDir, { recursive: true, force: true });

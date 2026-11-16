@@ -141,8 +141,71 @@ export class ModelRuntime {
     private readonly timing: { agingMs?: number; now?: () => number } = {},
   ) {}
 
+  /**
+   * Whether a local model (by its name in Ollama) is still set for some bot, so switching away from it elsewhere mustn't
+   * unload it. The harness fills this in from the bots' own models.
+   */
+  inUse: (model: string) => boolean = () => false;
+
   get settings(): RuntimeSettings {
     return this.store.load();
+  }
+
+  /** The model's name in this runtime's Ollama, or null for a cloud model or none. */
+  localName(ref: string | null | undefined): string | null {
+    if (!ref) return null;
+    const { providerId, model } = parseModelRef(ref);
+    return providerId === this.ollama.id ? model : null;
+  }
+
+  /**
+   * Unloads a local model nothing uses any more: not the shared model, not a bot's own model. It waits its turn in the
+   * queue, so a reply still being written on it finishes first. True when an unload was queued.
+   */
+  release(ref: string | null | undefined): boolean {
+    const name = this.localName(ref);
+    if (!name || name === this.sharedLocalModel() || this.inUse(name)) return false;
+    void this.run("background", () => this.ollama.unload(name)).catch(() => {});
+    return true;
+  }
+
+  /**
+   * Called with a slot held, just before a request to the local model `name`: with "One local model at a time" on,
+   * the other models this app loaded are unloaded first, so only one sits in memory. Skipped while other requests run
+   * (with "Bots at once" above 1 they may be using those models). The models it unloaded.
+   */
+  async swapTo(name: string, signal?: AbortSignal): Promise<string[]> {
+    if (!this.settings.oneModelAtATime || this.running > 1) return [];
+    const others = this.ollama.usedModels().filter((other) => other !== name);
+    for (const other of others) await this.ollama.unload(other, signal).catch(() => {});
+    if (others.length > 0) this.onChange();
+    return others;
+  }
+
+  /**
+   * Unloads the local models this app loaded that nothing is set to use any more (not the shared model, not any
+   * bot's or team role's own model), after any model change anywhere. Each waits its turn in the queue. The names.
+   */
+  releaseUnused(): string[] {
+    const shared = this.sharedLocalModel();
+    const unused = this.ollama.usedModels().filter((name) => name !== shared && !this.inUse(name));
+    for (const name of unused) void this.run("background", () => this.ollama.unload(name)).catch(() => {});
+    return unused;
+  }
+
+  /**
+   * Unloads every local model this app loaded, for when it closes. Gives up after `timeoutMs` so closing stays quick;
+   * the models' keep-alive frees them later anyway. The names it tried.
+   */
+  async unloadUsed(timeoutMs: number): Promise<string[]> {
+    const names = this.ollama.usedModels();
+    if (names.length === 0) return [];
+    const signal = AbortSignal.timeout(timeoutMs);
+    await Promise.race([
+      Promise.allSettled(names.map((name) => this.ollama.unload(name, signal))),
+      new Promise((resolve) => setTimeout(resolve, timeoutMs).unref?.()),
+    ]);
+    return names;
   }
 
   /** Validates and saves; reloads the shared model when an option that affects loading changed. */
@@ -151,6 +214,8 @@ export class ModelRuntime {
     const next = RuntimeSettings.parse({ ...before, ...patch });
     this.store.save(next);
     if (next.parallel > before.parallel) this.pump();
+    // A new shared model: the old one is unloaded first (two models rarely fit a small GPU), then the new one loaded.
+    if (next.sharedModel !== before.sharedModel) this.release(before.sharedModel);
     const reload =
       next.sharedModel !== before.sharedModel ||
       next.numCtx !== before.numCtx ||

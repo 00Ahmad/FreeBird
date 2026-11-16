@@ -30,7 +30,7 @@ Pick a shared model in **Settings → Local model**, or give the bot its own mod
 
 ### Replies are slow
 
-- The first message after a start loads the model; later ones are faster. **Keep loaded** keeps it in memory (default 30 minutes).
+- The first message after a start loads the model; later ones are faster. **Keep loaded** keeps it in memory (default 30 minutes). FreeBird unloads its models when it closes, so the first message after a restart loads the model again; switch off **Unload its models** under **When FreeBird closes** to keep it loaded between sessions.
 - Check **Settings → Local model → Loaded now**. If part of the model sits in RAM instead of GPU memory, lower the **context size** or use a smaller model.
 - **Thinking** makes thinking models slower. Leave it off unless a task needs careful reasoning.
 - Helpers and racers on the same local model take turns when **Bots at once** is 1. Raise it if your GPU has room.

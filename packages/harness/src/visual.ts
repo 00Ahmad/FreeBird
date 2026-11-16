@@ -45,6 +45,8 @@ export const VISUAL_BOT_KEEPS = new Set([
   "read_file",
   "write_file",
   "request_secret",
+  "find_skills",
+  "use_skill",
 ]);
 
 /**

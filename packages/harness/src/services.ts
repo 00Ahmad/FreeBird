@@ -5,6 +5,7 @@ import type { SettingsRepo, Store } from "@mrog/store";
 import type { Vault } from "@mrog/vault";
 
 import { installAgent, type Agent } from "./agent";
+import { installSkills } from "./skills/install";
 import { BrowserManager } from "./browser";
 import type { EventBus } from "./bus";
 import { ModelCatalog } from "./catalog";
@@ -106,6 +107,17 @@ export function createServices({
     }, 250);
   });
 
+  // A model a bot (or a team's role) is set to use stays loaded when the shared model changes away from it.
+  runtime.inUse = (name) => store.bots.list().some((bot) => runtime.localName(bot.model) === name);
+  // Any model change, wherever it happens (a bot's menu, a Coding Bot's roles, a deleted bot): what nothing is set to
+  // use any more is unloaded. Debounced, so a burst of changes (a team made at once) is one check.
+  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const modelsChanged = bus.subscribe((event) => {
+    if (event.type !== "bot.updated" && event.type !== "bot.deleted") return;
+    clearTimeout(releaseTimer);
+    releaseTimer = setTimeout(() => runtime.releaseUnused(), 300);
+  });
+
   const ollamaLauncher = new OllamaLauncher({
     url: () => runtimeStore.load().ollamaUrl,
     reachable: () =>
@@ -150,6 +162,7 @@ export function createServices({
     jobs: undefined as unknown as Jobs,
     clients: undefined as unknown as Clients,
   } satisfies Services;
+  services.disposers.push(modelsChanged, () => clearTimeout(releaseTimer));
   services.scrubber = new SecretScrubber(() => services.vaultService.secretValues());
   services.scrubber.refresh();
   // A secret saved, changed or removed (including a connected app's sign-in being renewed) is known at once.
@@ -162,6 +175,7 @@ export function createServices({
   const scrub = (text: string) => services.scrubber.scrub(text);
   turns.extensions.scrub = scrub;
   services.agent = installAgent(services);
+  installSkills(services);
   services.agent.scrub = scrub;
   services.connectors.scrub = scrub;
   services.providers = new ProviderManager(services, fetchImpl);

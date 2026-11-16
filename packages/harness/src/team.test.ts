@@ -5,9 +5,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_RUNTIME_SETTINGS, messageText, type Bot, type Message, type Thread } from "@mrog/shared";
+import { BUILTIN_SKILLS } from "@mrog/skills";
 
 import { mentionedBots } from "./team";
 import { auth, fakeOllama, makeHarness, ndjson, nextEvent, type TestHarness } from "./testing";
+
+/** The skills FreeBird ships with, shared by every bot. */
+const BUILTIN_NAMES = new Set(BUILTIN_SKILLS.map((skill) => skill.name));
 
 let h: TestHarness | undefined;
 afterEach(async () => {
@@ -378,10 +382,12 @@ describe("skills, reactions, duplicate", () => {
     });
     const forAda = (await h!.app.inject({ url: `/api/skills?botId=${ada.id}`, headers: auth }))
       .json()
-      .skills.map((s: any) => s.name);
+      .skills.filter((s: any) => !BUILTIN_NAMES.has(s.name))
+      .map((s: any) => s.name);
     const forBea = (await h!.app.inject({ url: `/api/skills?botId=${bea.id}`, headers: auth }))
       .json()
-      .skills.map((s: any) => s.name);
+      .skills.filter((s: any) => !BUILTIN_NAMES.has(s.name))
+      .map((s: any) => s.name);
     expect(forAda).toEqual(["standup", "triage"]);
     expect(forBea).toEqual(["standup"]);
     const bad = await h!.app.inject({
@@ -451,7 +457,8 @@ describe("skills, reactions, duplicate", () => {
     expect(
       (await h!.app.inject({ url: `/api/skills?botId=${copy.id}`, headers: auth }))
         .json()
-        .skills.map((s: any) => s.name),
+        .skills.filter((s: any) => !BUILTIN_NAMES.has(s.name))
+        .map((s: any) => s.name),
     ).toEqual(["triage"]);
   });
 });

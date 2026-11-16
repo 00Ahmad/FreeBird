@@ -470,6 +470,7 @@ export class TurnManager {
     botId: string,
   ): ChatProvider {
     const acquire = (signal?: AbortSignal) => this.acquireSlot(priority, threadId, botId, signal);
+    const runtime = this.deps.runtime;
     return {
       id: provider.id,
       label: provider.label,
@@ -479,6 +480,8 @@ export class TurnManager {
       async *chat(request) {
         const release = await acquire(request.signal);
         try {
+          // One local model in memory at a time: the others this app loaded go first.
+          if (provider.id === runtime.ollama.id) await runtime.swapTo(request.model, request.signal);
           yield* provider.chat(request);
         } finally {
           release();
@@ -604,6 +607,7 @@ export class TurnManager {
           name: call.name,
           args: asArgs(call.arguments),
           status: "running",
+          ...(call.signature ? { signature: call.signature } : {}),
         });
         this.setActivity(thread.id, bot.id, "working");
         publishFull();
@@ -771,6 +775,7 @@ export class TurnManager {
           async *chat(request) {
             const release = await group.acquire(request.signal);
             try {
+              if (guarded.id === runtime.ollama.id) await runtime.swapTo(request.model, request.signal);
               yield* guarded.chat(request);
             } finally {
               release();

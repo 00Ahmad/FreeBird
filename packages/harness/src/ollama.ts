@@ -48,22 +48,55 @@ interface OllamaLauncherOptions {
   platform?: NodeJS.Platform;
   /** How long to wait for a started Ollama to answer. */
   waitMs?: number;
+  /** Stops a process group (not on Windows); tests replace it. */
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
 }
 
 const failure = (code: string, message: string) => Object.assign(new Error(message), { code });
 
 /**
- * Starts the local Ollama when it isn't running. It is left running when the app quits, as if the user had
- * opened it, so a loaded model survives a restart of the app.
+ * Starts the local Ollama when it isn't running, and can stop it again when the app quits ("Stop Ollama when FreeBird
+ * closes"). An Ollama the user started themselves is never stopped.
  */
 export class OllamaLauncher {
   private pending: Promise<OllamaStart> | null = null;
+  /** The process this app started, while it may still be running. */
+  private startedPid: number | null = null;
 
   constructor(private readonly options: OllamaLauncherOptions) {}
 
   start(): Promise<OllamaStart> {
     this.pending ??= this.launch().finally(() => (this.pending = null));
     return this.pending;
+  }
+
+  /** Whether this app started the Ollama that is running. */
+  get startedIt(): boolean {
+    return this.startedPid !== null;
+  }
+
+  /**
+   * Stops the Ollama this app started, with its server process (Windows: the tray app and the server it runs). Does
+   * nothing when the user started Ollama, or on macOS, where it was opened through `open`. True when it tried.
+   */
+  stop(): boolean {
+    const pid = this.startedPid;
+    const platform = this.options.platform ?? process.platform;
+    if (pid === null || platform === "darwin") return false;
+    this.startedPid = null;
+    try {
+      if (platform === "win32") {
+        const spawn = this.options.spawn ?? nodeSpawn;
+        const child = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        child.on("error", () => {});
+      } else (this.options.kill ?? process.kill)(-pid, "SIGTERM");
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Settles once a start that's under way has finished, or at once when none is. */
@@ -86,6 +119,7 @@ export class OllamaLauncher {
 
     for (const { command, args } of ollamaCommands(this.options.platform ?? process.platform, env, exists)) {
       let failed = false;
+      let pid: number | null = null;
       try {
         const child = spawn(command, args, {
           detached: true,
@@ -97,6 +131,7 @@ export class OllamaLauncher {
         });
         child.on("error", () => (failed = true));
         child.unref();
+        pid = child.pid ?? null;
       } catch {
         continue;
       }
@@ -104,6 +139,7 @@ export class OllamaLauncher {
       while (!failed && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 250));
         if (await reachable()) {
+          this.startedPid = pid;
           this.options.onStarted?.();
           return "started";
         }

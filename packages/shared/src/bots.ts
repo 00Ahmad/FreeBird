@@ -81,7 +81,20 @@ export const restrictsTools = (tools: BotTools) =>
   Object.values(tools.apps).some((access) => access !== "full");
 
 export type ToolGroup =
-  "files" | "commands" | "web" | "browser" | "computer" | "vault" | "team" | "memory" | "apps" | "chat";
+  | "files"
+  | "commands"
+  | "web"
+  | "browser"
+  | "computer"
+  | "vault"
+  | "team"
+  | "memory"
+  | "skills"
+  | "apps"
+  | "chat";
+
+/** The tools that let a bot find and use its skills by itself. "Can use skills" switches both. */
+export const SKILL_TOOLS = ["find_skills", "use_skill"] as const;
 
 /** In the order the Details panel lists them. */
 export const TOOL_GROUPS: { id: ToolGroup; label: string }[] = [
@@ -94,6 +107,7 @@ export const TOOL_GROUPS: { id: ToolGroup; label: string }[] = [
   { id: "vault", label: "Logins and secrets" },
   { id: "team", label: "Teamwork" },
   { id: "memory", label: "Memory" },
+  { id: "skills", label: "Skills" },
   { id: "chat", label: "Chat" },
 ];
 

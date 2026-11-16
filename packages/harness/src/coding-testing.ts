@@ -23,6 +23,8 @@ export interface Seen {
   fresh: boolean;
   /** The one project-level QA turn after every card passed (not a card review). */
   finalCheck: boolean;
+  /** QA's Visual QA turn, after the check of the whole project. */
+  visual: boolean;
   model: string;
   task: string;
   /** How many messages the model was sent besides its system prompt. */
@@ -71,6 +73,8 @@ export interface FinalVerdict {
 export interface Behave {
   /** QA's verdict on the whole project; `nth` counts the final checks so far. */
   finalCheck?(nth: number): FinalVerdict;
+  /** QA's Visual QA: whether it calls app_start first (default yes), then its verdict. `nth` counts them. */
+  visualCheck?(nth: number): FinalVerdict & { start?: boolean };
   /** Planner replies in order; the last one repeats. */
   plans: PlanStep[];
   develop(card: { kind: "file" | "connector"; key: string }, attempt: number): DevAct;
@@ -117,6 +121,7 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
   const attempts = new Map<string, number>();
   const reviews = new Map<string, number>();
   let finalChecks = 0;
+  let visualChecks = 0;
   const handlers = fakeOllama(async (body) => {
     const system: string = body.messages[0]?.content ?? "";
     const role = (/You are .+? (Planner|Developer|QA),/.exec(system)?.[1]?.toLowerCase() ??
@@ -130,6 +135,7 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
       role,
       fresh: done === 0,
       finalCheck: task.includes("FINAL CHECK OF THE WHOLE PROJECT"),
+      visual: task.includes("VISUAL QA OF THE WHOLE PROJECT"),
       model: body.model,
       task,
       messages: messages.length - 1,
@@ -174,6 +180,15 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
         ? (["read_file", { path: `notes/${done}.txt` }] as [string, unknown])
         : calls[done];
       rows = next ? call(next[0], next[1]) : text("Done.");
+    } else if (task.includes("VISUAL QA OF THE WHOLE PROJECT")) {
+      const nth = done === 0 ? ++visualChecks : visualChecks;
+      const verdict = behave.visualCheck?.(nth) ?? { ok: true };
+      const calls: [string, unknown][] = [
+        ...(verdict.start === false ? [] : [["app_start", {}] as [string, unknown]]),
+        ["finish_visual_check", { ok: verdict.ok, problems: verdict.problems }],
+      ];
+      const next = calls[done];
+      rows = next ? call(next[0], next[1]) : text("Used the app.");
     } else if (task.includes("FINAL CHECK OF THE WHOLE PROJECT")) {
       const nth = done === 0 ? ++finalChecks : finalChecks;
       const verdict = behave.finalCheck?.(nth) ?? { ok: true };
@@ -297,7 +312,11 @@ export const finalChecksOf = (team: { seen: Seen[] }) =>
   team.seen.filter((s) => s.role === "qa" && s.fresh && s.finalCheck);
 
 export const turnsOf = (team: { seen: Seen[] }, role: Role) =>
-  team.seen.filter((s) => s.role === role && s.fresh && !s.finalCheck);
+  team.seen.filter((s) => s.role === role && s.fresh && !s.finalCheck && !s.visual);
+
+/** QA's Visual QA turns. */
+export const visualChecksOf = (team: { seen: Seen[] }) =>
+  team.seen.filter((s) => s.role === "qa" && s.fresh && s.visual);
 
 export const getProject = (h: TestHarness, botId: string) => h.services.coding.get(botId)!;
 

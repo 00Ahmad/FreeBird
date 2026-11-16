@@ -8,6 +8,8 @@ A **Coding Bot** is a small software team in one bot. You describe a project, an
 
 The loop repeats until QA has passed everything, or it reaches the round limit and asks you.
 
+Each role can use **skills**: when one fits its work (a code review, a test plan, a debugging routine), it looks it up and follows it. It's on by default; switch it off for the whole team with **Can use skills** in the Coding Bot's **Details → Skills**.
+
 Each role runs on **its own model**, so you can put a strong model on the Planner and a fast local one on the Developer, or the same model on all three. Everything works with Ollama only, with cloud models, or with a mix.
 
 ## Create one
@@ -20,6 +22,7 @@ Press **+ → New Coding Bot**. You choose:
 | **Output folder**                 | Required. Every project file is written here. Use **Browse** in the desktop app, or type the path.       |
 | **Planner, Developer, QA models** | One model per role. Leave one empty to use the shared model. You can change them later under **Models**. |
 | **Auto-approve**                  | Off by default. When on, the Developer starts as soon as the plan is ready, without waiting for you.     |
+| **Visual QA**                     | Off by default. When on, QA also uses the finished app like a person. See [Visual QA](#visual-qa).       |
 | **QA round limit**                | How many times QA may send work back before it stops and asks you. Default 5, any number from 1 to 20.   |
 
 The output folder must be a folder on this computer that you can write to. FreeBird refuses a drive root, your home folder itself, FreeBird's own data folder, another bot's folder, the output folder of another Coding Bot, network and `\\server\share` paths, and names ending in a dot or a space or named like a device (`CON`, `NUL`). A folder that doesn't exist yet is created.
@@ -34,7 +37,8 @@ The output folder must be a folder on this computer that you can write to. FreeB
 6. **A fix can break something that already passed.** After every Developer turn, FreeBird notices which planned files changed. Every finished card that touches a changed file goes back to QA: the file's own card and every connection that links it. So "everything is Done" always means it was checked after the last change.
 7. **Round limit.** Each full pass of QA over the board is one round. When the limit is reached with cards still failing, the project stops with **Needs you** and a note of what still fails. Raise the limit and press **Resume**.
 8. **Whole-project check.** When every card has passed, the project is checked as a whole before it is called done. First, plain automatic checks look for mistakes that span files, such as a plain `<script>` tag loading a file that uses `import`, a missing file or import, an id the script looks for that no page has, a JSON file that doesn't parse, or a key that looks real. Anything found sends the right card back with a comment. If the automatic checks find nothing, QA gets one last turn to look across the files.
-9. **Done.** When the whole-project check passes, the project is complete. The Coding Bot's closing message ends with a short **Before you run it** list, for example "add your own API key in `api-config.js`" or "open it through a local web server, not by double-clicking the file".
+9. **Visual QA** (if it's on). Once the whole-project check passes, QA starts the app and uses it. See [Visual QA](#visual-qa).
+10. **Done.** When the whole-project check passes (and Visual QA, if it's on), the project is complete. The Coding Bot's closing message ends with a short **Before you run it** list, for example "add your own API key in `api-config.js`" or "open it through a local web server, not by double-clicking the file".
 
 Typing in the Coding Bot's chat doesn't start a model of its own:
 
@@ -45,6 +49,36 @@ Typing in the Coding Bot's chat doesn't start a model of its own:
 - otherwise you get a one-line status reply.
 
 **Stop** and **Resume** work at any time, from the panel or the message box's Stop button. Stopping one of the team's conversations stops the project too, and Resume carries on. If you close the app while it is working, the project comes back **Stopped** with the unfinished cards back in Todo, and you can resume it; a change request you had asked for is kept.
+
+## Visual QA
+
+Reading code doesn't show that a button works. With **Visual QA** on, QA also opens the finished app and uses it like a person, after all its usual checks have passed. Turn it on when you create the Coding Bot, or any time with the **Visual QA** switch in the panel, next to **Auto-approve**. It adds to QA's other checks and replaces none of them.
+
+1. **Starting the app.** FreeBird works out how the project runs from its files:
+   - **Web pages** (HTML, CSS, JavaScript): FreeBird serves the output folder itself, on this computer only. Nothing is run.
+   - **Apps with a server that show a web page**: Flask, Django, FastAPI, Streamlit, Gradio, Node and Express, Vite, Next.js. FreeBird runs the project's start command, installing what it needs first (`requirements.txt`, `npm install`), waits until the app answers, and opens the address it prints.
+   - **Desktop apps** (Tkinter, PyQt, PySide, wxPython, Kivy, pygame, Electron): checked only for starting and staying open without errors. Clicking around in desktop windows isn't supported yet.
+   - **Anything else** (a library, a command-line tool) is skipped, with a line in the activity list.
+2. **The automatic checks**, with no model. Each problem found goes back to the Developer on the card it belongs to, whatever QA decides:
+   - the app crashes on start or prints an error, such as a Python traceback;
+   - errors in the browser console, and files the page fails to load (a missing script, a 404);
+   - buttons that do nothing when clicked, because nothing on them or around them handles the click;
+   - buttons covered by something else, or with no size.
+3. **QA uses the app.** QA makes a short test plan from the brief (for example: type a task, click **Add**, see it in the list) and works through it in its own browser tab. After each action it takes a screenshot, and it can check:
+   - the **console**: new browser errors and the server's output;
+   - **inspect**: whether a control is shown, enabled, covered, and whether anything handles a click on it.
+
+   Anything that doesn't work goes back to the Developer with what QA did, what should have happened and what happened instead.
+
+4. **Cleaning up.** Afterwards the app is stopped, the local server is closed, and QA's tab is closed.
+
+**QA's model needs to see pictures** to read the screenshots: pick one with vision (the eye icon in the model list) for QA under **Models**. With a model that can't, Visual QA still runs the automatic checks, and QA tests from the screen map and the console only; the panel says so under the switch.
+
+**What asks first.** Opening web pages runs nothing on your computer, so it doesn't ask. Starting an app with a command runs code the team wrote, so it shows an approval card like any command QA runs. On the app's own pages, QA's clicks and typing never ask, since nothing there can buy or send anything. If QA ends up on another site, it is told to go back, and its clicks there ask as usual. The browser can only open the app's own address on this computer, and only while Visual QA runs. It never serves `.env` files, private keys or hidden files.
+
+**Where the screenshots go.** They go to QA's model, like any picture a bot sees: with a local model they stay on this computer, and with a cloud model they are sent to that provider.
+
+Visual QA uses the browser from **Settings → Browser & search** (Edge or Chrome). Expect each Visual QA pass to add a few minutes.
 
 ## The panel
 
@@ -119,3 +153,7 @@ A plan can have up to **40 files** and **80 connections**. Paths are relative to
 - **Error status.** A Developer or QA turn that finishes without moving its card gets three tries in all, and each retry is told what went wrong in the last one. A model or connection error is retried too, after 2 and then 10 seconds. After the third try the project stops with an error that says why: press **Resume** to try again, or switch that role to a stronger model.
 - **The plan keeps being refused.** The message says what is wrong with it. Ask for changes with a clearer brief, or import a plan.
 - **Folder refused.** Choose a different folder: a project folder of its own, away from your home folder and FreeBird's data.
+- **Visual QA says the app didn't come up.** QA was shown what the app printed. A missing package or a wrong start command is the usual reason; QA can give `app_start` a corrected command. If the app needs something only you can provide (a database, an API key), turn Visual QA off for that project.
+- **Visual QA stops the project instead of passing it** when nothing could be tested: the browser couldn't open the app (check **Settings → Browser & search**), the start command needs a program this computer doesn't have ("Python isn't installed"), or QA never started the app or its start command was denied. Fix that, or turn Visual QA off, and press **Resume**.
+- **Another app is already on the port.** Visual QA then only trusts the address the project's own server prints, so it never tests your other app by mistake.
+- **Visual QA keeps failing to give a verdict.** QA's model may be too small to work through a test plan. Give QA a stronger model with vision, or turn Visual QA off, and press **Resume**.

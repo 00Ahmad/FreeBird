@@ -46,6 +46,7 @@ import { CodingDiagram } from "./CodingDiagram";
 import { ActivityLog, Progress, StatusBanner, WorkingStrip } from "./Feedback";
 import { PlanTools } from "./PlanTools";
 import { Switch } from "./Switch";
+import { VisualQaSwitch } from "./VisualQaSwitch";
 
 const WIDTH_KEY = "mrog.codingPanelWidth";
 const readWidth = () => {
@@ -363,6 +364,7 @@ function Header({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12.5px] text-ink-2">
           <RoundLimit project={project} settings={settings} />
           <AutoApprove project={project} settings={settings} />
+          <VisualQaSwitch botId={bot.id} project={project} />
         </div>
       )}
 

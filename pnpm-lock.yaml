@@ -154,6 +154,9 @@ importers:
       '@mrog/shared':
         specifier: workspace:*
         version: link:../shared
+      '@mrog/skills':
+        specifier: workspace:*
+        version: link:../skills
       '@mrog/store':
         specifier: workspace:*
         version: link:../store
@@ -163,6 +166,9 @@ importers:
       '@mrog/vault':
         specifier: workspace:*
         version: link:../vault
+      '@mrog/visual-qa':
+        specifier: workspace:*
+        version: link:../visual-qa
       fastify:
         specifier: 5.12.7
         version: 5.12.7
@@ -199,6 +205,12 @@ importers:
       zod:
         specifier: 4.6.7
         version: 4.6.7
+
+  packages/skills:
+    dependencies:
+      '@mrog/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/store:
     dependencies:
@@ -245,6 +257,12 @@ importers:
       '@napi-rs/keyring':
         specifier: 2.1.2
         version: 2.1.2
+
+  packages/visual-qa:
+    dependencies:
+      '@mrog/shared':
+        specifier: workspace:*
+        version: link:../shared
 
 packages:
 

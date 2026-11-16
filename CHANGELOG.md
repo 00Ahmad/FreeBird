@@ -2,6 +2,43 @@
 
 All notable changes to FreeBird. The format follows [Keep a Changelog](https://keepachangelog.com), and the project uses [semantic versioning](https://semver.org).
 
+## 0.0.16 - 2026-11-16
+
+### Added
+
+- **Visual QA for the Coding Bot.** A new switch (off by default, in the new Coding Bot dialog and in the panel next to **Auto-approve**). With it on, once every card has passed and the whole-project check finds nothing, QA starts the app, opens it in its own browser tab and uses it like a person, taking screenshots, clicking, typing, and checking the console and the controls. It adds to QA's other checks and replaces none of them.
+  - **How the app starts:** web pages are served by FreeBird itself. Apps with a server (Flask, Django, FastAPI, Streamlit, Gradio, Node, Express, Vite, Next.js) are started with their own command, which asks first like any command. Desktop apps (Tkinter, PyQt, Electron and others) are checked for starting and staying open.
+  - **The automatic checks (no model needed):** a crash or traceback on start, browser console errors, files that fail to load, buttons that do nothing when clicked, and buttons covered by something else.
+  - **What gets sent back:** everything the automatic checks find, plus what QA saw going wrong. Each problem goes back to the card it belongs to.
+  - **QA's model:** it needs vision for screenshots. Without vision, QA tests from the screen map and console, and the panel says so.
+
+### Changed
+
+- **New logo**, with a transparent background: the app icon, the installer and the logo inside the app.
+
+## 0.0.15 - 2026-11-16
+
+### Changed
+
+- **One local model in memory at a time.** When bots use different local models (a Coding Bot's Planner, Developer and QA, say), each is loaded for its own turn and the others are unloaded first; bots on the same model share it. On by default in **Settings → Local model → One model at a time**; turn it off if your GPU fits several models. It never unloads a model another bot is still replying with.
+
+### Fixed
+
+- **Changing a Coding Bot role's model frees the old one.** Unloading only happened for the shared model and a bot's model menu; now any model change (a team's roles, a deleted bot) unloads a model nothing is set to use any more.
+
+- **Gemini 3 models work with tools.** Gemini 3 gives each tool call a "thought signature" that must come back with the call on the next request; FreeBird dropped it, so any bot using tools on Gemini 3 failed on its second step ("Function call is missing a thought_signature"). The signature is now kept with the call, saved with it in the chat, and sent back.
+
+## 0.0.14 - 2026-11-16
+
+### Added
+
+- **Bots use skills by themselves.** With **Can use skills** on (the default, in **Details → Skills**), a bot looks up the skill that fits a task (`find_skills`) and follows it (`use_skill`); each use shows in the chat. A Coding Bot's switch covers its Planner, Developer and QA, which each use the skills their work needs. Skills now have a "when to use" line, and typing `/name` still runs one.
+- **40 built-in skills**, shared by every bot: writing, coding, research, business, planning and data. Each is written to one standard: an expert role, rules with reasons, the steps, an exact output format and a final checklist. You can edit or delete them; a deleted one doesn't come back, and an unedited one gets the newer text when a later version improves it.
+
+### Changed
+
+- **Models no longer hold your memory after you're done.** Changing the shared model unloads the old one before loading the new one, and a bot switched to another model unloads its old one, unless the shared setting or another bot still uses it (a reply being written on it finishes first). Closing FreeBird unloads every model it loaded and stops Ollama if FreeBird started it. Both are switches in **Settings → Local model → When FreeBird closes**, on by default. An Ollama you started yourself is never stopped.
+
 ## 0.0.13 - 2026-11-15
 
 ### Added

@@ -202,6 +202,7 @@ export async function runLanes(ctx: LanesContext): Promise<{ usage: Usage; allFa
               ? (call.arguments as Record<string, unknown>)
               : { value: call.arguments },
           status: "running",
+          ...(call.signature ? { signature: call.signature } : {}),
         });
         ctx.working();
         ctx.publish();

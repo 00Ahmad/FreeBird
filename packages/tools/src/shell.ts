@@ -19,7 +19,7 @@ interface CommandResult {
  * so that command's own children are also looked up by their parent's id (the top may exit while taskkill runs).
  * Settles when the kill has run.
  */
-function killTree(pid: number, exited: boolean): Promise<void> {
+export function killTree(pid: number, exited: boolean): Promise<void> {
   if (process.platform !== "win32") {
     try {
       process.kill(-pid, "SIGKILL");

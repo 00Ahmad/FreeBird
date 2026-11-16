@@ -443,3 +443,66 @@ describe("telling out-of-memory from other failures", () => {
     }
   });
 });
+
+describe("Gemini thought signatures (found in your logs)", () => {
+  it("keeps a call's signature from the reply and sends it back with that call", async () => {
+    const reply = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: "c1",
+                function: { name: "list_files", arguments: '{"path":"."}' },
+                extra_content: { google: { thought_signature: "sig-abc" } },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { impl, calls } = capture(() => sse([reply, "[DONE]"]));
+    const provider = createProvider(config("google"), () => "k", impl);
+    const chunks = await collect(provider.chat({ model: "gemini-3.5-flash-lite", messages: [] }));
+    const call = chunks.find((chunk) => chunk.type === "tool_call");
+    expect(call).toEqual({
+      type: "tool_call",
+      call: { id: "c1", name: "list_files", arguments: { path: "." }, signature: "sig-abc" },
+    });
+
+    // The next request: the call goes back with its signature, where Gemini looks for it.
+    await collect(
+      provider.chat({
+        model: "gemini-3.5-flash-lite",
+        messages: [
+          { role: "user", content: "List the files" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [(call as Extract<StreamChunk, { type: "tool_call" }>).call],
+          },
+          { role: "tool", toolCallId: "c1", name: "list_files", content: "(empty folder)" },
+        ],
+      }),
+    );
+    const sent = calls.at(-1)!.body.messages[1].tool_calls[0];
+    expect(sent).toMatchObject({ id: "c1", extra_content: { google: { thought_signature: "sig-abc" } } });
+  });
+
+  it("sends a call without a signature exactly as before (other providers)", async () => {
+    const { impl, calls } = capture(() => sse(["[DONE]"]));
+    const provider = createProvider(config("openai"), () => "k", impl);
+    await collect(
+      provider.chat({
+        model: "gpt-4.1",
+        messages: [{ role: "assistant", content: "", toolCalls: [{ id: "c1", name: "x", arguments: {} }] }],
+      }),
+    );
+    expect(calls[0]!.body.messages[0].tool_calls[0]).toEqual({
+      id: "c1",
+      type: "function",
+      function: { name: "x", arguments: "{}" },
+    });
+  });
+});

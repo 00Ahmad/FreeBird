@@ -115,6 +115,11 @@ export const CodingProject = z.object({
   roles: z.object({ planner: CodingRoleSeat, developer: CodingRoleSeat, qa: CodingRoleSeat }),
   /** Skip the wait for your approval of the plan. */
   autoApprove: z.boolean(),
+  /**
+   * Visual QA: once every card passed and the checks of the whole project found nothing, QA starts the app, opens it
+   * in its browser and uses it like a person (screenshots, clicks, the console). Missing on older projects: off.
+   */
+  visualQa: z.boolean().optional(),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS_LIMIT),
   /** QA rounds used so far. */
   round: z.number().int().min(0),
@@ -149,12 +154,14 @@ export const CreateCodingBotInput = z.object({
   outputFolder: z.string().trim().min(1, "Choose an output folder.").max(500),
   roles: z.object({ planner: RoleModel, developer: RoleModel, qa: RoleModel }),
   autoApprove: z.boolean().optional(),
+  visualQa: z.boolean().optional(),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS_LIMIT).optional(),
 });
 export type CreateCodingBotInput = z.infer<typeof CreateCodingBotInput>;
 
 export const UpdateCodingSettingsInput = z.object({
   autoApprove: z.boolean().optional(),
+  visualQa: z.boolean().optional(),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS_LIMIT).optional(),
   roles: z.object({ planner: RoleModel, developer: RoleModel, qa: RoleModel }).partial().optional(),
 });

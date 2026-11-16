@@ -9,7 +9,7 @@ export {
   type HostHooks,
 } from "./host";
 export { displayPath, resolvePath } from "./paths";
-export { looksDestructive, runShell } from "./shell";
+export { commandEnv, killTree, looksDestructive, runShell } from "./shell";
 export {
   argsSchema,
   BADGES,

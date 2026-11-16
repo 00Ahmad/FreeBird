@@ -105,3 +105,48 @@ describe("Ollama launcher", () => {
     expect(order).toEqual(["started", "settled"]);
   });
 });
+
+describe("stopping Ollama when the app closes", () => {
+  const started = (platform: NodeJS.Platform, spawned: Spawned[], kills: number[] = []) => {
+    let up = false;
+    return new OllamaLauncher({
+      url: () => "http://127.0.0.1:11434",
+      reachable: async () => up,
+      platform,
+      env: {},
+      exists: () => false,
+      kill: (pid) => void kills.push(pid),
+      spawn: ((command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+        spawned.push({ command, args, env: options.env ?? {} });
+        if (command !== "taskkill") up = true;
+        return Object.assign(new EventEmitter(), { unref() {}, pid: 4242 });
+      }) as never,
+    });
+  };
+
+  it("stops the Ollama it started, with its server, on Windows", async () => {
+    const spawned: Spawned[] = [];
+    const launcher = started("win32", spawned);
+    expect(await launcher.start()).toBe("started");
+    expect(launcher.startedIt).toBe(true);
+    expect(launcher.stop()).toBe(true);
+    expect(spawned.at(-1)).toMatchObject({ command: "taskkill", args: ["/PID", "4242", "/T", "/F"] });
+    // Only once.
+    expect(launcher.stop()).toBe(false);
+  });
+
+  it("stops its process group elsewhere", async () => {
+    const kills: number[] = [];
+    const launcher = started("linux", [], kills);
+    await launcher.start();
+    expect(launcher.stop()).toBe(true);
+    expect(kills).toEqual([-4242]);
+  });
+
+  it("never stops an Ollama the user started", async () => {
+    const launcher = new OllamaLauncher({ url: () => "http://127.0.0.1:11434", reachable: async () => true });
+    expect(await launcher.start()).toBe("running");
+    expect(launcher.startedIt).toBe(false);
+    expect(launcher.stop()).toBe(false);
+  });
+});

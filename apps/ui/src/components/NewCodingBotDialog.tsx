@@ -18,6 +18,7 @@ import { useUi } from "../state";
 import { Switch } from "./coding/Switch";
 import { Modal } from "./Modal";
 import { ModelSelect } from "./ModelSelect";
+import { VISUAL_QA_HINT } from "../lib/visualQa";
 
 const field = "rounded-lg border border-border bg-bg px-2.5 text-[13px] outline-none focus:border-accent";
 
@@ -193,6 +194,16 @@ export function NewCodingBotDialog() {
               <p className="text-xs text-ink-3">
                 Off: the Developer waits until you approve the plan. On: it starts as soon as the plan is
                 ready.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 rounded-xl border border-border p-3">
+            <Switch on={form.visualQa} onChange={(visualQa) => change({ visualQa })} label="Visual QA" />
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium">Visual QA</p>
+              <p className="text-xs text-ink-3">
+                {VISUAL_QA_HINT} Give QA a model with vision for screenshots.
               </p>
             </div>
           </div>

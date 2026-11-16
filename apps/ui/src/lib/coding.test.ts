@@ -205,6 +205,7 @@ describe("the new Coding Bot form", () => {
       outputFolder: " C:\\Projects\\todo-app ",
       developer: "ollama:qwen3:8b",
       autoApprove: true,
+      visualQa: true,
       maxRounds: "7",
     });
     expect(input).toEqual({
@@ -216,6 +217,7 @@ describe("the new Coding Bot form", () => {
         qa: { model: null },
       },
       autoApprove: true,
+      visualQa: true,
       maxRounds: 7,
     });
     expect(CreateCodingBotInput.safeParse(input).success).toBe(true);

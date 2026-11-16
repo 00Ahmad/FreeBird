@@ -17,7 +17,7 @@ export const MemoryInput = z.object({ text: z.string().trim().min(1).max(2000) }
 /** Import from another assistant: one note per non-empty line (or paragraph). */
 export const ImportMemoryInput = z.object({ text: z.string().trim().min(1).max(100_000) });
 
-/** A saved prompt invoked with "/name" in the composer. */
+/** A saved prompt: typed as "/name" in the composer, or found and used by a bot itself when it can use skills. */
 export const Skill = z.object({
   id: z.string(),
   /** null = available to every bot. */
@@ -29,9 +29,14 @@ export const Skill = z.object({
     .max(40)
     .regex(/^[\w-]+$/, "Letters, numbers, - and _ only"),
   prompt: z.string().trim().min(1).max(8000),
+  /** When to use it, in one line: what a bot reads to pick it. */
+  description: z.string().trim().max(400).default(""),
   createdAt: z.iso.datetime(),
 });
 export type Skill = z.infer<typeof Skill>;
 
-export const SkillInput = Skill.pick({ botId: true, name: true, prompt: true });
+/** No default on the description: an edit that leaves it out keeps it. */
+export const SkillInput = Skill.pick({ botId: true, name: true, prompt: true }).extend({
+  description: z.string().trim().max(400).optional(),
+});
 export type SkillInput = z.infer<typeof SkillInput>;

@@ -51,7 +51,12 @@ export function toChatHistory(
           part.type === "tool" &&
           (part.status === "done" || part.status === "error" || part.status === "denied")
         ) {
-          const call: ToolCall = { id: part.callId, name: part.name, arguments: part.args };
+          const call: ToolCall = {
+            id: part.callId,
+            name: part.name,
+            arguments: part.args,
+            ...(part.signature ? { signature: part.signature } : {}),
+          };
           emit({ role: "assistant", content: pending, toolCalls: [call] });
           emit({
             role: "tool",

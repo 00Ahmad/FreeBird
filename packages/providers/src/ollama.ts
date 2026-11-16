@@ -85,6 +85,13 @@ export class OllamaProvider implements ChatProvider {
   readonly kind = "ollama" as const;
   readonly local = true;
   private readonly showCache = new Map<string, ShowResponse>();
+  /** Local models this app has loaded (sent a request to) and not unloaded since: what it unloads on close. */
+  private readonly used = new Set<string>();
+
+  /** The models this app has loaded and not unloaded since. */
+  usedModels(): string[] {
+    return [...this.used];
+  }
 
   constructor(
     readonly id: string,
@@ -215,6 +222,7 @@ export class OllamaProvider implements ChatProvider {
     local: { numCtx: number; keepAlive: string },
     signal?: AbortSignal,
   ): Promise<void> {
+    this.used.add(name);
     await this.json(
       "/api/chat",
       this.post(
@@ -229,11 +237,14 @@ export class OllamaProvider implements ChatProvider {
     );
   }
 
-  async unload(name: string): Promise<void> {
-    await this.json("/api/chat", this.post({ model: name, messages: [], keep_alive: 0 }));
+  /** Frees the model's memory now (keep_alive 0). */
+  async unload(name: string, signal?: AbortSignal): Promise<void> {
+    await this.json("/api/chat", this.post({ model: name, messages: [], keep_alive: 0 }, signal));
+    this.used.delete(name);
   }
 
   async *chat(req: ChatRequest): AsyncIterable<StreamChunk> {
+    this.used.add(req.model);
     const body = {
       model: req.model,
       messages: req.messages.map(toOllamaMessage),

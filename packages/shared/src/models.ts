@@ -51,6 +51,15 @@ export const RuntimeSettings = z.object({
   ollamaUrl: z.url(),
   /** Start the local Ollama when the app opens, if it isn't already running. */
   startOllama: z.boolean(),
+  /**
+   * Keep one local model in memory at a time: when bots use different local models (a Coding Bot's Planner, Developer
+   * and QA), each is loaded for its own turn and the others are unloaded first. Bots on the same model share it.
+   */
+  oneModelAtATime: z.boolean().default(true),
+  /** When the app closes, unload the local models it loaded, freeing their memory. */
+  unloadOnClose: z.boolean().default(true),
+  /** When the app closes, stop Ollama too, but only if the app started it. */
+  stopOllamaOnClose: z.boolean().default(true),
 });
 export type RuntimeSettings = z.infer<typeof RuntimeSettings>;
 
@@ -66,6 +75,9 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   think: false,
   ollamaUrl: "http://127.0.0.1:11434",
   startOllama: true,
+  oneModelAtATime: true,
+  unloadOnClose: true,
+  stopOllamaOnClose: true,
 };
 
 export const LoadedModel = z.object({

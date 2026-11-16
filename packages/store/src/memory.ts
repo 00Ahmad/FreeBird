@@ -57,6 +57,7 @@ const toSkill = (row: Row) =>
     botId: row.bot_id ?? null,
     name: row.name,
     prompt: row.prompt,
+    description: row.description ?? "",
     createdAt: row.created_at,
   });
 
@@ -74,8 +75,10 @@ export class SkillRepo {
   add(input: SkillInput): Skill {
     const id = newId("skl");
     this.db
-      .prepare("INSERT INTO skills (id, bot_id, name, prompt, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(id, input.botId, input.name, input.prompt, new Date().toISOString());
+      .prepare(
+        "INSERT INTO skills (id, bot_id, name, prompt, description, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(id, input.botId, input.name, input.prompt, input.description ?? "", new Date().toISOString());
     return toSkill(this.db.prepare("SELECT * FROM skills WHERE id = ?").get(id)!);
   }
 
@@ -85,8 +88,8 @@ export class SkillRepo {
     const current = toSkill(row);
     const next = { ...current, ...input };
     this.db
-      .prepare("UPDATE skills SET bot_id = ?, name = ?, prompt = ? WHERE id = ?")
-      .run(next.botId, next.name, next.prompt, id);
+      .prepare("UPDATE skills SET bot_id = ?, name = ?, prompt = ?, description = ? WHERE id = ?")
+      .run(next.botId, next.name, next.prompt, next.description ?? current.description, id);
     return toSkill(this.db.prepare("SELECT * FROM skills WHERE id = ?").get(id)!);
   }
 

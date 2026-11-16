@@ -27,6 +27,8 @@ export const MessagePart = z.discriminatedUnion("type", [
     args: z.record(z.string(), z.unknown()),
     status: ToolStatus,
     result: z.string().optional(),
+    /** The provider's signature for this call (Gemini 3), sent back with it when the chat is replayed to the model. */
+    signature: z.string().max(20_000).optional(),
     /**
      * Set just before a call that changes something outside the chat runs (a command, a click that acts, a connected
      * app). If the app dies while it runs, a restart knows it may have happened and says so instead of offering a

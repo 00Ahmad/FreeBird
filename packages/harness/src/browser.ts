@@ -29,9 +29,12 @@ import {
   type ToolSpec,
 } from "@mrog/tools";
 
+import type { PageProblem } from "@mrog/visual-qa";
+
 import { fail, parse } from "./http";
 import type { Services } from "./services";
 import { clickRisk, isSearchBox, visualPrompt, visualTools } from "./visual";
+import { watchPageProblems } from "./visual-qa/page-checks";
 
 const SETTINGS_KEY = "browser";
 /** Page text is handed over in parts this long, so one page never fills a small model's context. */
@@ -614,6 +617,8 @@ export class BrowserManager {
   private readonly windowOpens = new WeakMap<Page, number>();
   /** Recent answers to "is this host on the local network", so pages full of requests aren't slowed by lookups. */
   private readonly lookups = new Map<string, { local: boolean; at: number }>();
+  /** What went wrong in each bot's tab (errors, failed loads), for Visual QA; drained by takeProblems. */
+  private readonly problemsOf = new Map<string, PageProblem[]>();
   private changeTimer: NodeJS.Timeout | null = null;
   /** Bumped by close(): a launch that finishes after it is closed again instead of kept. */
   private generation = 0;
@@ -1053,11 +1058,15 @@ export class BrowserManager {
     // Nothing is opened in the tab before its guard is in place.
     await this.watchTab(context, page);
     page.setDefaultTimeout(ACTION_TIMEOUT);
+    const problems: PageProblem[] = [];
+    watchPageProblems(page, problems);
+    this.problemsOf.set(botId, problems);
     this.pages.set(botId, page);
     this.tabProfile.set(botId, key);
     page.on("close", () => {
       if (this.pages.get(botId) !== page) return;
       this.pages.delete(botId);
+      this.problemsOf.delete(botId);
       this.tabProfile.delete(botId);
     });
     this.changed();
@@ -1079,6 +1088,35 @@ export class BrowserManager {
     await action();
     await navigated;
     await this.settle(page);
+  }
+
+  // ---- Visual QA: the QA role's checks of the app it opened ---------------------------------------------------
+
+  /** What went wrong in the bot's tab since the last call (uncaught errors, console errors, failed loads). */
+  takeProblems(botId: string): PageProblem[] {
+    return this.problemsOf.get(botId)?.splice(0) ?? [];
+  }
+
+  /** The bot's own tab, opened on first use, for checks that read the page. */
+  tabOf(botId: string): Promise<Page> {
+    return this.page(botId);
+  }
+
+  /** The address the bot's tab shows now, or null when it has no tab open. */
+  addressOf(botId: string): string | null {
+    return this.openTabOf(botId)?.url() ?? null;
+  }
+
+  /**
+   * Lets every tab load one local address (host and port) until the returned function is called: the app Visual QA
+   * started. An address the user had already allowed stays allowed afterwards.
+   */
+  allowHost(host: string): () => void {
+    const had = this.allowedHosts.has(host);
+    this.allowedHosts.add(host);
+    return () => {
+      if (!had) this.allowedHosts.delete(host);
+    };
   }
 
   async snapshot(botId: string): Promise<PageSnapshot> {

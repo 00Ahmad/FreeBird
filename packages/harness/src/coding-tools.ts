@@ -5,12 +5,14 @@ import { z } from "zod";
 
 import {
   MAX_PLAN_FILES,
+  SKILL_TOOLS,
   type CardComment,
   type CodingCard,
   type CodingProject,
   type CodingRole,
 } from "@mrog/shared";
 import { defineTool, resolvePath, safe, type ToolSpec } from "@mrog/tools";
+import { VISUAL_QA_SCREEN_TOOLS, VISUAL_QA_TOOLS } from "@mrog/visual-qa";
 
 import { validatePlan } from "./coding-plan";
 
@@ -21,12 +23,26 @@ const LOOK = ["list_files", "read_file", "search_files"];
  * The tools each role has, and nothing else: no `spawn_bot`, `delegate`, `message_bot`, `dismiss_bot`, no web, no
  * browser. The planner cannot write files or run commands. The Developer writes files but runs nothing: QA runs and tests
  * the code (each command still asks the user) and changes no files itself. The Developer only reads the files its card
- * names: listing and searching the folder is how small models ended up reading 20 files and writing none.
+ * names: listing and searching the folder is how small models ended up reading 20 files and writing none. Every role
+ * can also find and use skills (a guide for a review, a test plan, a debugging routine), unless the Coding Bot's
+ * "Can use skills" switch is off.
  */
 export const ROLE_TOOLS: Record<CodingRole, string[]> = {
-  planner: [...LOOK, "propose_plan"],
-  developer: ["read_file", "write_file", "edit_file", "finish_card"],
-  qa: [...LOOK, "run_command", "review_card", "finish_check"],
+  planner: [...LOOK, "propose_plan", ...SKILL_TOOLS],
+  developer: ["read_file", "write_file", "edit_file", "finish_card", ...SKILL_TOOLS],
+  qa: [...LOOK, "run_command", "review_card", "finish_check", ...SKILL_TOOLS],
+};
+
+/** QA's tools during Visual QA only, on top of its own: the running app, the screen, and the Visual QA verdict. */
+export const VISUAL_QA_TURN_TOOLS: readonly string[] = [
+  ...Object.values(VISUAL_QA_TOOLS),
+  ...VISUAL_QA_SCREEN_TOOLS,
+];
+
+/** What each role bot's tool list allows: its role's tools, and for QA the Visual QA ones (offered in that turn only). */
+export const ROLE_ALLOWED: Record<CodingRole, string[]> = {
+  ...ROLE_TOOLS,
+  qa: [...ROLE_TOOLS.qa, ...VISUAL_QA_TURN_TOOLS],
 };
 
 /**
@@ -45,6 +61,8 @@ export interface TurnCapture {
   card?: { id: string; kind: "file" | "connector"; path?: string };
   /** QA's check of the whole project (it gets finish_check only), not a card review. */
   finalCheck?: boolean;
+  /** QA's Visual QA of the running app (it gets the app and screen tools, and finish_visual_check only). */
+  visual?: boolean;
   /** The distinct files read so far, as the role named them (the Developer's read budget). */
   reads?: string[];
   /** Model rounds so far (counted by the Developer's steer hook). */
@@ -195,11 +213,17 @@ const BSN = "\n";
  * `finish_check`: QA's verdict on the whole project once every card has passed. A problem must name a planned file and say
  * what is wrong, because that file's card goes back to the Developer with the comment and nothing else.
  */
-export const finishCheckTool = (capture: TurnCapture, planned: () => string[]): ToolSpec =>
+export const finishCheckTool = (
+  capture: TurnCapture,
+  planned: () => string[],
+  name: "finish_check" | "finish_visual_check" = "finish_check",
+): ToolSpec =>
   defineTool({
-    name: "finish_check",
+    name,
     description:
-      "Give your verdict on the whole project after the final check: ok true if it would work when opened or run, or ok false with problems (each one a planned file path and a comment saying what is wrong and how to fix it). Call it once.",
+      name === "finish_visual_check"
+        ? "Give your verdict after using the app: ok true if everything you tried worked, or ok false with problems (each one a planned file path and a comment saying what you did, what should have happened and what happened). Call it once, at the end."
+        : "Give your verdict on the whole project after the final check: ok true if it would work when opened or run, or ok false with problems (each one a planned file path and a comment saying what is wrong and how to fix it). Call it once.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -241,18 +265,18 @@ export const finishCheckTool = (capture: TurnCapture, planned: () => string[]): 
       const known = planned();
       const given = args.problems ?? [];
       if (args.ok && given.length > 0)
-        return "ok is true but you listed problems. Call finish_check again: ok false with the problems, or ok true with none.";
+        return `ok is true but you listed problems. Call ${name} again: ok false with the problems, or ok true with none.`;
       if (!args.ok && given.length === 0)
-        return "ok is false but you listed no problems. Call finish_check again with each problem (a planned file and a comment saying what is wrong).";
+        return `ok is false but you listed no problems. Call ${name} again with each problem (a planned file and a comment saying what is wrong).`;
       const problems: { file: string; comment: string }[] = [];
       for (const problem of given) {
         const file = known.find(
           (path) => path.toLowerCase() === problem.file.trim().replaceAll("\\", "/").toLowerCase(),
         );
         if (!file)
-          return `"${problem.file}" is not one of the project's files. Files: ${known.join(", ")}. Call finish_check again.`;
+          return `"${problem.file}" is not one of the project's files. Files: ${known.join(", ")}. Call ${name} again.`;
         if (!problem.comment.trim())
-          return `The problem in ${file} has no comment. Say exactly what is wrong and how to fix it, and call finish_check again.`;
+          return `The problem in ${file} has no comment. Say exactly what is wrong and how to fix it, and call ${name} again.`;
         problems.push({ file, comment: problem.comment.trim() });
       }
       capture.check = { ok: args.ok, problems };

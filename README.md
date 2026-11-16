@@ -49,7 +49,7 @@ Describe a topic and a goal (**explore ideas**, **reach a decision** or **resear
 
 ### 🧑‍💻 Coding Bot: a planner, a developer and QA
 
-Create a **Coding Bot**, choose an output folder and a model for each role, and describe what you want. The **Planner** draws the files and how they connect, you approve the plan, the **Developer** writes it one card at a time, and **QA** checks every file and every connection and sends anything wrong back with a comment. It repeats until everything passes or the round limit (5 by default) is reached. You watch it on a diagram, a progress board and a checklist, and you can export the plan or import one written by a stronger model. [Read more](docs/coding-bot.md)
+Create a **Coding Bot**, choose an output folder and a model for each role, and describe what you want. The **Planner** draws the files and how they connect, you approve the plan, the **Developer** writes it one card at a time, and **QA** checks every file and every connection and sends anything wrong back with a comment. It repeats until everything passes or the round limit (5 by default) is reached. You watch it on a diagram, a progress board and a checklist, and you can export the plan or import one written by a stronger model. Switch on **Visual QA**, and QA also opens the finished app and uses it like a person, with screenshots, clicks and the browser console, then sends back what doesn't work. [Read more](docs/coding-bot.md)
 
 ### 💼 Job Bot: jobs that fit you, checked against the posting
 

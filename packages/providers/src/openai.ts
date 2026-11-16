@@ -62,6 +62,10 @@ function toOpenAIMessage(message: ChatMessage): Record<string, unknown> {
                 id: call.id,
                 type: "function",
                 function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+                // Only Gemini sends one; it must come back with its call, or the next request is refused.
+                ...(call.signature
+                  ? { extra_content: { google: { thought_signature: call.signature } } }
+                  : {}),
               })),
             }
           : {}),
@@ -75,7 +79,13 @@ interface Delta {
   content?: string | null;
   reasoning_content?: string | null;
   reasoning?: string | null;
-  tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
+  tool_calls?: {
+    index?: number;
+    id?: string;
+    function?: { name?: string; arguments?: string };
+    /** Gemini's OpenAI-compatible API puts a call's thought signature here. */
+    extra_content?: { google?: { thought_signature?: string } };
+  }[];
 }
 
 /** Any server speaking OpenAI's Chat Completions API: OpenAI, Groq, Mistral, LM Studio, vLLM, … */
@@ -171,7 +181,7 @@ export class OpenAICompatProvider implements ChatProvider {
     );
 
     /** Calls in the order they started; `serverId` is the id the server gave, if any. */
-    const calls: { id: string; serverId?: string; name: string; args: string }[] = [];
+    const calls: { id: string; serverId?: string; name: string; args: string; signature?: string }[] = [];
     /** Which call each stream index currently feeds. */
     const slots = new Map<number, number>();
     // Some OpenAI-style servers leave out the call index, and some (Gemini) send every parallel call at index 0;
@@ -221,6 +231,8 @@ export class OpenAICompatProvider implements ChatProvider {
           if (toolDelta.id) current.id = current.serverId = toolDelta.id;
           if (toolDelta.function?.name) current.name += toolDelta.function.name;
           if (toolDelta.function?.arguments) current.args += toolDelta.function.arguments;
+          const signature = toolDelta.extra_content?.google?.thought_signature;
+          if (signature) current.signature = signature;
         }
         if (choice.finish_reason) finishReason = choice.finish_reason;
       }
@@ -236,7 +248,15 @@ export class OpenAICompatProvider implements ChatProvider {
           `${this.label}: the model wrote tool arguments that aren't valid JSON.`,
         );
       }
-      yield { type: "tool_call", call: { id: call.id, name: call.name, arguments: args } };
+      yield {
+        type: "tool_call",
+        call: {
+          id: call.id,
+          name: call.name,
+          arguments: args,
+          ...(call.signature ? { signature: call.signature } : {}),
+        },
+      };
     }
     yield { type: "done", finishReason, usage };
   }

@@ -32,6 +32,7 @@ import {
 } from "@mrog/shared";
 import type { ChatMessage } from "@mrog/providers";
 import { resolvePath, safe, type ToolSpec } from "@mrog/tools";
+import { describeRun, detectRun, formatFindings, visualQaMessage, type RunSpec } from "@mrog/visual-qa";
 
 import { beforeYouRun, checkProject, type Finding } from "./coding-check";
 import { checkOutputFolder, CodingError } from "./coding-folder";
@@ -61,8 +62,10 @@ import {
   proposePlanTool,
   qaMessage,
   reviewCardTool,
+  ROLE_ALLOWED,
   ROLE_NAMES,
   ROLE_TOOLS,
+  VISUAL_QA_TURN_TOOLS,
   roleRules,
   writtenIn,
   type LastTry,
@@ -71,6 +74,8 @@ import {
 import { fail, parse } from "./http";
 import type { Services } from "./services";
 import { TurnCancelled, type Surface } from "./turns";
+import { stopAllSessions, VisualSession } from "./visual-qa/session";
+import { visualQaTools } from "./visual-qa/tools";
 
 const settingsKey = (botId: string) => `coding:${botId}`;
 /** A change the user asked for that the Planner hasn't answered yet: saved, so a Stop or a restart doesn't lose it. */
@@ -82,6 +87,8 @@ export const MAX_CODING_NAME = 49;
 const MAX_PLAN_RETRIES = 3;
 /** A Developer or QA turn that ends without finishing its card is tried this many times in all. */
 const MAX_TRIES = 3;
+/** Model rounds a Visual QA turn gets: starting the app, then a look, a click and a check for each thing it tries. */
+const VISUAL_QA_MAX_STEPS = 40;
 /** How long Stop waits for the work to wind down before it reports. */
 const STOP_WAIT_MS = 5000;
 
@@ -137,13 +144,17 @@ interface Phase {
  * a streaming status message in the Coding Bot's own chat, where the user is looking.
  */
 export function installCoding(services: Services) {
-  const { store, bus, turns, agent, runtime, catalog, config, delegation } = services;
+  const { store, bus, turns, agent, runtime, catalog, config, delegation, browser } = services;
 
   /** In-memory projects. The service is the only writer: every change is saved and published whole. */
   const projects = new Map<string, CodingProject>();
   const runs = new Map<string, Run>();
   /** What each role bot's current turn handed back, written by its own tools. */
   const captures = new Map<string, TurnCapture>();
+  /** The Visual QA check running for each Coding Bot: what QA's app tools act on. */
+  const visualSessions = new Map<string, VisualSession>();
+  // Closing FreeBird in the middle of Visual QA still stops the app it started.
+  services.disposers.push(() => stopAllSessions());
   /** The output folder of each role bot: their working folder. */
   const folders = new Map<string, string>();
   const now = () => new Date().toISOString();
@@ -180,7 +191,7 @@ export function installCoding(services: Services) {
     for (const role of CODING_ROLES) {
       const bot = store.bots.get(project.roles[role].botId);
       if (!bot) continue;
-      const allow = ROLE_TOOLS[role];
+      const allow = ROLE_ALLOWED[role];
       const sameTools =
         bot.tools.allow?.length === allow.length && allow.every((name) => bot.tools.allow?.includes(name));
       if (sameTools && !bot.notifications) continue;
@@ -485,9 +496,9 @@ export function installCoding(services: Services) {
     if (bot.coding) return [];
     const team = roleOf(bot);
     if (!team) return specs;
-    const own = new Set(ROLE_TOOLS[team.role]);
     // A turn that isn't the loop's (the Details panel listing tools) gets a capture nothing reads.
     const capture = captures.get(bot.id) ?? {};
+    const own = new Set([...ROLE_TOOLS[team.role], ...(capture.visual ? VISUAL_QA_TURN_TOOLS : [])]);
     return specs
       .filter((spec) => own.has(spec.name))
       .map((spec) =>
@@ -510,6 +521,14 @@ export function installCoding(services: Services) {
     const planned = () => load(team.codingBot.id)?.nodes.map((node) => node.path) ?? [];
     // A card review gets only its verdict, the check of the whole project only its own: a small model offered both
     // sometimes calls the wrong one.
+    if (live?.visual) {
+      const session = visualSessions.get(team.codingBot.id);
+      const folder = load(team.codingBot.id)?.outputFolder ?? "";
+      return [
+        ...(session ? visualQaTools(browser, bot, session, folder) : []),
+        finishCheckTool(capture, planned, "finish_visual_check"),
+      ];
+    }
     if (live?.finalCheck) return [finishCheckTool(capture, planned)];
     if (live?.card) return [reviewCardTool(capture)];
     return [reviewCardTool(capture), finishCheckTool(capture, planned)];
@@ -570,6 +589,8 @@ export function installCoding(services: Services) {
       const steer = capture ? { steer: developerSteer(team.codingBot.id, capture) } : {};
       return { ...plain, think: false, thinkOff: true, maxSteps: DEVELOPER_MAX_STEPS, ...steer };
     }
+    if (captures.get(bot.id)?.visual)
+      return { ...plain, maxSteps: Math.max(options.maxSteps ?? 0, VISUAL_QA_MAX_STEPS) };
     return { ...plain, maxSteps: Math.max(options.maxSteps ?? 0, 20) };
   };
 
@@ -715,6 +736,7 @@ export function installCoding(services: Services) {
     startLine: string,
     card?: { id: string; kind: "file" | "connector"; path?: string },
     finalCheck = false,
+    visual = false,
   ): Promise<{ reply: Message; capture: TurnCapture; error?: string }> => {
     const project = load(botId);
     const roleBot = project && store.bots.get(project.roles[role].botId);
@@ -732,6 +754,7 @@ export function installCoding(services: Services) {
     const capture: TurnCapture = {
       ...(card ? { card: { id: card.id, kind: card.kind, path: card.path } } : {}),
       ...(finalCheck ? { finalCheck: true } : {}),
+      ...(visual ? { visual: true } : {}),
     };
     captures.set(roleBot.id, capture);
     change(botId, (p) => {
@@ -1363,6 +1386,131 @@ export function installCoding(services: Services) {
     );
   };
 
+  /** Whether QA's model can see pictures (screenshots); a model the catalog doesn't know is taken as not. */
+  const qaSeesPictures = async (project: CodingProject): Promise<boolean> => {
+    const ref = project.roles.qa.model ?? runtime.settings.sharedModel;
+    if (!ref) return false;
+    const info = await catalog.info(ref).catch(() => null);
+    return Boolean(info?.capabilities.includes("vision"));
+  };
+
+  /**
+   * Visual QA, once every card passed and the checks of the whole project found nothing: QA starts the app, opens it in
+   * its own browser tab and uses it like a person. What the automatic part finds (a crash on start, errors in the
+   * console, files that failed to load, buttons that do nothing or are covered) goes back to the Developer whatever
+   * QA decides; QA adds what it saw going wrong. Returns how many cards were sent back.
+   */
+  const visualCheck = async (
+    botId: string,
+    phase: Phase,
+    signal: AbortSignal,
+    round: number,
+  ): Promise<number> => {
+    const project = need(botId);
+    const files = projectFiles(project);
+    const run: RunSpec = detectRun({ ...files, python: process.platform === "win32" ? "python" : "python3" });
+    if (run.kind === "none") {
+      note(botId, "Visual QA: the project has nothing with a screen to open, so there was nothing to test");
+      return 0;
+    }
+    phase.say(`QA (round ${round}): Visual QA, using the app…`);
+    note(botId, `Visual QA: ${describeRun(run)}`);
+    const vision = await qaSeesPictures(project);
+    if (!vision && run.kind !== "desktop")
+      note(
+        botId,
+        "Visual QA: QA's model can't see pictures, so it tests by the screen map and the console only",
+      );
+    let lastError = "";
+    let neverStarted = false;
+    for (let tries = 1; tries <= MAX_TRIES; tries++) {
+      const current = need(botId);
+      const session = new VisualSession({
+        browser,
+        botId: current.roles.qa.botId,
+        outputFolder: current.outputFolder,
+        planned: files.files,
+        run,
+        read: files.read,
+        refuse: secretFileReason,
+      });
+      visualSessions.set(botId, session);
+      let outcome: { capture: TurnCapture; error?: string };
+      try {
+        outcome = await runRole(
+          botId,
+          "qa",
+          visualQaMessage(current, run, { vision, retry: tries > 1 }),
+          phase,
+          signal,
+          tries > 1 ? "QA is trying Visual QA again" : "QA started Visual QA",
+          undefined,
+          false,
+          true,
+        );
+      } finally {
+        visualSessions.delete(botId);
+        await session.stop();
+      }
+      const { capture, error } = outcome;
+      // Nothing was tested, and trying again won't change that: whatever QA said, the project stops and says why.
+      if (session.browserError)
+        throw new Failure(
+          `Visual QA couldn't open the app in the browser: ${clip(session.browserError, 160)} Check Settings → Browser & search, or turn Visual QA off, then Resume.`,
+        );
+      if (session.missing)
+        throw new Failure(
+          `Visual QA couldn't start the app: ${session.missing} isn't installed on this computer. Install it, or turn Visual QA off, then Resume.`,
+        );
+      if (session.auto.length > 0)
+        note(
+          botId,
+          `Visual QA's automatic checks found ${session.auto.length} problem${session.auto.length === 1 ? "" : "s"}`,
+        );
+      // A verdict on an app QA never opened is no verdict: nothing was tested.
+      if (!session.started && !error) {
+        neverStarted = true;
+        lastError = "";
+        note(botId, "QA gave a Visual QA verdict without starting the app (or its start command was denied)");
+        continue;
+      }
+      if (!capture.check && session.auto.length === 0) {
+        lastError = error ?? "";
+        if (error) {
+          note(botId, `QA's model failed in Visual QA: ${clip(error, 100)}`);
+          if (tries < MAX_TRIES) await backoff(tries, signal);
+        }
+        continue;
+      }
+      const latest = need(botId);
+      const automatic = session.auto.flatMap((finding) => {
+        const card = cardForFinding(latest, finding.file, finding.related);
+        return card ? [{ card, text: `Visual QA: ${finding.problem}` }] : [];
+      });
+      const seen = (capture.check?.problems ?? []).flatMap((problem) => {
+        const card = cardForFinding(latest, problem.file);
+        return card ? [{ card, text: `Visual QA: ${problem.comment}` }] : [];
+      });
+      if (automatic.length === 0 && seen.length === 0) {
+        if (session.auto.length > 0)
+          note(botId, `Visual QA found problems no card owns: ${clip(formatFindings(session.auto), 200)}`);
+        note(botId, "Visual QA: all good");
+        return 0;
+      }
+      const back = new Set([...automatic, ...seen].map((item) => item.card.id)).size;
+      sendBack(botId, automatic, round, "Visual QA's automatic check", "check");
+      sendBack(botId, seen, round, "Visual QA", "fail");
+      return back;
+    }
+    throw new Failure(
+      lastError
+        ? `QA couldn't finish Visual QA after ${MAX_TRIES} tries: ${clip(lastError, 200)} Resume to try again, or turn Visual QA off.`
+        : neverStarted
+          ? `Visual QA never got the app open after ${MAX_TRIES} tries: QA didn't start it, or its start command was denied. Resume and allow the command, give QA a stronger model, or turn Visual QA off.`
+          : `QA didn't give a Visual QA verdict after ${MAX_TRIES} tries (it never called finish_visual_check). Resume to try again, or turn Visual QA off.`,
+    );
+  };
+
   const reviewing = async (botId: string, signal: AbortSignal) => {
     let phase: Phase | undefined;
     let closing: [string, "done" | "stopped"] = ["Stopped.", "stopped"];
@@ -1396,6 +1544,9 @@ export function installCoding(services: Services) {
       if (counted.cards.every((card) => card.column === "done")) {
         phase ??= openPhase(botId, `QA (round ${counted.round + 1} of up to ${counted.maxRounds})…`);
         checked = await finalCheck(botId, phase, signal, reviewed > 0 ? counted.round : counted.round + 1);
+        // Visual QA comes last, on top of QA's other checks: only a project that passed them all is used.
+        if (checked === 0 && need(botId).visualQa)
+          checked = await visualCheck(botId, phase, signal, reviewed > 0 ? counted.round : counted.round + 1);
       }
       const project = need(botId);
       const left = project.cards.filter((card) => card.column !== "done");
@@ -1666,6 +1817,10 @@ export function installCoding(services: Services) {
     let approveNow = false;
     change(botId, (p) => {
       if (input.maxRounds !== undefined) p.maxRounds = input.maxRounds;
+      if (input.visualQa !== undefined) {
+        p.visualQa = input.visualQa;
+        logLine(p, `You turned Visual QA ${input.visualQa ? "on" : "off"}`);
+      }
       if (input.autoApprove !== undefined) {
         p.autoApprove = input.autoApprove;
         approveNow = input.autoApprove && p.status === "awaiting_approval";
@@ -1890,7 +2045,7 @@ export function installCoding(services: Services) {
           label: `${ROLE_NAMES[role]} of ${input.name}`,
           avatar: ROLE_AVATARS[role],
           model,
-          tools: { allow: ROLE_TOOLS[role], exclude: [], apps: {} },
+          tools: { allow: ROLE_ALLOWED[role], exclude: [], apps: {} },
         },
         { parentId: codingBot.id, temporary: false, section: TEAM_SECTION },
       );
@@ -1911,6 +2066,7 @@ export function installCoding(services: Services) {
       outputFolder,
       roles: seats,
       autoApprove: input.autoApprove ?? false,
+      visualQa: input.visualQa ?? false,
       maxRounds: input.maxRounds ?? DEFAULT_MAX_ROUNDS,
       round: 0,
       brief: "",

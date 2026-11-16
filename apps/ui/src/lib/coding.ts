@@ -145,6 +145,8 @@ export interface CodingForm {
   developer: string | null;
   qa: string | null;
   autoApprove: boolean;
+  /** QA also uses the running app once its other checks pass. */
+  visualQa: boolean;
   /** As typed. */
   maxRounds: string;
 }
@@ -156,6 +158,7 @@ export const DEFAULT_CODING_FORM: CodingForm = {
   developer: null,
   qa: null,
   autoApprove: false,
+  visualQa: false,
   maxRounds: String(DEFAULT_MAX_ROUNDS),
 };
 
@@ -207,6 +210,7 @@ export function codingInput(form: CodingForm): CreateCodingBotInput {
       qa: { model: form.qa },
     },
     autoApprove: form.autoApprove,
+    visualQa: form.visualQa,
     maxRounds: parseRounds(form.maxRounds) ?? DEFAULT_MAX_ROUNDS,
   };
 }

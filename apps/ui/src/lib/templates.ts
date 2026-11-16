@@ -15,7 +15,9 @@ const Template = z.object({
     instructions: BotInstructions,
     model: ModelRef.nullable(),
   }),
-  skills: z.array(z.object({ name: z.string(), prompt: z.string() })).max(100),
+  skills: z
+    .array(z.object({ name: z.string(), prompt: z.string(), description: z.string().max(400).optional() }))
+    .max(100),
 });
 
 /** "Share as template": saves a file someone else can import. No chat history, memory, files or keys. */
@@ -30,7 +32,9 @@ export function exportTemplate(bot: Bot, skills: Skill[]) {
       instructions: bot.instructions,
       model: bot.model,
     },
-    skills: skills.filter((skill) => skill.botId === bot.id).map(({ name, prompt }) => ({ name, prompt })),
+    skills: skills
+      .filter((skill) => skill.botId === bot.id)
+      .map(({ name, prompt, description }) => ({ name, prompt, description })),
   };
   const blob = new Blob([JSON.stringify(template, null, 2)], { type: "application/json" });
   const link = document.createElement("a");

@@ -84,6 +84,7 @@ const GROUPS: [RegExp, ToolGroup][] = [
   [/^(request_secret|use_login)$/, "vault"],
   [/^(spawn_bot|delegate|dismiss_bot|message_bot)$/, "team"],
   [/^(remember|forget)$/, "memory"],
+  [/^(find_skills|use_skill)$/, "skills"],
   [/__|^query_result$/, "apps"],
 ];
 export const toolGroup = (name: string): ToolGroup =>

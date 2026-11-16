@@ -245,4 +245,10 @@ export const MIGRATIONS: readonly Migration[] = [
     // A Client Bot: interviews you about what you sell, then finds and checks businesses that may need it.
     sql: `ALTER TABLE bots ADD COLUMN client INTEGER NOT NULL DEFAULT 0;`,
   },
+  {
+    id: 19,
+    name: "skill-descriptions",
+    // When to use a skill, in one line: what a bot reads to pick one by itself.
+    sql: `ALTER TABLE skills ADD COLUMN description TEXT NOT NULL DEFAULT '';`,
+  },
 ];

@@ -132,6 +132,42 @@ export function LocalModelSettings() {
               ))}
             </select>
           </Field>
+          <Field
+            label="One model at a time"
+            hint="Bots on different local models (like a Coding Bot's Planner, Developer and QA) each load theirs for their turn; the others are unloaded first. Bots on the same model share it."
+          >
+            <label className="flex h-8 items-center gap-2 text-[13px]">
+              <input
+                type="checkbox"
+                checked={settings.oneModelAtATime}
+                onChange={(event) => update.mutate({ oneModelAtATime: event.target.checked })}
+              />
+              Keep one local model in memory
+            </label>
+          </Field>
+          <Field
+            label="When FreeBird closes"
+            hint="Frees the memory its models hold, so other programs can use it."
+          >
+            <div className="flex flex-col gap-1">
+              <label className="flex items-center gap-2 text-[13px]">
+                <input
+                  type="checkbox"
+                  checked={settings.unloadOnClose}
+                  onChange={(event) => update.mutate({ unloadOnClose: event.target.checked })}
+                />
+                Unload its models
+              </label>
+              <label className="flex items-center gap-2 text-[13px]">
+                <input
+                  type="checkbox"
+                  checked={settings.stopOllamaOnClose}
+                  onChange={(event) => update.mutate({ stopOllamaOnClose: event.target.checked })}
+                />
+                Stop Ollama, if FreeBird started it
+              </label>
+            </div>
+          </Field>
           <Field label="Bots at once" hint="Match Ollama's OLLAMA_NUM_PARALLEL; the rest wait in line.">
             <select
               value={settings.parallel}

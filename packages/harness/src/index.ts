@@ -46,6 +46,9 @@ export async function listenOn(
   return app.listen({ host: config.host, port: config.port });
 }
 
+/** How long closing waits for models to unload; the desktop app gives the harness 4 seconds in all. */
+export const UNLOAD_ON_CLOSE_MS = 2_500;
+
 export interface RunningHarness {
   url: string;
   close(): Promise<void>;
@@ -105,6 +108,13 @@ export async function startHarness(config: HarnessConfig): Promise<RunningHarnes
   return {
     url,
     async close() {
+      // Free the memory the app's models hold, then stop the Ollama it started, as you chose in Settings → Local model.
+      const { unloadOnClose, stopOllamaOnClose } = services.runtime.settings;
+      if (unloadOnClose)
+        await services.runtime.unloadUsed(UNLOAD_ON_CLOSE_MS).catch((error: Error) => {
+          console.warn(`[harness] unloading models: ${error.message}`);
+        });
+      if (stopOllamaOnClose && services.ollamaLauncher.stop()) console.log("[harness] stopped Ollama");
       await app.close();
       store.close();
     },

@@ -1,6 +1,6 @@
 {
   "name": "@mrog/harness",
-  "version": "0.0.13",
+  "version": "0.0.16",
   "private": true,
   "type": "module",
   "exports": {
@@ -16,15 +16,17 @@
     "@fastify/cors": "11.3.1",
     "@fastify/static": "10.1.8",
     "@modelcontextprotocol/sdk": "1.32.1",
-    "@mrog/engine": "workspace:*",
     "@mrog/clients": "workspace:*",
+    "@mrog/engine": "workspace:*",
     "@mrog/jobs": "workspace:*",
     "@mrog/model-runtime": "workspace:*",
     "@mrog/providers": "workspace:*",
     "@mrog/shared": "workspace:*",
+    "@mrog/skills": "workspace:*",
     "@mrog/store": "workspace:*",
     "@mrog/tools": "workspace:*",
     "@mrog/vault": "workspace:*",
+    "@mrog/visual-qa": "workspace:*",
     "fastify": "5.12.7",
     "playwright-core": "1.64.1",
     "zod": "4.6.7"
