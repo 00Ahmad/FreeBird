@@ -10,6 +10,7 @@ To report a vulnerability, see [SECURITY.md](../SECURITY.md).
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | Bots, chats, memory, routines, settings     | A local SQLite database in the app's data folder                                                       |
 | Each bot's files                            | Its own folder under the data folder                                                                   |
+| Earlier versions of files a bot changed     | `file-history/` in the data folder, for **Undo**: at most 100 per bot, deleted with the bot            |
 | API keys, vault logins, cards, contact info | Your operating system's keychain (Windows Credential Manager, macOS Keychain, Secret Service on Linux) |
 | The bots' browser profiles                  | Inside the data folder, apart from your own: one per bot in `browser-profiles/`, or one shared         |
 | Sign-ins to connected apps (OAuth)          | Your operating system's keychain, as `MCP_OAUTH_<APP>`                                                 |
@@ -87,7 +88,7 @@ To help work out what went wrong after a crash or a bad turn, FreeBird keeps a r
 
 ## When approvals go unanswered
 
-An approval card that nobody answers expires after 15 minutes and the action is **not run**. The bot is told that nobody answered, which is different from you saying no. Questions to you (`ask_user`) never expire while the turn is running. After the app restarts, cards from an interrupted turn are closed rather than left looking answerable, and a turn that was in the middle of something that changes things outside the chat is shown as an error that says so, so you can check before asking again.
+An approval card that nobody answers expires after 15 minutes and the action is **not run**. The bot is told that nobody answered, which is different from you saying no. To have a bot (and its helpers) wait for your answer instead, turn on **Wait for my answer to approvals** in its **Details → Notifications**; **Stop** still ends the wait. Questions to you (`ask_user`) never expire while the turn is running. After the app restarts, cards from an interrupted turn are closed rather than left looking answerable, and a turn that was in the middle of something that changes things outside the chat is shown as an error that says so, so you can check before asking again.
 
 ## Known limits
 

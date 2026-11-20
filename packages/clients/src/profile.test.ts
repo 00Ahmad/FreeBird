@@ -14,6 +14,15 @@ describe("the offer profile", () => {
     expect(new Set(PLAYBOOKS.map((p) => p.id)).size).toBe(PLAYBOOKS.length);
   });
 
+  it("picks it from what you sell, not from who it's for (1.7)", () => {
+    expect(pickPlaybook("Recruitment for software developers").id).toBe("recruitment");
+    expect(pickPlaybook("IT support for accountants").id).toBe("it_support");
+    expect(pickPlaybook("Office cleaning, book through our website").id).toBe("generic");
+    expect(pickPlaybook("Payroll to restaurants in Leeds").id).toBe("payroll");
+    // When the words before "for" name nothing, the whole sentence is read.
+    expect(pickPlaybook("We help restaurants with their payroll").id).toBe("payroll");
+  });
+
   it("fills the playbook's defaults when what you sell is first given, keeping your own choices", () => {
     const profile = mergeOffer(emptyOffer(), { offer: "Payroll for restaurants", areas: ["Leeds", "Leeds"] });
     expect(profile.signals).toContain("hiring");

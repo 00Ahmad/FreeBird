@@ -46,6 +46,8 @@ describe("one card per turn", () => {
   it("tells the Developer which file is its card, which files it connects to, and what it must not do", async () => {
     const team = codingTeam();
     h = await startTeam(team);
+    // An older board, with a card for the connection too, so both kinds of message are seen.
+    h.services.coding.timing.connectionCards = true;
     const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
     await type(h, bot, "Build a greeter");
     await until(h, bot.id, (p) => p.status === "done");
@@ -89,7 +91,7 @@ describe("one card per turn", () => {
     expect(text).toContain("connects to no other file");
   });
 
-  it("refuses a write to another card's planned file during a file card's turn, and allows it for a connection", async () => {
+  it("refuses a write to another card's planned file during a file card's turn, and allows it for a connection on an older board", async () => {
     const team = codingTeam({
       develop: (card) =>
         card.key === "src/util.ts"
@@ -99,6 +101,7 @@ describe("one card per turn", () => {
             : {},
     });
     h = await startTeam(team);
+    h.services.coding.timing.connectionCards = true;
     const out = tmp("out");
     const { bot } = await makeCoding(h, out, { autoApprove: true });
     await type(h, bot, "Build a greeter");
@@ -305,7 +308,7 @@ describe("a file that is already written", () => {
     const done = await until(h, bot.id, (p) => p.status === "done");
 
     const keys = turnsOf(team, "developer").map((s) => keyOf(s.task));
-    expect(keys).toEqual(["src/main.ts", "main imports greet from util"]);
+    expect(keys).toEqual(["src/main.ts"]);
     expect(readFileSync(join(out, "src", "util.ts"), "utf8")).toBe("// written earlier\n");
     expect(done.log!.map((l) => l.text)).toContain("src/util.ts was already written; sent to QA");
     // The card went to QA without a Developer turn, and QA reviewed it.
@@ -356,7 +359,7 @@ describe("time and tokens per card", () => {
     const { bot } = await makeCoding(h, tmp("out"));
     const res = await post(h, `/api/bots/${bot.id}/coding/import`, { plan: THREE_FILES });
     const cards = res.json().project.cards as { work: unknown }[];
-    expect(cards).toHaveLength(3);
+    expect(cards).toHaveLength(THREE_FILES.nodes.length);
     for (const card of cards) expect(card.work).toEqual(zeroWork());
   });
 

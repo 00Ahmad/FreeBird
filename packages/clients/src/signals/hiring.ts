@@ -2,8 +2,9 @@ import { fold, words } from "@mrog/jobs";
 
 import type { SignalKind } from "./types";
 
+/** A hiring phrase, whole words only: a single word like "role" was enough before, and matched "parole". */
 const HIRING =
-  /hiring|vacanc|we're recruiting|we are recruiting|job (opening|advert)|join (our|the) team|apply (now|today)|role|position/;
+  /\b(we'?re hiring|we are hiring|now hiring|is hiring|are hiring|hiring (a|an|for|now)|vacanc(y|ies)|we'?re recruiting|we are recruiting|job (openings?|adverts?)|join (our|the) team|apply (now|today))\b/;
 
 /** Whether the text names one of the playbook's job titles (every word of it). */
 export function namesTitle(text: string, titles: string[]): boolean {

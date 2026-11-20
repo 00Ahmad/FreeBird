@@ -375,6 +375,108 @@ describe("chat turns", () => {
     expect(steered?.images).toEqual(["iVBORw0KGgo="]);
   });
 
+  it("tells later turns that a message sent mid-turn was already answered, so it isn't done twice", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const bodies: any[] = [];
+    h = await makeHarness({
+      handlers: fakeOllama(async (body) => {
+        bodies.push(body);
+        if (bodies.length === 1) {
+          await gate;
+          return ndjson([
+            {
+              message: {
+                tool_calls: [{ function: { name: "update_plan", arguments: { steps: ["Tidy up"] } } }],
+              },
+            },
+            { done: true },
+          ]);
+        }
+        return ndjson([{ message: { content: "Done." } }, { done: true }]);
+      }),
+    });
+    const bot = await botWithModel(h);
+    h.store.settings.set("agent", { maxSteps: 25, selfCheck: false, planning: true });
+    const started = nextEvent(h.bus, (e) => e.type === "thread.activity" && e.activity === "thinking");
+    const post = (payload: object) =>
+      h!.app.inject({ method: "POST", url: `/api/threads/${bot.threadId}/messages`, headers: auth, payload });
+    let done = nextEvent<Message>(
+      h.bus,
+      (e) => e.type === "message.updated" && e.message.status === "done" && e.message,
+    );
+    await post({ text: "tidy the folder" });
+    await started;
+    const steered = (await post({ text: "also delete old.txt" })).json().message as Message;
+    release();
+    const first = await done;
+    expect(first.tookIn).toEqual([steered.id]);
+    expect(h.store.messages.get(first.id)?.tookIn).toEqual([steered.id]);
+
+    done = nextEvent<Message>(
+      h.bus,
+      (e) => e.type === "message.updated" && e.message.status === "done" && e.message,
+    );
+    await post({ text: "thanks, what's next?" });
+    await done;
+    const last = bodies.at(-1).messages.at(-1).content as string;
+    // The answered message is still there, but said to be answered, ahead of the new one.
+    expect(last).toMatch(
+      /already took it into account[\s\S]*also delete old\.txt[\s\S]*thanks, what's next\?/,
+    );
+  });
+
+  it("leaves a message taken in by a reply that then failed reading as asked, since it may not have been done", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const bodies: any[] = [];
+    h = await makeHarness({
+      handlers: fakeOllama(async (body) => {
+        bodies.push(body);
+        if (bodies.length === 1) {
+          await gate;
+          return ndjson([
+            {
+              message: {
+                tool_calls: [{ function: { name: "update_plan", arguments: { steps: ["Tidy up"] } } }],
+              },
+            },
+            { done: true },
+          ]);
+        }
+        // The step that took the message in fails.
+        if (bodies.length === 2) return Response.json({ error: "model crashed" }, { status: 400 });
+        return ndjson([{ message: { content: "Done." } }, { done: true }]);
+      }),
+    });
+    const bot = await botWithModel(h);
+    h.store.settings.set("agent", { maxSteps: 25, selfCheck: false, planning: true });
+    const started = nextEvent(h.bus, (e) => e.type === "thread.activity" && e.activity === "thinking");
+    const post = (payload: object) =>
+      h!.app.inject({ method: "POST", url: `/api/threads/${bot.threadId}/messages`, headers: auth, payload });
+    let done = nextEvent<Message>(
+      h.bus,
+      (e) => e.type === "message.updated" && e.message.status === "error" && e.message,
+    );
+    await post({ text: "tidy the folder" });
+    await started;
+    await post({ text: "also delete old.txt" });
+    release();
+    const failed = await done;
+    expect(failed.tookIn).toBeUndefined();
+    expect(JSON.stringify(bodies[1].messages)).toContain("also delete old.txt");
+
+    done = nextEvent<Message>(
+      h.bus,
+      (e) => e.type === "message.updated" && e.message.status === "done" && e.message,
+    );
+    await post({ text: "please carry on" });
+    await done;
+    const last = bodies.at(-1).messages.at(-1).content as string;
+    expect(last).toContain("also delete old.txt");
+    expect(last).not.toContain("already took it into account");
+  });
+
   it("drops the reasoning of an attempt that failed and was retried", async () => {
     let chats = 0;
     h = await makeHarness({

@@ -1,6 +1,7 @@
 import {
   askWith,
   compactHistory,
+  estimateTextTokens,
   estimateToolTokens,
   runTurn,
   summarizeWith,
@@ -147,6 +148,8 @@ interface ActiveTurn {
   /** Parallel Bots with tools: the three roles each run on their own, with search and opening pages. */
   parallelTools: boolean;
   steer: ChatMessage[];
+  /** The ids of the user's messages in `steer`, in the same order. */
+  steerIds: string[];
   info: TurnInfo;
   /** How it was started, so a follow-up turn for a late message runs the same way. */
   options: TurnOptions;
@@ -302,6 +305,7 @@ export class TurnManager {
       // step that read another message would be a second one.
       if (running && !running.controller.signal.aborted && !message.parallel && !running.parallel) {
         running.steer.push(toChatMessage(message));
+        running.steerIds.push(message.id);
       } else fresh.push(bot);
     }
     return fresh;
@@ -382,6 +386,7 @@ export class TurnManager {
       parallel: asked !== null,
       parallelTools: asked?.parallelTools === true,
       steer: [],
+      steerIds: [],
       info,
       options,
       done: Promise.resolve(),
@@ -569,9 +574,20 @@ export class TurnManager {
       });
     };
 
+    // What the turn's model requests have cost so far: kept when the turn is stopped or fails part-way, so its tokens
+    // aren't lost. Null until a request reports its counts (some never do): unknown, not zero.
+    let spent: Usage | null = null;
+    // The user's messages this turn took in between steps (see TurnManager.steerOrFresh).
+    const tookIn: string[] = [];
     // Where the reasoning streamed since the last answer text or tool call starts, in case its attempt is retried.
     let reasoningFrom: { index: number; length: number } | null = null;
     const sink: TurnSink = {
+      usage: (used) => {
+        spent = {
+          inputTokens: (spent?.inputTokens ?? 0) + used.inputTokens,
+          outputTokens: (spent?.outputTokens ?? 0) + used.outputTokens,
+        };
+      },
       text: (text) => {
         reasoningFrom = null;
         this.setActivityOnce(thread.id, bot.id, "working");
@@ -689,7 +705,7 @@ export class TurnManager {
 
       // Fold old history into a cached summary when it no longer fits the context window.
       const toolTokens = estimateToolTokens(definitions);
-      const budget = contextWindow - Math.ceil(system.length / 3.5) - toolTokens - 1024;
+      const budget = contextWindow - Math.ceil(estimateTextTokens(system)) - toolTokens - 1024;
       const summaryKey = `summary:${thread.id}:${bot.id}`;
       // A reply whose roles ran with tools goes back to the model as just their answers, never their searches.
       const chatHistory = toChatHistory(forHistory(history), bot.id, names);
@@ -749,7 +765,7 @@ export class TurnManager {
       // Parallel Bots asks the reply to take.
       const added = turn.parallel ? parallelInstructions() : note;
       const { thinkOff, ...turnOptions } = this.extensions.turnOptions?.(bot, thread, turn.info) ?? {};
-      let usage: Usage;
+      let usage: Usage | null;
       let status: "done" | "error" = "done";
       // On a cloud model (no shared slot to hold), Parallel Bots asks the three roles in separate requests at the same
       // time instead of one combined request; a local model keeps the single request.
@@ -855,14 +871,19 @@ export class TurnManager {
           local,
           signal,
           sink,
-          steer: () => turn.steer.splice(0),
+          // What the engine takes in is recorded on the reply, so later turns know those messages were answered.
+          steer: () => {
+            tookIn.push(...turn.steerIds.splice(0));
+            return turn.steer.splice(0);
+          },
           ...turnOptions,
         });
-        usage = result.usage;
+        usage = result.usageReported ? result.usage : null;
       }
 
       save();
-      persist({ parts, status, usage });
+      // Only a reply that finished answered what it took in (a Parallel Bots reply that failed in every role didn't).
+      persist({ parts, status, usage, ...(tookIn.length > 0 && status === "done" ? { tookIn } : {}) });
     } catch (error) {
       const stopped = signal.aborted || (error instanceof ProviderError && error.code === "aborted");
       if (!stopped) {
@@ -888,7 +909,9 @@ export class TurnManager {
         )
           part.expired = true;
       }
-      persist({ parts, status: stopped ? "stopped" : "error" });
+      // No tookIn here: a reply that was stopped or failed may never have carried out what it took in, so those
+      // messages must still read as asked.
+      persist({ parts, status: stopped ? "stopped" : "error", usage: spent });
     } finally {
       releaseTurnSlot?.();
       clearInterval(saver);

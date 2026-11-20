@@ -1,6 +1,6 @@
 {
   "name": "@mrog/ui",
-  "version": "0.0.16",
+  "version": "0.0.18",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@mrog/jobs": "workspace:*",
     "@mrog/shared": "workspace:*",
     "@mrog/ui-kit": "workspace:*",
     "@tanstack/react-query": "5.105.0",

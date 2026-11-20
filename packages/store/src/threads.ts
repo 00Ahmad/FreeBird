@@ -107,6 +107,12 @@ const repairPart = (part: unknown): unknown => {
   return args && typeof args === "object" && !Array.isArray(args) ? part : { ...part, args: { value: args } };
 };
 
+/** The ids a reply took in mid-turn (none in a row saved before there was a column for them). */
+const tookIn = (row: Row): string[] => {
+  const ids = json(row.took_in ?? "[]");
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+};
+
 /**
  * One row as a message. A row that still doesn't parse keeps its place in the thread as an error part rather
  * than failing every read of the thread; null when even that isn't possible.
@@ -126,6 +132,7 @@ function toMessage(row: Row): Message | null {
     model: row.model ?? null,
     usage: row.usage ? (json(row.usage) ?? null) : null,
     replyToId: row.reply_to_id ?? null,
+    ...(tookIn(row).length > 0 ? { tookIn: tookIn(row) } : {}),
     reactions: json(row.reactions ?? "[]") ?? [],
     createdAt: row.created_at,
   };
@@ -147,9 +154,16 @@ function toMessage(row: Row): Message | null {
 const fingerprint = (row: Row) =>
   createHash("sha1")
     .update(
-      [row.parts, row.status, row.usage, row.reactions, row.model, row.bot_id, row.reply_to_id].join(
-        "\u0000",
-      ),
+      [
+        row.parts,
+        row.status,
+        row.usage,
+        row.reactions,
+        row.model,
+        row.bot_id,
+        row.reply_to_id,
+        row.took_in,
+      ].join("\u0000"),
     )
     .digest("base64");
 
@@ -252,12 +266,18 @@ export class MessageRepo {
    */
   update(
     id: string,
-    patch: { parts?: MessagePart[]; status?: MessageStatus; usage?: Usage | null; model?: string | null },
+    patch: {
+      parts?: MessagePart[];
+      status?: MessageStatus;
+      usage?: Usage | null;
+      model?: string | null;
+      tookIn?: string[];
+    },
   ): Message | null {
     const current = patch.parts
       ? this.db
           .prepare(
-            "SELECT id, thread_id, role, bot_id, moderator, parallel, parallel_tools, '[]' AS parts, status, model, usage, reply_to_id, reactions, created_at FROM messages WHERE id = ?",
+            "SELECT id, thread_id, role, bot_id, moderator, parallel, parallel_tools, '[]' AS parts, status, model, usage, reply_to_id, took_in, reactions, created_at FROM messages WHERE id = ?",
           )
           .get(id)
       : this.db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
@@ -270,9 +290,18 @@ export class MessageRepo {
       usage: patch.usage === undefined ? before.usage : patch.usage,
       model: patch.model === undefined ? before.model : patch.model,
     };
+    const took = patch.tookIn ?? before.tookIn ?? [];
+    if (took.length > 0) next.tookIn = took;
     this.db
-      .prepare("UPDATE messages SET parts = ?, status = ?, usage = ?, model = ? WHERE id = ?")
-      .run(JSON.stringify(next.parts), next.status, JSON.stringify(next.usage), next.model, id);
+      .prepare("UPDATE messages SET parts = ?, status = ?, usage = ?, model = ?, took_in = ? WHERE id = ?")
+      .run(
+        JSON.stringify(next.parts),
+        next.status,
+        JSON.stringify(next.usage),
+        next.model,
+        JSON.stringify(next.tookIn ?? []),
+        id,
+      );
     return next;
   }
 

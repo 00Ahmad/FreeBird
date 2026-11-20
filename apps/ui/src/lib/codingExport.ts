@@ -1,4 +1,10 @@
-import { MAX_PLAN_EDGES, MAX_PLAN_FILES, type CodingProject } from "@mrog/shared";
+import {
+  DONE_FORMS,
+  MAX_DONE_CHECKS,
+  MAX_PLAN_EDGES,
+  MAX_PLAN_FILES,
+  type CodingProject,
+} from "@mrog/shared";
 
 import { edgeLabel } from "./coding";
 import { cardsByRef, progressText, sortComments } from "./codingBoard";
@@ -19,7 +25,8 @@ export interface CodingPlanFile {
   format: typeof PLAN_FORMAT;
   version: typeof PLAN_VERSION;
   brief: string;
-  nodes: { path: string; purpose: string }[];
+  /** `done`: the file's "done when" checks, when it has any (an addition version 1 readers skip). */
+  nodes: { path: string; purpose: string; done?: string[] }[];
   edges: { files: string[]; description: string }[];
 }
 
@@ -30,7 +37,11 @@ export function planToFile(project: Plan): CodingPlanFile {
     format: PLAN_FORMAT,
     version: PLAN_VERSION,
     brief: project.brief,
-    nodes: project.nodes.map((node) => ({ path: node.path, purpose: node.purpose })),
+    nodes: project.nodes.map((node) => ({
+      path: node.path,
+      purpose: node.purpose,
+      ...(node.done?.length ? { done: node.done } : {}),
+    })),
     edges: project.edges.flatMap((edge) => {
       const files = edge.files.flatMap((id) => paths.get(id) ?? []);
       // A connection that lost files links nothing any more.
@@ -56,7 +67,10 @@ export function toMarkdown(project: Exportable, title = "Coding plan"): string {
       "",
     );
   out.push(`## Files (${project.nodes.length})`, "");
-  for (const node of project.nodes) out.push(`- \`${node.path}\`: ${oneLine(node.purpose)}`);
+  for (const node of project.nodes) {
+    out.push(`- \`${node.path}\`: ${oneLine(node.purpose)}`);
+    for (const check of node.done ?? []) out.push(`  - Done when: \`${oneLine(check)}\``);
+  }
   if (project.nodes.length === 0) out.push("No files yet.");
   out.push("", `## Connections (${project.edges.length})`, "");
   project.edges.forEach((edge, index) => {
@@ -165,6 +179,7 @@ export function planningPrompt(brief: string): string {
     `- "edges" lists the connections between files. At most ${MAX_PLAN_EDGES} connections.`,
     '- A connection links 2 or more of the files listed in "nodes" (use their exact paths in "files") and has a "description" of what connects them: a function call, shared data, an import, an API.',
     "- Every file should be in at least one connection, unless it stands alone.",
+    `- For a web page, a file that makes it work may have a "done" list: up to ${MAX_DONE_CHECKS} checks the browser runs on the page, each one line in one of these forms (with the page's real ids): ${DONE_FORMS.map((form) => JSON.stringify(form)).join(", ")}. Leave "done" out where no browser can check it.`,
     "- Do not add any text before or after the JSON, and do not wrap it in anything else.",
   ].join("\n");
 }

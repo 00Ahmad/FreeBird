@@ -9,6 +9,7 @@ import { COLUMN_COLOR, columnLabel, edgeLabels, linkedFiles, relatedRefs } from 
 import { cornerKind, diagramMarks, emptyPlanText, NO_MARK, type CornerKind } from "../../lib/codingFeedback";
 import { cardElapsedSeconds, cardWorkLine, isSlowCard, slowBadge, SLOW_TOOLTIP } from "../../lib/codingWork";
 import { fitZoom, layoutDiagram, stepZoom } from "../../lib/codingLayout";
+import { diagramProject, hasCodeLinks, shownView, type DiagramView } from "../../lib/codingLinks";
 import { Chip, ColumnChip, Comments, KindBadge, tint } from "./parts";
 
 const COLUMNS = ["todo", "in_progress", "qa", "done"] as const;
@@ -25,7 +26,7 @@ const activate = (action: () => void) => (event: KeyboardEvent) => {
  * links. Boxes are coloured by their card's column. Click one to light up what it touches and read its details.
  */
 export function CodingDiagram({
-  project,
+  project: planned,
   now,
   selectedRef,
   onSelect,
@@ -38,6 +39,16 @@ export function CodingDiagram({
   onSelect(ref: string | null): void;
   onShowOnBoard(ref: string): void;
 }) {
+  // The plan's connections, or those read from the code once there are any (the code's by default: it is what runs).
+  const [wanted, setWanted] = useState<DiagramView>("code");
+  const view = shownView(planned, wanted);
+  const project = useMemo(() => diagramProject(planned, view), [planned, view]);
+  const switchView = (next: DiagramView) => {
+    if (next === view) return;
+    setWanted(next);
+    // A connection picked in one view isn't in the other.
+    onSelect(null);
+  };
   const layout = useMemo(() => layoutDiagram(project.nodes, project.edges), [project.nodes, project.edges]);
   const marks = useMemo(() => diagramMarks(project, now), [project, now]);
   const labels = useMemo(() => edgeLabels(project.edges), [project.edges]);
@@ -112,6 +123,38 @@ export function CodingDiagram({
         >
           <Maximize2 size={14} />
         </IconButton>
+        {hasCodeLinks(planned) && (
+          <div
+            className="flex rounded-lg border border-border p-0.5 text-[11.5px]"
+            role="group"
+            aria-label="Connections"
+          >
+            {(
+              [
+                ["plan", "Planned"],
+                ["code", "In the code"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={view === value}
+                onClick={() => switchView(value)}
+                title={
+                  value === "plan"
+                    ? "The connections the Planner described"
+                    : "The connections the written code makes: a page loading a file, a script importing another"
+                }
+                className={cn(
+                  "rounded-md px-2 py-0.5",
+                  view === value ? "bg-accent text-accent-ink" : "text-ink-2 hover:bg-hover",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1" aria-label="Colours">
           {COLUMNS.map((column) => (
             <span key={column} className="flex items-center gap-1 text-[11px] text-ink-3">

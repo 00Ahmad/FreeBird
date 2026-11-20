@@ -72,7 +72,11 @@ export const greenhouse: JobSource = {
       text: listed
         .map((job) => `${job.title} - ${job.location?.name ?? ""} (${job.absolute_url})`)
         .join("\n"),
-      links: listed.map((job) => ({ text: job.title!, url: job.absolute_url! })),
+      links: listed.map((job) => ({
+        text: job.title!,
+        url: job.absolute_url!,
+        ...(job.location?.name ? { place: job.location.name } : {}),
+      })),
     };
   },
 };

@@ -176,6 +176,14 @@ function Card({
                 <TriangleAlert size={11} aria-hidden /> Needs fixing
               </span>
             )}
+            {item.setAside && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-hover px-1.5 py-px text-[11px] font-semibold text-warning"
+                title="Sent back as many times as the round limit: the Developer leaves it while the rest carries on. Raise the round limit and resume to try it again, or fix it yourself."
+              >
+                Set aside for you
+              </span>
+            )}
           </span>
           <span className={cn("font-medium break-all", file && item.node && "font-mono text-[12px]")}>
             {file && item.node ? item.node.path : card.title}

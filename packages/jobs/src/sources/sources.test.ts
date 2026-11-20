@@ -66,7 +66,7 @@ describe("job systems", () => {
       },
       "https://boards.greenhouse.io/acme",
     )!;
-    expect(page.links).toEqual([{ text: "A", url: "https://boards.greenhouse.io/acme/jobs/1" }]);
+    expect(page.links).toEqual([{ text: "A", url: "https://boards.greenhouse.io/acme/jobs/1", place: "X" }]);
   });
 
   it("turn a Lever posting and board into pages", () => {
@@ -95,5 +95,89 @@ describe("job systems", () => {
   it("refuse answers that aren't what was expected", () => {
     expect(greenhouse.toPage("nope", "https://boards.greenhouse.io/acme/jobs/1")).toBeNull();
     expect(lever.toPage({ jobs: [] }, "https://jobs.lever.co/acme")).toBeNull();
+  });
+});
+
+describe("Ashby and SmartRecruiters, in the shapes their live answers have", async () => {
+  const { ashby } = await import("./ashby");
+  const { smartRecruiters } = await import("./smartrecruiters");
+  const ID = "d3bc1ced-3ce4-4086-a050-555055dbb1ff";
+
+  it("read an Ashby board, and find one posting in it", () => {
+    const board = "https://jobs.ashbyhq.com/acme";
+    expect(sourceFor(`${board}/${ID}`)?.apiUrl).toBe(
+      "https://api.ashbyhq.com/posting-api/job-board/acme?includeCompensation=true",
+    );
+    const json = {
+      jobs: [
+        {
+          id: ID,
+          title: "Backend Engineer",
+          location: "Europe",
+          isRemote: true,
+          isListed: true,
+          workplaceType: "Remote",
+          employmentType: "FullTime",
+          publishedAt: "2026-11-01T10:00:00+00:00",
+          jobUrl: `${board}/${ID}`,
+          descriptionPlain: "Build APIs.",
+          compensation: { scrapeableCompensationSalarySummary: "€70K – €90K", compensationTierSummary: null },
+        },
+      ],
+    };
+    expect(ashby.toPage(json, board)!.links).toEqual([
+      { text: "Backend Engineer", url: `${board}/${ID}`, place: "Europe (Remote)" },
+    ]);
+    const posting = ashby.toPage(json, `${board}/${ID}`)!;
+    expect(posting.text).toContain("Workplace: Remote");
+    expect(posting.text).toContain("Salary: €70K – €90K");
+    expect(posting.text).toContain("Posted: 2026-11-01");
+  });
+
+  it("read a SmartRecruiters company's list and one posting", () => {
+    const list = "https://jobs.smartrecruiters.com/AcmeGroup";
+    const posting = "https://jobs.smartrecruiters.com/AcmeGroup/744000162770449--backend-engineer";
+    expect(sourceFor(list)?.apiUrl).toBe(
+      "https://api.smartrecruiters.com/v1/companies/AcmeGroup/postings?limit=100",
+    );
+    expect(sourceFor(posting)?.apiUrl).toBe(
+      "https://api.smartrecruiters.com/v1/companies/AcmeGroup/postings/744000162770449",
+    );
+    const page = smartRecruiters.toPage(
+      {
+        content: [
+          { id: "744000162770449", name: "Backend Engineer", location: { fullLocation: "Leeds, UK" } },
+        ],
+      },
+      list,
+    )!;
+    expect(page.links[0]).toEqual({
+      text: "Backend Engineer",
+      url: "https://jobs.smartrecruiters.com/AcmeGroup/744000162770449",
+      place: "Leeds, UK",
+    });
+    const one = smartRecruiters.toPage(
+      {
+        name: "Backend Engineer",
+        company: { name: "Acme Group" },
+        location: { fullLocation: "Leeds, UK", remote: false, hybrid: true },
+        releasedDate: "2026-11-20T15:57:24.284Z",
+        compensation: { min: 50000, max: 60000, currency: "GBP", period: "YEARLY" },
+        jobAd: { sections: { jobDescription: { title: "The role", text: "<p>Build APIs.</p>" } } },
+      },
+      posting,
+    )!;
+    expect(one.text).toContain("Company: Acme Group");
+    expect(one.text).toContain("Workplace: Hybrid");
+    expect(one.text).toContain("Salary: 50000 - 60000 GBP per year");
+    expect(one.text).toContain("Build APIs.");
+  });
+
+  it("give a Lever posting its date", () => {
+    const page = lever.toPage(
+      { text: "Data Analyst", createdAt: Date.parse("2026-08-31T18:12:19Z") },
+      `https://jobs.lever.co/acme/${LEVER_ID}`,
+    )!;
+    expect(page.text).toContain("Posted: 2026-08-31");
   });
 });

@@ -129,15 +129,20 @@ export function createClientTeam(services: Services, state: ClientState) {
       profile: emptyOffer(),
       leads: [],
       seen: [],
+      notShown: [],
+      registerPages: {},
+      deadPages: [],
+      searchesRun: [],
       siteNotes: [],
       suggestions: [],
       lists: emptyLists(),
-      lookalikes: { clients: [], profile: null, approved: false },
+      lookalikes: { clients: [], matched: [], profile: null, approved: false },
       watchOff: false,
       scan: null,
       lastTarget: DEFAULT_CLIENT_TARGET,
       lastKinds: ["asking", "signs", "quiet"],
       askingCount: false,
+      interview: { asked: [], skipped: [] },
       active: null,
       handoff: null,
       log: [{ at: state.now(), text: "Client Bot created" }],
@@ -163,7 +168,7 @@ export function createClientTeam(services: Services, state: ClientState) {
     }
   };
 
-  return { roleOf, ensurePair, isTeamThread, isTeamBot, create, removeTeam };
+  return { roleOf, pairOf, ensurePair, isTeamThread, isTeamBot, create, removeTeam };
 }
 
 export type ClientTeam = ReturnType<typeof createClientTeam>;

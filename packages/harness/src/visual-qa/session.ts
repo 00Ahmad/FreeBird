@@ -55,6 +55,8 @@ export class VisualSession {
   auto: Finding[] = [];
   /** The app's own origin once it is open in the browser. */
   origin: string | null = null;
+  /** The address the app was opened at. */
+  url: string | null = null;
   /** app_start has run (it starts the app once). */
   started = false;
   /** Why the browser couldn't open the app, if it couldn't. */
@@ -188,6 +190,7 @@ export class VisualSession {
       url = ready.url;
     }
     this.origin = new URL(url).origin;
+    this.url = url;
     this.disallow = this.options.browser.allowHost(new URL(url).host);
     let look: ToolResult;
     try {

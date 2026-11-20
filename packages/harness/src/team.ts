@@ -6,12 +6,14 @@ import {
   BotId,
   CreateGroupInput,
   ImportMemoryInput,
+  MAX_PINNED_NOTES,
   MemoryInput,
   messageText,
   REACTIONS,
   SkillInput,
   ThreadId,
   UpdateGroupInput,
+  UpdateMemoryInput,
   type Bot,
   type Message,
   type Thread,
@@ -19,9 +21,33 @@ import {
 import { defineTool, safe } from "@mrog/tools";
 
 import { fail, parse } from "./http";
+import {
+  alreadySaved,
+  FORGET_WITHOUT_ASKING,
+  forgetProblem,
+  memoryBudget,
+  noteMentions,
+  notesForPrompt,
+} from "./memory-rules";
 import type { Services } from "./services";
 
-const MEMORY_IN_PROMPT = 60;
+/**
+ * The tokens of memory a bot's prompt may hold: a tenth of the window on a local model, whose window is the local
+ * context size; no limit but the note count on a cloud model, whose window is many times larger.
+ */
+export function memoryTokensFor(
+  { runtime, registry }: Pick<Services, "runtime" | "registry">,
+  bot: Bot,
+): number {
+  const ref = bot.model ?? runtime.settings.sharedModel;
+  try {
+    if (ref && registry.resolve(ref).provider.local) return memoryBudget(runtime.settings.numCtx);
+  } catch {
+    // A model whose provider is gone: the turn will say so; memory keeps the old rule.
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
 /** How long picking a group chat's responders may take before it falls back to the primary bot. */
 const ROUTE_TIMEOUT_MS = 30_000;
 
@@ -100,16 +126,17 @@ export function installTeam(services: Services) {
   };
 
   // ---- memory ------------------------------------------------------------------------------------------
+  // Pinned notes always; then, on a local model, the newest notes that fit a tenth of its window (60 long notes would
+  // otherwise fill all of it).
   agent.promptSources.push((bot) => ({
-    memory: store.memory
-      .list(bot.id)
-      .slice(-MEMORY_IN_PROMPT)
-      .map((note) => note.text),
+    memory: notesForPrompt(store.memory.list(bot.id), memoryTokensFor(services, bot)).notes.map(
+      (note) => note.text,
+    ),
   }));
 
   const publishMemory = () => bus.publish({ type: "data.changed", keys: ["memory"] });
 
-  agent.toolSources.push((bot) => [
+  agent.toolSources.push((bot, _thread, _messageId, info) => [
     defineTool({
       name: "remember",
       description:
@@ -117,6 +144,13 @@ export function installTeam(services: Services) {
       args: z.object({ note: z.string().trim().min(1).max(2000) }),
       risk: (args) => safe(`Remember: ${args.note}`),
       run: async (args) => {
+        if (
+          alreadySaved(
+            store.memory.list(bot.id).map((note) => note.text),
+            args.note,
+          )
+        )
+          return "Already in memory: nothing to save.";
         store.memory.add(bot.id, args.note);
         publishMemory();
         return "Saved to memory.";
@@ -124,16 +158,35 @@ export function installTeam(services: Services) {
     }),
     defineTool({
       name: "forget",
-      description: "Delete memory notes that contain the given text.",
-      args: z.object({ text: z.string().min(2) }),
+      description:
+        "Delete the memory notes that contain the given words (whole words, at least one of 4 letters or more).",
+      args: z.object({ text: z.string().trim().min(2).max(200) }),
       risk: (args) => safe(`Forget notes about: ${args.text}`),
-      run: async (args) => {
-        const matches = store.memory
-          .list(bot.id)
-          .filter((note) => note.text.toLowerCase().includes(args.text.toLowerCase()));
+      run: async (args, ctx) => {
+        const problem = forgetProblem(args.text);
+        if (problem) return problem;
+        const named = store.memory.list(bot.id).filter((note) => noteMentions(note.text, args.text));
+        // A note the user pinned is theirs to remove, not the bot's.
+        const matches = named.filter((note) => !note.pinned);
+        const pinned = named.length - matches.length;
+        const kept =
+          pinned > 0 ? ` ${pinned} pinned note(s) matched too; only the user can remove those.` : "";
+        if (matches.length === 0) return `No matching notes.${kept}`;
+        // Many notes at once is more likely a mistake than a wish: the user sees them and decides.
+        if (matches.length > FORGET_WITHOUT_ASKING) {
+          // A racer works with nobody watching: a question would wait for ever while it holds the model.
+          if (info.unattended)
+            return `${matches.length} notes match, and deleting more than ${FORGET_WITHOUT_ASKING} needs the user's say-so, which can't be asked for here. Name the note more exactly.`;
+          const answer = await ctx.ask(
+            `Delete these ${matches.length} memory notes?\n${matches.map((note) => `- ${note.text.slice(0, 120)}`).join("\n")}`,
+            { options: ["Delete them", "Keep them"] },
+          );
+          if (!/^delete/i.test(answer.trim()))
+            return `The user kept the ${matches.length} notes: nothing was deleted.`;
+        }
         for (const note of matches) store.memory.delete(note.id);
-        if (matches.length) publishMemory();
-        return matches.length ? `Forgot ${matches.length} note(s).` : "No matching notes.";
+        publishMemory();
+        return `Forgot ${matches.length} note(s).${kept}`;
       },
     }),
   ]);
@@ -274,7 +327,17 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services) {
 
   app.get<{ Params: { id: string } }>("/api/bots/:id/memory", async (request, reply) => {
     const botId = botParam(request.params.id, reply);
-    return botId ? { notes: store.memory.list(botId) } : reply;
+    if (!botId) return reply;
+    const notes = store.memory.list(botId);
+    // What the bot sees: the panel greys out the notes that don't fit the prompt any more, rather than letting them be
+    // ignored unseen, and says when the pinned notes alone are more than the room for memory.
+    const sent = notesForPrompt(notes, memoryTokensFor(services, store.bots.get(botId)!));
+    return {
+      notes,
+      notSent: sent.left,
+      sentIds: sent.notes.map((note) => note.id),
+      pinnedOver: sent.pinnedOver,
+    };
   });
 
   app.post<{ Params: { id: string } }>("/api/bots/:id/memory", async (request, reply) => {
@@ -305,10 +368,23 @@ export function registerTeamRoutes(app: FastifyInstance, services: Services) {
   });
 
   app.patch<{ Params: { noteId: string } }>("/api/memory/:noteId", async (request, reply) => {
-    const body = parse(MemoryInput, request.body, reply);
+    const body = parse(UpdateMemoryInput, request.body, reply);
     if (!body) return reply;
-    const note = store.memory.update(request.params.noteId, body.text);
-    if (!note) return fail(reply, 404, "not_found", "No note has this id.");
+    const current = store.memory.get(request.params.noteId);
+    if (!current) return fail(reply, 404, "not_found", "No note has this id.");
+    if (body.pinned && !current.pinned) {
+      const pinned = store.memory.list(current.botId).filter((note) => note.pinned).length;
+      if (pinned >= MAX_PINNED_NOTES)
+        return fail(
+          reply,
+          409,
+          "too_many_pinned",
+          `At most ${MAX_PINNED_NOTES} notes can be pinned. Unpin one first.`,
+        );
+    }
+    let note = current;
+    if (body.text !== undefined) note = store.memory.update(note.id, body.text) ?? note;
+    if (body.pinned !== undefined) note = store.memory.pin(note.id, body.pinned) ?? note;
     memoryChanged();
     return { note };
   });

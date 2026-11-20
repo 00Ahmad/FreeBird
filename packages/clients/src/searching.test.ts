@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { isProviderList, mayRead, pickPages } from "./leads";
 import { emptyOffer, mergeOffer } from "./profile";
 import { isUkArea, placeOf, placesIn, servesAnywhere } from "./region";
-import { signalSearches } from "./searches";
+import { allSignalSearches, signalSearches } from "./searches";
 
 const NOW = new Date("2026-11-14T12:00:00Z");
 
@@ -30,6 +30,19 @@ describe("searches built from signs", () => {
     const first = signalSearches(profile, ["signs"], 0, NOW).map((s) => s.query);
     const second = signalSearches(profile, ["signs"], 1, NOW).map((s) => s.query);
     expect(second.some((q) => first.includes(q))).toBe(false);
+  });
+
+  it("cover every place and industry, not only the first (2.3)", () => {
+    const wide = mergeOffer(profile, { areas: ["Leeds", "York"], industries: ["restaurants", "hotels"] });
+    const all = allSignalSearches(wide, ["asking", "signs"], NOW).map((s) => s.query);
+    expect(all.some((q) => q.includes("York"))).toBe(true);
+    expect(all.some((q) => q.includes("hotels"))).toBe(true);
+    // The first searches of each sign come first, for each place in turn.
+    expect(all[0]).toBe('"looking for a payroll provider" Leeds');
+    expect(all.indexOf('"looking for a payroll provider" York')).toBeLessThan(
+      all.indexOf('"recommend a payroll provider" Leeds'),
+    );
+    expect(new Set(all).size).toBe(all.length);
   });
 });
 

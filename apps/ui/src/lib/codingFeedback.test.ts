@@ -210,6 +210,19 @@ describe("diagram marks", () => {
     ]);
   });
 
+  it("ticks a connection with no card of its own once every file it links is done", () => {
+    const marks = diagramMarks(
+      project({
+        status: "developing",
+        nodes: [node("a", "src/a.ts"), node("b", "src/b.ts"), node("c", "src/c.ts")],
+        edges: [edge("x", ["a", "b"]), edge("y", ["b", "c"])],
+        cards: [fileCard("a", "done"), fileCard("b", "done"), fileCard("c", "qa")],
+      }),
+    );
+    expect(marks.get("x")).toMatchObject({ done: true, column: "done" });
+    expect(marks.has("y")).toBe(false);
+  });
+
   it("rings the card being worked on while the team is busy", () => {
     const marks = diagramMarks(sample({ active: { role: "qa", cardId: "card-d" } }));
     expect(marks.get("a")!.working).toBe(true); // in progress

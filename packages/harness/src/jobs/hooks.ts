@@ -2,10 +2,14 @@ import type { Message, Thread } from "@mrog/shared";
 import type { ToolSpec } from "@mrog/tools";
 
 import type { Services } from "../services";
+import { checkerNudge, checkerSteer } from "../teams/checker-nudge";
 import { ROLES } from "./roles";
 import type { RoleRunner } from "./run-role";
 import type { JobTeam } from "./team";
 import { roleTool } from "./tools";
+
+/** Said once to a Checker that is ending its turn without having called finish_job. */
+export const CHECKER_NUDGE = checkerNudge("finish_job");
 
 /** The most model rounds a role's turn gets: each has one tool to call (the Visual helper clicks around). */
 const MAX_STEPS = { interviewer: 4, searcher: 4, checker: 4, visual: 15 } as const;
@@ -41,7 +45,14 @@ export function installJobHooks(
     if (!found) return options;
     // One page or one reply per turn: no self-check pass, no thinking before each move (it doubles a turn's time).
     const plain = { ...options, selfCheck: false, stepLimitNote: false, maxSteps: MAX_STEPS[found.role] };
-    return found.role === "visual" ? plain : { ...plain, think: false, thinkOff: true };
+    if (found.role === "visual") return plain;
+    const capture = roles.captureOf(bot.id);
+    // A small model often writes its report as text and stops: told once, in the same turn, to call its tool.
+    const steer =
+      found.role === "checker" && capture
+        ? { steer: checkerSteer("finish_job", () => !!capture.result) }
+        : {};
+    return { ...plain, think: false, thinkOff: true, ...steer };
   };
 
   // The lines every bot gets about a checklist and memory don't fit a role with one tool.

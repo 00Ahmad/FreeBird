@@ -83,10 +83,10 @@ describe("a Coding Bot's loop", () => {
     expect(plan.edges).toEqual([
       { id: "e1", files: ["n2", "n1"], description: "main imports greet from util" },
     ]);
+    // A card per file; the connection is in the plan, and each file card checks its side of it.
     expect(plan.cards.map((c) => [c.id, c.kind, c.column])).toEqual([
       ["card_n1", "file", "todo"],
       ["card_n2", "file", "todo"],
-      ["card_e1", "connector", "todo"],
     ]);
     // Nothing is written before the plan is approved.
     expect(existsSync(join(out, "src", "util.ts"))).toBe(false);
@@ -106,18 +106,23 @@ describe("a Coding Bot's loop", () => {
       ["developer", 1, "Did src/util.ts"],
     ]);
 
-    // Files first in the planner's order, a connection only after its files, and the fixed file once more.
+    // Files in the planner's order, and the fixed file once more.
     const developed = turnsOf(team, "developer");
     const keys = [...new Set(developed.map((s) => /^(?:File|Connection): (.+)$/m.exec(s.task)![1]))];
-    expect(keys).toEqual(["src/util.ts", "src/main.ts", "main imports greet from util"]);
+    expect(keys).toEqual(["src/util.ts", "src/main.ts"]);
+    // Each file card is told its connections, and to use the other file's exact names.
+    const main = developed.find((s) => s.task.includes("File: src/main.ts"))!;
+    expect(main.task).toContain("main imports greet from util");
+    expect(main.task).toContain("use exactly the names the other files have");
     // The fix gets QA's comment, and the message stands on its own: the brief, the card, the folder.
     const fix = developed.findLast((s) => s.task.includes("File: src/util.ts"))!;
     expect(fix.task).toContain("QA (round 1): util is missing the greet export");
     expect(fix.task).toContain("Build a greeter");
     expect(fix.task).toContain(out);
-    // The connection waited in round 1, because QA failed a file it links; both are reviewed together in round 2.
     const reviewed = turnsOf(team, "qa").map((s) => /^(?:File|Connection): (.+)$/m.exec(s.task)![1]);
-    expect(reviewed).toEqual(["src/util.ts", "src/main.ts", "src/util.ts", "main imports greet from util"]);
+    expect(reviewed).toEqual(["src/util.ts", "src/main.ts", "src/util.ts"]);
+    // QA checks each file's connections as part of its card.
+    expect(turnsOf(team, "qa")[1]!.task).toContain("Check its connections too");
 
     // Every turn stands on its own: the model is sent the one task and nothing from earlier turns.
     for (const role of ["planner", "developer", "qa"] as const)
@@ -135,7 +140,7 @@ describe("a Coding Bot's loop", () => {
     // The chat tells the story, and the project was published after every change.
     const texts = chat(h, bot.threadId).map((m) => messageText(m));
     expect(texts.some((t) => t.startsWith("Plan ready: 2 files and 1 connections."))).toBe(true);
-    expect(texts.some((t) => t.startsWith("Done: all 3 cards passed QA."))).toBe(true);
+    expect(texts.some((t) => t.startsWith("Done: all 2 cards passed QA."))).toBe(true);
     expect(published.length).toBeGreaterThan(10);
     expect(new Set(published.map((p) => p.status))).toContain("awaiting_approval");
   });
@@ -156,7 +161,7 @@ describe("a Coding Bot's loop", () => {
     const actives = published.flatMap((p) => (p.active ? [`${p.active.role}:${p.active.cardId}`] : []));
     expect(actives).toContain("planner:null");
     expect(actives).toContain("developer:card_n1");
-    expect(actives).toContain("qa:card_e1");
+    expect(actives).toContain("qa:card_n2");
     // Cleared when each turn ends, and when the project is done.
     expect(done.active).toBeNull();
     const lines = done.log!.map((l) => l.text);
@@ -251,7 +256,7 @@ describe("a Coding Bot's loop", () => {
     expect((await post(h, `/api/bots/${bot.id}/coding/approve`)).statusCode).toBe(409);
   });
 
-  it("stops at needs_you when the round limit is reached, and continues after the limit is raised", async () => {
+  it("sets a card aside when it used its rounds, waits for you, and continues after the limit is raised", async () => {
     const team = codingTeam({
       plans: [{ tool: ONE_FILE }],
       review: () => ({ pass: false, comment: "still wrong" }),
@@ -266,7 +271,7 @@ describe("a Coding Bot's loop", () => {
     expect(
       chat(h, bot.threadId)
         .map(messageText)
-        .some((t) => t.startsWith("I stopped after round 2 of 2.")),
+        .some((t) => t.startsWith("I set aside the card that failed 2 times.")),
     ).toBe(true);
 
     // Resuming without raising the limit changes nothing.
@@ -354,10 +359,10 @@ describe("a Coding Bot's loop", () => {
     await until(h, bot.id, (p) => p.active?.role === "developer");
     expect(getProject(h, bot.id).cards[0]!.column).toBe("in_progress");
 
-    // Typing while the team works gets the status, not a plan change.
+    // Typing while the team works gets the status, not a plan change, and how to pass a note on to a card.
     await type(h, bot, "actually, make it a poem");
     expect(messageText(chat(h, bot.threadId).at(-1)!)).toBe(
-      "The team is working on round 1 of 5; stop it first to change the plan.",
+      "The team is working on round 1 of 5; stop it first to change the plan. To pass something on to the Developer, name the file it's about (like app.js, or app.js:12 with the error).",
     );
 
     const stopping = post(h, `/api/bots/${bot.id}/coding/stop`);
@@ -654,8 +659,11 @@ describe("approval cards from the team", () => {
       review: () => ({ pass: true, command: "echo hi" }),
     });
     h = await startTeam(team);
-    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
+    // Auto-approve off: with it on, a routine command like this one runs without a card.
+    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: false });
     await type(h, bot, "Make a note");
+    await until(h, bot.id, (p) => p.status === "awaiting_approval");
+    await post(h, `/api/bots/${bot.id}/coding/approve`);
     const { message } = await cardIn(h, bot.threadId);
     await post(h, `/api/bots/${bot.id}/coding/stop`);
     const closed = chat(h, bot.threadId).find((m) => m.id === message.id)!;

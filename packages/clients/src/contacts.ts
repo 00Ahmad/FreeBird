@@ -65,10 +65,19 @@ export function isBusinessInbox(local: string, domain: string): boolean {
   return !FREE_EMAIL_DOMAINS.has(domain.toLowerCase()) && BUSINESS_INBOXES.test(local.toLowerCase());
 }
 
-/** The company-level contact routes on a page: at most one contact page, two inboxes and one phone line. */
-export function findContacts(page: PageRead): ContactRoute[] {
+/** Whether an email's domain is this company's: the same domain, or one inside the other (mail.brightside.co.uk). */
+const ownDomain = (domain: string, own: readonly string[]) =>
+  own.some((d) => d && (domain === d || domain.endsWith(`.${d}`) || d.endsWith(`.${domain}`)));
+
+/**
+ * The company-level contact routes on a page: at most one contact page, two inboxes and one phone line. An inbox is
+ * kept only on the site's own domain (or `domain`, the company's known one): a footer's "Site by Pixel Agency
+ * hello@pixelagency.com" is the web designer's, not the company's (1.6).
+ */
+export function findContacts(page: PageRead, domain: string | null = null): ContactRoute[] {
   const routes: ContactRoute[] = [];
   const host = hostOf(page.url);
+  const own = [host, domain?.toLowerCase().replace(/^www\./, "") ?? ""];
   const link = page.links.find(
     (l) => hostOf(l.url) === host && (CONTACT_PAGE.test(pathOf(l.url)) || CONTACT_WORDS.test(l.text.trim())),
   );
@@ -78,7 +87,13 @@ export function findContacts(page: PageRead): ContactRoute[] {
   const inboxes = new Set<string>();
   for (const m of page.text.matchAll(EMAIL)) {
     const address = `${m[1]}@${m[2]}`.toLowerCase();
-    if (inboxes.size < 2 && isBusinessInbox(m[1]!, m[2]!) && !inboxes.has(address)) inboxes.add(address);
+    if (
+      inboxes.size < 2 &&
+      isBusinessInbox(m[1]!, m[2]!) &&
+      ownDomain(m[2]!.toLowerCase(), own) &&
+      !inboxes.has(address)
+    )
+      inboxes.add(address);
   }
   for (const address of inboxes) routes.push({ kind: "email", value: address, url: page.url });
   for (const m of page.text.matchAll(PHONE)) {

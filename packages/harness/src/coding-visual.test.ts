@@ -101,6 +101,8 @@ describe("Visual QA in the Coding Bot loop", () => {
   it("doesn't take a verdict on an app QA never opened", async () => {
     const team = codingTeam({ plans: [{ tool: PAGE }], visualCheck: () => ({ start: false, ok: true }) });
     h = await startTeam(team);
+    // The quick check after each development pass opens the page itself.
+    hiddenBrowser(h);
     const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true, visualQa: true });
     await type(h, bot, "A task list");
     const failed = await until(h, bot.id, (p) => p.status === "error", 30_000);
@@ -167,12 +169,11 @@ describe.skipIf(!existsSync(EDGE))("Visual QA in the loop, in a real browser", (
   it("catches a button that does nothing even when QA says all good, and passes once it is fixed", async () => {
     const team = codingTeam({
       plans: [{ tool: PAGE }],
+      // The dead button is on the page, and fixed in the script the page loads: both cards hear about it.
       develop: (card, attempt) =>
-        card.kind === "file"
-          ? { write: card.key === "index.html" ? BROKEN_PAGE : BROKEN_SCRIPT }
-          : attempt > 1
-            ? { extras: [{ path: "app.js", content: FIXED_SCRIPT }] }
-            : {},
+        card.key === "index.html"
+          ? { write: BROKEN_PAGE }
+          : { write: attempt > 1 ? FIXED_SCRIPT : BROKEN_SCRIPT },
       // QA never spots it itself: only the automatic part of Visual QA does.
       visualCheck: () => ({ ok: true }),
     });
@@ -182,12 +183,56 @@ describe.skipIf(!existsSync(EDGE))("Visual QA in the loop, in a real browser", (
     await type(h, bot, "A task list");
     const done = await until(h, bot.id, (p) => p.status === "done", 90_000);
 
-    const connection = done.cards.find((c) => c.title === "index.html ↔ app.js")!;
-    const found = connection.comments.find((c) => c.text.includes("does nothing when clicked"))!;
-    expect(found).toMatchObject({ author: "qa", kind: "check" });
+    // The script, where the fix is written, was told; so was the page the button is on.
+    const script = done.cards.find((c) => c.title === "app.js")!;
+    const found = script.comments.find((c) => c.text.includes("does nothing when clicked"))!;
+    expect(
+      done.cards.find((c) => c.title === "index.html")!.comments.some((c) => c.text.includes("does nothing")),
+    ).toBe(true);
+    expect(found).toMatchObject({ author: "qa", kind: "check", round: 1 });
     expect(found.text).toContain("Visual QA: “Add” does nothing when clicked");
-    expect(visualChecksOf(team).length).toBe(2);
-    // The first Visual QA turn was told what the automatic checks found.
-    expect(team.seen.find((s) => s.visual && s.lastTool.includes("does nothing"))).toBeDefined();
+    // Caught by the quick check after the first development pass, before any card had passed: the full Visual QA at
+    // the end then found the page working, once.
+    const log = done.log!.map((l) => l.text);
+    expect(log).toContainEqual(expect.stringContaining("Visual QA's quick check sent app.js back"));
+    expect(visualChecksOf(team).length).toBe(1);
+  }, 120_000);
+
+  it("has the Developer fix a page that crashes on load before QA sees it", async () => {
+    const team = codingTeam({
+      plans: [{ tool: PAGE }],
+      // The crash is in the script the page loads: its own card gets it, and the fix rewrites the script.
+      develop: (card, attempt) =>
+        card.key === "index.html"
+          ? { write: BROKEN_PAGE }
+          : { write: attempt > 1 ? FIXED_SCRIPT : CRASHING_SCRIPT },
+      // QA passes every card by reading it: only opening the page shows the crash.
+      visualCheck: () => ({ ok: true }),
+    });
+    h = await startTeam(team);
+    h.store.settings.set("browser", { ...DEFAULT_BROWSER_SETTINGS, show: false, profiles: "shared" });
+    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true, visualQa: true });
+    await type(h, bot, "A task list");
+    const done = await until(h, bot.id, (p) => p.status === "done", 90_000);
+
+    // finish_card opened the page, read the crash, and answered "Not finished" with the exact error.
+    const told = team.seen.filter((s) => s.role === "developer").map((s) => s.lastTool);
+    expect(told).toContainEqual(
+      expect.stringMatching(/^Not finished: the checks of app\.js found a problem/),
+    );
+    expect(told).toContainEqual(
+      expect.stringContaining("Cannot read properties of null (reading 'addEventListener')"),
+    );
+    // The Developer fixed it on its own card: QA never had to send it back.
+    expect(done.cards.flatMap((c) => c.comments).some((c) => c.author === "qa" && c.kind === "check")).toBe(
+      false,
+    );
+    expect(done.log!.map((l) => l.text)).toContain(
+      "Visual QA's quick check: the app opened and the automatic checks found nothing",
+    );
   }, 120_000);
 });
+
+// Looks up a button that isn't on the page and uses it at once: the page dies on load, as in a real project. By class,
+// which the code check doesn't look into, so only opening the page shows it.
+const CRASHING_SCRIPT = `document.querySelector(".save-button").addEventListener("click", () => {});\n`;

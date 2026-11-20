@@ -2,7 +2,7 @@ import { fold } from "@mrog/jobs";
 import type { LeadEvidence } from "@mrog/shared";
 
 import { anyIndustry } from "../profile";
-import { isUkArea, placeOf } from "../region";
+import { isUkArea, placeOf, placesIn } from "../region";
 import { record, type Register, type RegisterRecord, type RegisterRequest } from "./types";
 
 /**
@@ -38,17 +38,25 @@ export const foodHygiene: Register = {
     placeOf(profile.areas) !== "" &&
     !anyIndustry(profile) &&
     profile.industries.some((i) => FOOD.test(fold(i))),
-  queries: (profile) => [
-    {
-      words: profile.industries,
-      place: placeOf(profile.areas),
-      sicCodes: [],
-      incorporatedFrom: null,
-      incorporatedTo: null,
-    },
-  ],
+  // Each place you serve, not only the first (2.3); at most a few, each paged on its own.
+  queries: (profile) =>
+    placesIn(profile.areas)
+      .slice(0, 3)
+      .map((place) => ({
+        words: profile.industries,
+        place,
+        sicCodes: [],
+        incorporatedFrom: null,
+        incorporatedTo: null,
+      })),
+  // `pageNumber` and `pageSize`, checked against a live answer (2026-11-20): its `meta` gives `pageNumber` and
+  // `totalPages`.
   request(query) {
-    const params = new URLSearchParams({ address: query.place, pageSize: "50", pageNumber: "1" });
+    const params = new URLSearchParams({
+      address: query.place,
+      pageSize: "50",
+      pageNumber: String(query.page ?? 1),
+    });
     // Only restaurants and cafés by type; other food businesses are picked from the answer by their type's name.
     if (query.words.every((w) => /restaurant|cafe|café/.test(fold(w))))
       params.set("businessTypeId", RESTAURANTS);
@@ -57,6 +65,11 @@ export const foodHygiene: Register = {
       method: "GET",
       headers: { accept: "application/json", "x-api-version": "2" },
     };
+  },
+  isLastPage(json, query) {
+    const meta = (json as { meta?: { pageNumber?: number; totalPages?: number } })?.meta;
+    if (!meta?.totalPages) return true;
+    return (meta.pageNumber ?? query.page ?? 1) >= meta.totalPages;
   },
   parse(json) {
     const list = (json as { establishments?: unknown })?.establishments;

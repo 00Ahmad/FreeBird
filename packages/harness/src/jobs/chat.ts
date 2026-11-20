@@ -1,41 +1,17 @@
-import { missingForApproval } from "@mrog/jobs";
+import { describeChange, missingForApproval, nextInterviewState, skipsQuestion } from "@mrog/jobs";
 import { MAX_JOB_TARGET, messageText, type Message } from "@mrog/shared";
 
 import type { Services } from "../services";
+import { lastQuestion } from "../teams/last-question";
+import { rescoreBoard } from "./board";
 import { interviewTask, saveTask } from "./roles/interviewer";
 import { openPhase } from "./phase";
+import { countIn, scanIntent, SCAN_OR_PROFILE } from "./scan-words";
 import { Halt, type RoleRunner } from "./run-role";
 import type { JobState } from "./state";
 
-const NUMBER_WORDS: Record<string, number> = {
-  one: 1,
-  two: 2,
-  three: 3,
-  four: 4,
-  five: 5,
-  six: 6,
-  seven: 7,
-  eight: 8,
-  nine: 9,
-  ten: 10,
-  fifteen: 15,
-  twenty: 20,
-  thirty: 30,
-  forty: 40,
-  fifty: 50,
-};
+export { asksForScan, countIn } from "./scan-words";
 
-/** How many jobs a message asks for (a number from 1 to MAX_JOB_TARGET, in digits or a common word), or null. */
-export function countIn(text: string): number | null {
-  const digits = /\b(\d{1,3})\b/.exec(text);
-  const word =
-    /\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|fifty)\b/i.exec(text);
-  const n = digits ? Number(digits[1]) : word ? NUMBER_WORDS[word[1]!.toLowerCase()]! : null;
-  return n !== null && n >= 1 && n <= MAX_JOB_TARGET ? n : null;
-}
-
-/** Whether a message asks for a scan ("search", "find me jobs", "scan"). */
-export const asksForScan = (text: string) => /\b(scan|search|find|look for|hunt)\b/i.test(text);
 const asksToStop = (text: string) => /^\s*(stop|cancel|halt)\b/i.test(text);
 
 export interface ChatDeps {
@@ -82,19 +58,24 @@ export function createChat(deps: ChatDeps) {
     try {
       const project = state.need(botId);
       const first = project.log.length <= 1 && project.status === "interview";
+      // The question being answered, and the topics asked or skipped so far: a turn reads nothing earlier.
+      const lastAsked = lastQuestion(services, botId);
+      const topics = nextInterviewState(project.interview, lastAsked, said);
+      state.change(botId, (p) => void (p.interview = topics));
       const reply = await roles.run(
         botId,
         "interviewer",
-        interviewTask(project.profile, said, first),
+        interviewTask(project.profile, said, first, { lastAsked, ...topics }),
         controller.signal,
         {
-          capture: { base: project.profile },
+          capture: { base: project.profile, said },
           ...(phase ? { phase } : {}),
         },
       );
       // A reply that saved nothing gets one more, short turn that only saves.
       const capture = reply.capture;
-      if (!capture.profile && !reply.error && said.trim().length > 0) {
+      // A skip has nothing to save: no second turn asking to save it.
+      if (!capture.profile && !reply.error && said.trim().length > 0 && !skipsQuestion(said)) {
         phase?.say("Saving what you told me…");
         await roles.run(botId, "interviewer", saveTask(project.profile, said), controller.signal, {
           capture,
@@ -102,11 +83,16 @@ export function createChat(deps: ChatDeps) {
         });
       }
       const profile = capture.profile;
+      // What changed, said plainly, so a wrong save is seen at once.
+      const changes = profile ? describeChange(project.profile, profile) : [];
       const after = state.change(botId, (p) => {
         if (profile) {
           p.profile = profile;
-          state.logLine(p, "Profile updated");
+          rescoreBoard(p);
+          state.logLine(p, changes.length > 0 ? `Profile: ${changes.join("; ")}` : "Profile updated");
         }
+        if (capture.dropped?.length)
+          state.logLine(p, `Not saved, because you didn't say it: ${capture.dropped.join("; ")}`);
         if (p.status === "interview" && missingForApproval(p.profile).length === 0) {
           p.status = "awaiting_profile";
           p.note = "Your profile is ready: approve it on the profile card to start searching.";
@@ -119,7 +105,8 @@ export function createChat(deps: ChatDeps) {
         after?.status === "awaiting_profile"
           ? "\n\nYour profile has what a search needs: approve it on the profile card when you're happy with it."
           : "";
-      phase?.close(`${words}${ready}`);
+      const saved = changes.length > 0 ? `\n\n_Saved: ${changes.join("; ")}._` : "";
+      phase?.close(`${words}${saved}${ready}`);
     } catch (error) {
       phase?.close(
         error instanceof Halt ? "Stopped." : `Something went wrong: ${(error as Error).message}`,
@@ -150,9 +137,16 @@ export function createChat(deps: ChatDeps) {
       return;
     }
     if (project.status === "ready" || project.status === "error") {
-      const count = countIn(text);
+      const count = countIn(text, { asked: project.askingCount });
       if (project.askingCount && count !== null) return deps.startScan(botId, count);
-      if (asksForScan(text)) return count !== null ? deps.startScan(botId, count) : askCount(botId);
+      const intent = scanIntent(text);
+      if (intent === "scan") return count !== null ? deps.startScan(botId, count) : askCount(botId);
+      // "Change my search to include Canada", "find jobs paying 40,000": a scan, or a change to the profile?
+      if (intent === "unsure") {
+        if (project.askingCount) state.change(botId, (p) => void (p.askingCount = false));
+        state.say(botId, SCAN_OR_PROFILE);
+        return;
+      }
       if (project.askingCount) state.change(botId, (p) => void (p.askingCount = false));
     }
     void interview(botId, text).catch(() => undefined);

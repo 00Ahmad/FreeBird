@@ -48,7 +48,7 @@ const WORKPLACE_WORDS: Record<string, RegExp> = {
 };
 
 /** The workplace a value names, or null. */
-function workplaceOf(value: string): string | null {
+export function workplaceOf(value: string): string | null {
   const folded = fold(value);
   if (/hybrid/.test(folded)) return "hybrid";
   if (/remote|home/.test(folded)) return "remote";

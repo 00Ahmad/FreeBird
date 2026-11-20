@@ -6,7 +6,12 @@ import {
   type Register,
   type RegisterRecord,
 } from "@mrog/clients";
-import { MAX_LOOKALIKE_CLIENTS, type ListEntry, type LookalikeProfile } from "@mrog/shared";
+import {
+  MAX_LOOKALIKE_CLIENTS,
+  type ListEntry,
+  type LookalikeMatch,
+  type LookalikeProfile,
+} from "@mrog/shared";
 
 import type { Registers } from "./registers";
 
@@ -50,11 +55,19 @@ export async function learnLookalikes(
   text: string,
   now: Date,
   signal: AbortSignal,
-): Promise<{ clients: ListEntry[]; profile: LookalikeProfile | null; note: string }> {
+): Promise<{
+  clients: ListEntry[];
+  matched: LookalikeMatch[];
+  profile: LookalikeProfile | null;
+  note: string;
+}> {
   const clients = parseEntries(text).slice(0, MAX_LOOKALIKE_CLIENTS);
   const seeds: LookalikeSeed[] = [];
+  const matched: LookalikeMatch[] = [];
   for (const client of clients) {
+    // By name, checked by code: the first search result is often another company sharing a word (1.5).
     const record = await registers.findCompany(client.name, signal);
+    if (record) matched.push({ client: client.name, record: record.name, id: record.id });
     if (record)
       seeds.push({
         sicCodes: record.sicCodes,
@@ -64,9 +77,10 @@ export async function learnLookalikes(
       });
   }
   const profile = lookalikeProfile(seeds, now);
-  if ("error" in profile) return { clients, profile: null, note: profile.error };
+  if ("error" in profile) return { clients, matched, profile: null, note: profile.error };
   return {
     clients,
+    matched,
     profile,
     note: `Found ${seeds.length} of your ${clients.length} clients in Companies House.`,
   };

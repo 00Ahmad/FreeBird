@@ -69,7 +69,7 @@ export function siteOf(raw: string): string {
 
 /** Job systems that host many companies on one address, each under its own first path part. */
 const SHARED_HOSTS =
-  /^(boards|job-boards)(\.eu)?\.greenhouse\.io$|^jobs(\.eu)?\.lever\.co$|^jobs\.ashbyhq\.com$|^apply\.workable\.com$/;
+  /^(boards|job-boards)(\.eu)?\.greenhouse\.io$|^jobs(\.eu)?\.lever\.co$|^jobs\.ashbyhq\.com$|^apply\.workable\.com$|^(jobs|careers)\.smartrecruiters\.com$/;
 
 /**
  * One employer's site, for telling which site keeps failing: the host, plus the company's part of the path on a job

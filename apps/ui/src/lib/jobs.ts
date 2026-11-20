@@ -24,12 +24,45 @@ export const COLUMN_LABELS: Record<JobColumn, string> = {
   not_for_me: "Not for me",
 };
 
-/** The board's columns in order, each with its cards, best match first. */
-export function boardColumns(cards: readonly JobCard[]): { column: JobColumn; cards: JobCard[] }[] {
+export type BoardSort = "best" | "newest";
+
+export interface BoardView {
+  sort?: BoardSort;
+  /** Only the jobs the latest scan found. */
+  onlyNew?: boolean;
+  latestScan?: number | null;
+}
+
+const SORTS: Record<BoardSort, (a: JobCard, b: JobCard) => number> = {
+  best: (a, b) => b.score - a.score,
+  newest: (a, b) => b.foundAt.localeCompare(a.foundAt) || b.score - a.score,
+};
+
+/** The board's columns in order, each with its cards, best match first (or newest first). */
+export function boardColumns(
+  cards: readonly JobCard[],
+  view: BoardView = {},
+): { column: JobColumn; cards: JobCard[] }[] {
+  const shown = view.onlyNew ? cards.filter((card) => card.scan === view.latestScan) : cards;
   return JOB_COLUMNS.map((column) => ({
     column,
-    cards: cards.filter((card) => card.column === column).toSorted((a, b) => b.score - a.score),
+    cards: shown.filter((card) => card.column === column).toSorted(SORTS[view.sort ?? "best"]),
   }));
+}
+
+/** Found by the latest scan. */
+export const isNew = (card: JobCard, project: JobProject) =>
+  !!project.scan && card.scan === project.scan.number;
+
+/** "14 Nov": the day a job was found. */
+export const foundOn = (card: JobCard) =>
+  new Date(card.foundAt).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+
+/** What a card says when requirements were added to your profile after the job was read. */
+export function uncheckedLine(card: JobCard): string | null {
+  if (card.unchecked <= 0) return null;
+  const many = card.unchecked > 1;
+  return `${card.unchecked} newer requirement${many ? "s" : ""} ${many ? "weren't" : "wasn't"} checked on this job: it was read before you added ${many ? "them" : "it"}.`;
 }
 
 export const fact = (card: JobCard, name: JobFactName) =>
@@ -55,6 +88,8 @@ const STATUS_LINES: Record<JobStatus, string> = {
 /** One line about what the bot is doing, shown above the board. */
 export function statusLine(project: JobProject): string {
   const scan = project.scan;
+  // Busy but not scanning: checking whether the board's jobs are still open.
+  if (project.status === "scanning" && project.note) return project.note;
   if (project.status === "scanning" && scan)
     return `Scan ${scan.number}: ${scan.found} of ${scan.target} new jobs (${scan.pagesRead} pages read)`;
   if (project.status === "waiting_for_you" && project.handoff) return project.handoff.reason;

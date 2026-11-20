@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { mergeProfile } from "@mrog/jobs";
+import { addToProfile, keepWhatWasSaid, mergeProfile, PROFILE_LISTS, type ProfileRemovals } from "@mrog/jobs";
 import { JobProfile, Workplace, type UpdateJobProfileInput } from "@mrog/shared";
 import { defineTool, safe, type ToolSpec } from "@mrog/tools";
 
@@ -24,6 +24,10 @@ export interface Capture {
   /** The Interviewer: the profile it starts from, and the profile after its saves. */
   base?: JobProfile;
   profile?: JobProfile;
+  /** The Interviewer: what the user said this turn, which every saved list item and salary must be backed by. */
+  said?: string;
+  /** The Interviewer: what its saves left out because the user didn't say it. */
+  dropped?: string[];
   plan?: { searches: string[]; careerPages: string[] };
   result?: CheckerResult;
 }
@@ -49,21 +53,36 @@ const ProfileArgs = z.object({
   avoidCompanies: z.array(text(100)).max(50).optional(),
   languages: z.array(text(60)).max(10).optional(),
   experience: text(2000).optional(),
+  remove: z
+    .object(Object.fromEntries(PROFILE_LISTS.map((field) => [field, z.array(text(200)).max(20)])))
+    .partial()
+    .optional()
+    .describe('Items to take out of a list, by field (for example { mustHaves: ["Go"] })'),
 });
 
 export const saveProfileTool = (capture: Capture): ToolSpec =>
   defineTool({
     name: "save_profile",
     description:
-      "Save what the user told you about the job they want. Send only the fields that changed; a list field is sent whole (it replaces the list).",
+      "Save what the user told you about the job they want. Send only the fields that changed. For a list (titles, must-haves, deal-breakers…) send only the new items: they are added to the list. To take items out, name them under remove. Other fields replace what was there.",
     args: ProfileArgs,
     risk: () => safe("Save the job profile"),
     run: async (args) => {
       const base = capture.profile ?? capture.base ?? JobProfile.parse({});
+      const { remove, ...fields } = args;
+      // Only what the user said: a small model fills in a salary or a skill nobody mentioned.
+      const { change, dropped } = keepWhatWasSaid(fields as UpdateJobProfileInput, capture.said ?? "");
       try {
-        capture.profile = mergeProfile(base, args as UpdateJobProfileInput);
+        capture.profile = mergeProfile(
+          base,
+          addToProfile(base, change, remove as ProfileRemovals | undefined),
+        );
       } catch (error) {
         return `Not saved: ${(error as Error).message}. Fix the field and call save_profile again.`;
+      }
+      if (dropped.length > 0) {
+        capture.dropped = [...(capture.dropped ?? []), ...dropped];
+        return `Saved, except what the user didn't say: ${dropped.join("; ")}. Don't save those unless the user says them. Now ask the user your next questions in plain words.`;
       }
       return "Saved. Now ask the user your next questions in plain words.";
     },

@@ -368,3 +368,40 @@ describe("SVG file", () => {
     expect(tintHex("#16a34a", 0)).toBe("#ffffff");
   });
 });
+
+describe("done checks in the exports", () => {
+  const withChecks = () =>
+    sample({
+      nodes: [
+        {
+          ...nodes[0]!,
+          done: ["#list has items", 'type #task "Milk" then click #add -> #list contains "Milk"'],
+        },
+        ...nodes.slice(1),
+      ],
+    });
+
+  it("keeps them in the plan file, for the files that have them, and the server reads them back", () => {
+    const file = planToFile(withChecks());
+    expect(file.nodes[0]!.done).toEqual([
+      "#list has items",
+      'type #task "Milk" then click #add -> #list contains "Milk"',
+    ]);
+    expect(file.nodes[1]).not.toHaveProperty("done");
+    const read = validatePlan(file);
+    expect(read.ok && read.nodes[0]!.done).toEqual(file.nodes[0]!.done);
+  });
+
+  it("lists them under their file in the Markdown", () => {
+    expect(toMarkdown(withChecks())).toContain(
+      "- `src/main.py`: Starts the app.\n  - Done when: `#list has items`",
+    );
+  });
+
+  it("tells a flagship model the forms they can take", () => {
+    const text = planningPrompt("A to-do list");
+    expect(text).toContain('a "done" list');
+    expect(text).toContain('"#list has items"');
+    expect(text).toContain('"click #refresh -> #list changes"');
+  });
+});

@@ -74,6 +74,37 @@ describe("runTurn", () => {
     expect(provider.requests[0]?.messages[0]).toEqual({ role: "system", content: "You are a bot." });
   });
 
+  it("tells the sink each request's tokens as it ends, so a turn stopped later still knows what it spent", async () => {
+    const provider = scripted([
+      [{ type: "tool_call", call: { id: "c1", name: "echo", arguments: {} } }, done(10, 2)],
+      [{ type: "text", text: "Done" }, done(20, 3)],
+    ]);
+    const { sink } = recorder();
+    const spent: number[][] = [];
+    sink.usage = (used) => spent.push([used.inputTokens, used.outputTokens]);
+    const result = await runTurn({ ...base(provider, sink), tools: echoTools });
+    expect(spent).toEqual([
+      [10, 2],
+      [20, 3],
+    ]);
+    expect(result).toMatchObject({ usageReported: true, usage: { inputTokens: 30, outputTokens: 5 } });
+  });
+
+  it("says when no request reported its tokens, instead of passing zero off as a count", async () => {
+    const provider = scripted([
+      [
+        { type: "text", text: "Hi" },
+        { type: "done", finishReason: "stop", usage: null },
+      ],
+    ]);
+    const { sink } = recorder();
+    let told = 0;
+    sink.usage = () => (told += 1);
+    const result = await runTurn({ ...base(provider, sink), capabilities: ["completion"] });
+    expect(result).toMatchObject({ usageReported: false, usage: { inputTokens: 0, outputTokens: 0 } });
+    expect(told).toBe(0);
+  });
+
   it("runs native tool calls and feeds results back", async () => {
     const provider = scripted([
       [{ type: "tool_call", call: { id: "c1", name: "echo", arguments: { x: 1 } } }, done()],
@@ -158,6 +189,22 @@ describe("runTurn", () => {
       expect(provider.requests[3]?.messages.at(-1)?.content).toContain("same tool call with the same result");
       expect(log).toContain("text:It keeps returning the same thing.");
       expect(log.at(-1)).toContain("Stopped: the same step gave the same result 3 times");
+    });
+
+    it("ends the turn when it goes back and forth between the same two steps", async () => {
+      const provider = scripted([
+        call("a", { page: "one" }),
+        call("b", { page: "two" }),
+        call("c", { page: "one" }),
+        call("d", { page: "two" }),
+        call("e", { page: "one" }),
+        call("f", { page: "two" }),
+        [{ type: "text", text: "Going round in circles." }, done()],
+      ]);
+      const { sink } = recorder();
+      const result = await runTurn({ ...base(provider, sink), tools: echoTools, maxSteps: 25 });
+      expect(result.finishReason).toBe("no_progress");
+      expect(result.steps).toBe(6);
     });
 
     it("does not count calls whose results differ (scrolling, polling)", async () => {
@@ -632,6 +679,18 @@ describe("announced but not done", () => {
     expect(announcesMove("Let me open the first result")).toBe(true);
     expect(announcesMove("The battery is 5,500 mAh. I'll keep this in mind.")).toBe(false);
     expect(announcesMove("| Phone | Price |")).toBe(false);
+  });
+
+  it("doesn't take a finished answer that ends with an offer or a list for an unfinished one", async () => {
+    const { announcesMove } = await import("./turn");
+    for (const finished of [
+      "I checked both sites. Here is what I found:\n- Site A: £20\n- Site B: £25\nLet me know if you want more detail",
+      "Here are the results. Next, I recommend checking the pricing page:\n- Plan A\n- Plan B",
+      "All three prices are below. Let me know if you'd like a chart 🙂",
+      "The report is ready. I'd suggest reading the summary first",
+    ])
+      expect(announcesMove(finished)).toBe(false);
+    expect(announcesMove("Found the page.\nNow I'll open the pricing tab")).toBe(true);
   });
 
   it("asks once to carry on, then accepts the answer", async () => {

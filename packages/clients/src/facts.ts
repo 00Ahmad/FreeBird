@@ -1,6 +1,8 @@
 import { amounts, fold, onPage, words, MAX_VALUE_CHARS } from "@mrog/jobs";
 import { CLIENT_FACTS, type ClientFact, type ClientFactName } from "@mrog/shared";
 
+import { nameOnSite } from "./identity";
+import { sameCompany } from "./names";
 import { staffOf } from "./staff";
 
 /**
@@ -71,12 +73,32 @@ function says(
 /** A quote this short can stand as the value it says. */
 export const SHORT_QUOTE = 80;
 
+/** Labels a small model gives facts that are a field's name, never a company's. */
+const FIELD_LABEL =
+  /^(services?|products?|email|e-mail|phone|telephone|tel|mobile|address|contact( us| details)?|location|locations|about( us)?|menu|hours|opening hours|website|web|site|size|staff|team|industry|sector|price|prices|description|summary|name|company name|business|owner|founded|social|links?)$/;
+
+/** A page as the fact check sees it: its text, and its title and address when known. */
+export type FactPage = string | { text: string; title?: string; url?: string };
+
+/**
+ * Whether a fact's label looks like the company's name: not a field's name, and the page's own name (its title, or the
+ * name its address spells). "services" on a café's page was made the company before (1.3).
+ */
+function labelIsName(label: string, page: Exclude<FactPage, string>): boolean {
+  if (FIELD_LABEL.test(fold(label).trim())) return false;
+  const own = page.url ? nameOnSite({ url: page.url, text: page.text }) : null;
+  const title = page.title?.split(/\s[|–—-]\s|:\s/)[0] ?? "";
+  return sameCompany(label, title) || sameCompany(label, own);
+}
+
 /**
  * The Checker's facts as a small model really writes them, made regular before any check: a fact with a quote and no
  * value takes a short quote as its value ("company": quote "Mumtaz Leeds"), and a company's name used as the fact's
- * label ("Cinnamon Kitchen Leeds") is the company, when that name is on the page. Every result is still checked.
+ * label ("Cinnamon Kitchen Leeds") is the company, when that name is on the page and is the page's own name. Every
+ * result is still checked.
  */
-export function tidyClaims(page: string, claimed: ClaimedFact[]): ClaimedFact[] {
+export function tidyClaims(page: FactPage, claimed: ClaimedFact[]): ClaimedFact[] {
+  const whole = typeof page === "string" ? { text: page } : page;
   const known = new Set<string>(CLIENT_FACTS);
   const tidy = claimed.map((fact): ClaimedFact => {
     const name = fact.name.trim().toLowerCase();
@@ -86,7 +108,11 @@ export function tidyClaims(page: string, claimed: ClaimedFact[]): ClaimedFact[] 
   });
   const hasCompany = tidy.some((f) => f.name === "company" && f.value);
   const label = claimed.find(
-    (f) => !known.has(f.name.trim().toLowerCase()) && f.name.length <= SHORT_QUOTE && onPage(page, f.name),
+    (f) =>
+      !known.has(f.name.trim().toLowerCase()) &&
+      f.name.length <= SHORT_QUOTE &&
+      onPage(whole.text, f.name) &&
+      labelIsName(f.name, whole),
   );
   return hasCompany || !label
     ? tidy.filter((f) => known.has(f.name))
@@ -98,11 +124,11 @@ export function tidyClaims(page: string, claimed: ClaimedFact[]): ClaimedFact[] 
 
 /** Checks the Checker's facts against the page. A website needs no quote when it is the page's own address. */
 export function checkCompanyFacts(
-  page: { url: string; text: string },
+  page: { url: string; text: string; title?: string },
   claimed: ClaimedFact[],
 ): CheckedCompany {
   const byName = new Map<string, ClaimedFact>();
-  for (const fact of tidyClaims(page.text, claimed)) if (!byName.has(fact.name)) byName.set(fact.name, fact);
+  for (const fact of tidyClaims(page, claimed)) if (!byName.has(fact.name)) byName.set(fact.name, fact);
   const dropped: string[] = [];
   const facts = CLIENT_FACTS.map((name): ClientFact => {
     const fact = byName.get(name);

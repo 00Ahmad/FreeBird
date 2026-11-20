@@ -35,6 +35,7 @@ const bot = (over: Partial<Bot>): Bot => ({
   instructions: "",
   section: null,
   notifications: true,
+  approvalsWait: false,
   coordinator: false,
   parentId: null,
   temporary: false,

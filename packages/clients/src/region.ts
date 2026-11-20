@@ -11,6 +11,12 @@ const COUNTRY = /^(uk|u\.k\.|united kingdom|great britain|britain|england|scotla
 
 export const isUkArea = (areas: readonly string[]) => areas.some((area) => UK.test(fold(area)));
 
+/** Whether one word is a UK place's name on its own ("leeds", "yorkshire"). */
+export function isPlaceWord(word: string): boolean {
+  const folded = fold(word);
+  return UK.exec(folded)?.[0] === folded;
+}
+
 /**
  * The towns and regions in your areas, each part on its own and without a country ("Leeds, UK" → "Leeds";
  * "Leeds, West Yorkshire" → "Leeds", "West Yorkshire"); "remote" and whole countries are not places.

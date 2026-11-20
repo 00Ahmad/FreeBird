@@ -50,7 +50,15 @@ export function recordFacts(r: RegisterRecord): ClientFact[] {
 }
 
 export function leadRecord(r: RegisterRecord, label: string): LeadRecord {
-  return { register: r.register, id: r.id, url: r.url, label, deadline: r.deadline, status: r.status };
+  return {
+    register: r.register,
+    id: r.id,
+    url: r.url,
+    label,
+    deadline: r.deadline,
+    status: r.status,
+    incorporated: r.incorporated,
+  };
 }
 
 /** Signs a record itself shows: a tender is asking now; a company incorporated in the last year is new. */

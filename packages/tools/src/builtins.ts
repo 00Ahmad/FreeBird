@@ -58,27 +58,61 @@ const listFiles = defineTool({
   },
 });
 
+/** Longest file read_file or edit_file opens. */
+const MAX_OPEN_BYTES = MAX_READ_BYTES * 8;
+/** A line longer than this (a minified file) is cut in a line-by-line read; `from_char` reads the rest. */
+export const MAX_LINE_CHARS = 2_000;
+/** Characters one `from_char` read returns. */
+export const CHARS_PER_READ = 15_000;
+
+const tooLarge = (path: string, size: number) =>
+  `${path} is ${size} bytes, too large to open here (the limit is ${MAX_OPEN_BYTES} bytes). Use search_files to find the part you need, or a command.`;
+
 const readFileTool = defineTool({
   name: "read_file",
-  description: "Read a text file. Use offset/limit (in lines) for long files.",
+  description:
+    "Read a text file. Use offset/limit (in lines) for long files. For a file with very long lines (minified code), use from_char to read it by characters instead.",
   args: z.object({
     path: z.string().describe("File to read"),
     offset: z.number().int().min(1).default(1).describe("First line (1-based)"),
     limit: z.number().int().min(1).max(2000).default(400).describe("Number of lines"),
+    from_char: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(`Read ${CHARS_PER_READ} characters from this one (0 is the start), ignoring lines`),
   }),
   risk: (args, ctx) => fileRisk(ctx, args.path, "Read", false),
   async run(args, ctx) {
     const { abs } = resolvePath(ctx.workspace, args.path);
     const info = await stat(abs);
     if (info.isDirectory()) return `${args.path} is a folder. Use list_files.`;
-    if (info.size > MAX_READ_BYTES * 8) return `${args.path} is ${info.size} bytes, too large to read.`;
-    const lines = (await readFile(abs, "utf8")).split(/\r?\n/);
+    if (info.size > MAX_OPEN_BYTES) return tooLarge(args.path, info.size);
+    const text = await readFile(abs, "utf8");
+    if (args.from_char !== undefined) {
+      const end = Math.min(text.length, args.from_char + CHARS_PER_READ);
+      const part = text.slice(args.from_char, end);
+      const more =
+        end < text.length ? `\n…(${text.length} characters total; read more with from_char=${end})` : "";
+      return `(characters ${args.from_char} to ${end})\n${part}${more}`;
+    }
+    const lines = text.split(/\r?\n/);
     const slice = lines.slice(args.offset - 1, args.offset - 1 + args.limit);
     const more =
       args.offset - 1 + args.limit < lines.length
         ? `\n…(${lines.length} lines total; read more with offset)`
         : "";
-    return slice.map((line, i) => `${args.offset + i}| ${line}`).join("\n") + more;
+    // Where each line starts, so a cut line can be read on by characters.
+    let start = lines.slice(0, args.offset - 1).reduce((sum, line) => sum + line.length + 1, 0);
+    const shown = slice.map((line, i) => {
+      const at = start;
+      start += line.length + 1;
+      return line.length > MAX_LINE_CHARS
+        ? `${args.offset + i}| ${line.slice(0, MAX_LINE_CHARS)}…(line cut: ${line.length} characters; read the rest with from_char=${at + MAX_LINE_CHARS})`
+        : `${args.offset + i}| ${line}`;
+    });
+    return shown.join("\n") + more;
   },
 });
 
@@ -93,7 +127,10 @@ const writeFileTool = defineTool({
   async run(args, ctx) {
     const { abs } = resolvePath(ctx.workspace, args.path);
     await mkdir(dirname(abs), { recursive: true });
+    // A copy of what was there, so the user can undo this from the chat.
+    const kept = await ctx.keepCopy?.(abs, ctx.callId ?? "");
     await writeFile(abs, args.content, "utf8");
+    await kept?.(args.content);
     return `Wrote ${Buffer.byteLength(args.content)} bytes to ${displayPath(ctx.workspace, abs)}.`;
   },
 });
@@ -110,30 +147,46 @@ const editFile = defineTool({
   risk: (args, ctx) => fileRisk(ctx, args.path, "Edit", true),
   async run(args, ctx) {
     const { abs } = resolvePath(ctx.workspace, args.path);
+    const info = await stat(abs);
+    if (info.isDirectory()) return `${args.path} is a folder, not a file.`;
+    if (info.size > MAX_OPEN_BYTES) return tooLarge(args.path, info.size);
     const text = await readFile(abs, "utf8");
     const count = text.split(args.find).length - 1;
     if (count === 0) return "No match: `find` was not found. Read the file and copy the text exactly.";
     if (count > 1 && !args.all)
       return `${count} matches: make \`find\` longer so it matches once, or set all=true.`;
-    await writeFile(
-      abs,
-      // A function, so `$&`, `$1` and the like in the replacement stay as written.
-      args.all ? text.split(args.find).join(args.replace) : text.replace(args.find, () => args.replace),
-      "utf8",
-    );
+    // A function, so `$&`, `$1` and the like in the replacement stay as written.
+    const edited = args.all
+      ? text.split(args.find).join(args.replace)
+      : text.replace(args.find, () => args.replace);
+    // Only now that the edit is certain: a copy of the file as it was, so the user can undo this from the chat.
+    const kept = await ctx.keepCopy?.(abs, ctx.callId ?? "");
+    await writeFile(abs, edited, "utf8");
+    await kept?.(edited);
     return `Replaced ${args.all ? count : 1} match(es) in ${displayPath(ctx.workspace, abs)}.`;
   },
 });
 
 const searchFiles = defineTool({
   name: "search_files",
-  description: "Find lines containing text (case-insensitive) in files under a folder.",
+  description: "Find lines containing text (case-insensitive) in the files under a folder, or in one file.",
   args: z.object({ query: z.string().min(1), path: z.string().default(".") }),
   risk: (args, ctx) => fileRisk(ctx, args.path, "Search", false),
   async run(args, ctx) {
     const { abs } = resolvePath(ctx.workspace, args.path);
     const needle = args.query.toLowerCase();
     const hits: string[] = [];
+    const searchFile = async (full: string) => {
+      const info = await stat(full).catch(() => null);
+      if (!info || info.size > MAX_READ_BYTES) return;
+      const text = await readFile(full, "utf8").catch(() => "");
+      if (text.includes("\u0000")) return;
+      text.split(/\r?\n/).forEach((line, i) => {
+        if (hits.length < 200 && line.toLowerCase().includes(needle)) {
+          hits.push(`${displayPath(ctx.workspace, full)}:${i + 1}: ${line.trim().slice(0, 200)}`);
+        }
+      });
+    };
     const walk = async (dir: string) => {
       for (const entry of await readdir(dir, { withFileTypes: true })) {
         if (hits.length >= 200 || ctx.signal.aborted) return;
@@ -144,18 +197,13 @@ const searchFiles = defineTool({
           if (!SKIP_DIRS.has(entry.name)) await walk(full);
           continue;
         }
-        const info = await stat(full).catch(() => null);
-        if (!info || info.size > MAX_READ_BYTES) continue;
-        const text = await readFile(full, "utf8").catch(() => "");
-        if (text.includes("\u0000")) continue;
-        text.split(/\r?\n/).forEach((line, i) => {
-          if (hits.length < 200 && line.toLowerCase().includes(needle)) {
-            hits.push(`${displayPath(ctx.workspace, full)}:${i + 1}: ${line.trim().slice(0, 200)}`);
-          }
-        });
+        await searchFile(full);
       }
     };
-    await walk(abs);
+    // Given a file rather than a folder, it searches just that file.
+    const target = await stat(abs).catch(() => null);
+    if (target?.isFile()) await searchFile(abs);
+    else await walk(abs);
     return hits.length ? hits.join("\n") : "No matches.";
   },
 });

@@ -329,6 +329,69 @@ describe("memory", () => {
     expect(requests.at(-1).messages[0].content).toContain("- User prefers metric units");
   });
 
+  it("doesn't save a note twice, and won't forget on a word as short as 'the'", async () => {
+    const call = (name: string, args: unknown) => () => [
+      { message: { tool_calls: [{ function: { name, arguments: args } }] } },
+    ];
+    const { make } = await start([
+      call("remember", { note: "the user likes short answers." }),
+      call("forget", { text: "the" }),
+      call("forget", { text: "short answers" }),
+    ]);
+    const ada = await make("Ada");
+    h!.store.memory.add(ada.id, "The user likes short answers");
+    h!.store.memory.add(ada.id, "Works in the Leeds office");
+    const finished = doneMessages(1);
+    await h!.app.inject({
+      method: "POST",
+      url: `/api/threads/${ada.threadId}/messages`,
+      headers: auth,
+      payload: { text: "remember that and tidy up" },
+    });
+    const [reply] = await finished;
+    const results = reply!.parts.flatMap((part) => (part.type === "tool" ? [part.result] : []));
+    expect(results[0]).toContain("Already in memory");
+    expect(results[1]).toContain("at least one word of 4 letters");
+    expect(results[2]).toBe("Forgot 1 note(s).");
+    expect(h!.store.memory.list(ada.id).map((note) => note.text)).toEqual(["Works in the Leeds office"]);
+  });
+
+  it("lets the user pin notes the bot can't forget, up to a limit", async () => {
+    const call = (name: string, args: unknown) => () => [
+      { message: { tool_calls: [{ function: { name, arguments: args } }] } },
+    ];
+    const { make, requests } = await start([call("forget", { text: "Leeds" })]);
+    const ada = await make("Ada");
+    const office = h!.store.memory.add(ada.id, "Works in the Leeds office");
+    h!.store.memory.add(ada.id, "Likes Leeds United");
+    const pin = (id: string, pinned: boolean) =>
+      h!.app.inject({ method: "PATCH", url: `/api/memory/${id}`, headers: auth, payload: { pinned } });
+    expect((await pin(office.id, true)).json().note).toMatchObject({ pinned: true, text: office.text });
+
+    const finished = doneMessages(1);
+    await h!.app.inject({
+      method: "POST",
+      url: `/api/threads/${ada.threadId}/messages`,
+      headers: auth,
+      payload: { text: "forget Leeds" },
+    });
+    const [reply] = await finished;
+    const result = reply!.parts.find((part) => part.type === "tool")!;
+    expect(result.type === "tool" && result.result).toMatch(
+      /Forgot 1 note\(s\)\. 1 pinned note\(s\) matched too/,
+    );
+    expect(h!.store.memory.list(ada.id).map((note) => note.text)).toEqual(["Works in the Leeds office"]);
+    expect(requests[0].messages[0].content).toContain("- Works in the Leeds office");
+
+    const listed = (await h!.app.inject({ url: `/api/bots/${ada.id}/memory`, headers: auth })).json();
+    expect(listed).toMatchObject({ notSent: 0, sentIds: [office.id], pinnedOver: false });
+
+    for (let i = 0; i < 9; i++) await pin(h!.store.memory.add(ada.id, `Note ${i}`).id, true);
+    const eleventh = await pin(h!.store.memory.add(ada.id, "One too many").id, true);
+    expect(eleventh.statusCode).toBe(409);
+    expect(eleventh.json().message).toMatch(/At most 10 notes can be pinned/);
+  });
+
   it("lets the user add, edit, import and delete notes", async () => {
     const { make } = await start();
     const ada = await make("Ada");

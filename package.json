@@ -1,6 +1,6 @@
 {
   "name": "freebird",
-  "version": "0.0.16",
+  "version": "0.0.18",
   "description": "A local-first desktop workspace for teams of AI bots, running on Ollama, other local runtimes or any API provider.",
   "license": "MIT",
   "repository": {

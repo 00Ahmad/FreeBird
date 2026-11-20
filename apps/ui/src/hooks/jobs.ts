@@ -10,6 +10,7 @@ import type {
 } from "@mrog/shared";
 
 import { api } from "../lib/api";
+import { isScanning } from "../lib/jobs";
 import { useUi } from "../state";
 import { BOTS_KEY, upsertBot } from "./bots";
 import { THREADS_KEY } from "./threads";
@@ -21,15 +22,29 @@ export function setJobProject(client: QueryClient, project: JobProject) {
   client.setQueryData(jobKey(project.botId), project);
 }
 
-/** A desktop notice when a scan starts waiting for you (a CAPTCHA, a sign-in) and you aren't looking at its chat. */
+/**
+ * A desktop notice when a scan starts waiting for you (a CAPTCHA, a sign-in), or when it ends, and you aren't looking at
+ * its chat. (A Job Bot's chat messages raise no reply notice of their own, so this is the only one.)
+ */
 export function noticeJob(client: QueryClient, project: JobProject) {
   const before = client.getQueryData<JobProject>(jobKey(project.botId));
-  if (project.status !== "waiting_for_you" || before?.status === "waiting_for_you") return;
+  const waits = project.status === "waiting_for_you" && before?.status !== "waiting_for_you";
+  // A scan that has just ended (not a check of the board, which leaves the last scan as it was).
+  const ended =
+    !!before &&
+    isScanning(before) &&
+    !isScanning(project) &&
+    !!project.scan?.endedAt &&
+    project.scan.endedAt !== before.scan?.endedAt &&
+    !!project.scan.stopReason;
+  if (!waits && !ended) return;
   const bot = client.getQueryData<Bot[]>(BOTS_KEY)?.find((candidate) => candidate.id === project.botId);
   if (!bot?.notifications || typeof Notification === "undefined") return;
   if (document.hasFocus() && useUi.getState().selectedThreadId === bot.threadId) return;
   const notification = new Notification(bot.name, {
-    body: project.handoff?.reason ?? "A page needs you.",
+    body: waits
+      ? (project.handoff?.reason ?? "A page needs you.")
+      : `Scan ${project.scan!.number} ended: ${project.scan!.stopReason}`,
     silent: false,
   });
   notification.addEventListener("click", () => {
@@ -86,6 +101,8 @@ export const useApproveJobProfile = (botId: string) => useJobAction(botId, () =>
 export const useStartJobScan = (botId: string) =>
   useJobAction<{ body: { target: number } }>(botId, () => "/scan");
 export const useStopJob = (botId: string) => useJobAction(botId, () => "/stop");
+/** Reads the board's open jobs again (no model) and marks the ones gone or closed. */
+export const useCheckOpen = (botId: string) => useJobAction(botId, () => "/check-open");
 export const useAnswerHandoff = (botId: string) =>
   useJobAction<{ body: { action: "continue" | "skip" } }>(botId, () => "/handoff");
 export const useReactToJob = (botId: string) =>

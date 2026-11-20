@@ -1,8 +1,9 @@
-export { estimateTokens, estimateToolTokens, fitHistory, toChatHistory } from "./history";
+export { estimateTextTokens, estimateTokens, estimateToolTokens, fitHistory, toChatHistory } from "./history";
 export { FenceFilter, parseToolBlock, parseToolCalls, reactInstructions } from "./react";
 export {
   runTurn,
   type RunTurnOptions,
+  type SteerMoment,
   type ToolHost,
   type ToolOutcome,
   type TurnResult,

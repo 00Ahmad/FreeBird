@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { factValue, mergeProfile, suggestFrom } from "@mrog/jobs";
+import { factValue, mergeProfile, requirementsOf, rescoreCard, suggestFrom } from "@mrog/jobs";
 import {
   MAX_JOB_CARDS,
   MAX_SUGGESTIONS,
@@ -17,19 +17,35 @@ import { JobError } from "./state";
  * the service saves and publishes after each.
  */
 
-/** Adds a card; when the board is full, the oldest "Not for me" card goes first, then the oldest weak "Found" one. */
-export function addCard(project: JobProject, card: JobCard) {
-  project.cards.push(card);
-  while (project.cards.length > MAX_JOB_CARDS) {
-    const drop =
-      project.cards.findIndex((c) => c.column === "not_for_me") >= 0
-        ? project.cards.findIndex((c) => c.column === "not_for_me")
-        : (project.cards
-            .map((c, index) => ({ c, index }))
-            .filter(({ c }) => c.column === "found")
-            .toSorted((a, b) => a.c.score - b.c.score)[0]?.index ?? 0);
-    project.cards.splice(drop, 1);
+/**
+ * Adds a card; when the board is full, the oldest "Not for me" card goes first, then the weakest "Found" one (if it is
+ * weaker than the new one). A job you shortlisted, applied for or are interviewing for is never dropped. "weaker": not
+ * added, every Found job is a better match; "full": not added, the board holds only jobs you are working on.
+ */
+export function addCard(project: JobProject, card: JobCard): "added" | "weaker" | "full" {
+  if (project.cards.length < MAX_JOB_CARDS) {
+    project.cards.push(card);
+    return "added";
   }
+  const notForMe = project.cards.findIndex((c) => c.column === "not_for_me");
+  const weakest = project.cards
+    .map((c, index) => ({ c, index }))
+    .filter(({ c }) => c.column === "found")
+    .toSorted((a, b) => a.c.score - b.c.score)[0];
+  if (notForMe < 0 && !weakest) return "full";
+  if (notForMe < 0 && weakest!.c.score >= card.score) return "weaker";
+  project.cards.splice(notForMe >= 0 ? notForMe : weakest!.index, 1);
+  project.cards.push(card);
+  return "added";
+}
+
+/**
+ * Brings every card up to date with the profile after it changed, by code and without a model (see rescoreCard): a
+ * card keeps the Checker's answers it has, and says how many new requirements only reading the job again could check.
+ */
+export function rescoreBoard(project: JobProject) {
+  const requirements = requirementsOf(project.profile);
+  project.cards = project.cards.map((card) => rescoreCard(card, requirements));
 }
 
 const cardIn = (project: JobProject, cardId: string) => {
@@ -57,7 +73,7 @@ export function react(project: JobProject, cardId: string, input: ReactToJobInpu
   const suggestion = suggestFrom(
     input.reaction,
     input.reason,
-    { company: factValue(card.facts, "company") },
+    { company: factValue(card.facts, "company"), salary: factValue(card.facts, "salary") },
     project.profile,
   );
   if (!suggestion) return;
@@ -75,8 +91,21 @@ export function answerSuggestion(project: JobProject, id: string, accept: boolea
   const suggestion = project.suggestions.find((s) => s.id === id);
   if (!suggestion) throw new JobError("That suggestion is gone.", "not_found", 404);
   project.suggestions = project.suggestions.filter((s) => s.id !== id);
-  if (accept)
+  if (!accept) return;
+  if (suggestion.field === "seniority") {
+    project.profile = mergeProfile(project.profile, { seniority: suggestion.value });
+    return;
+  }
+  if (suggestion.field === "minSalary") {
+    const [amount, currency, period] = suggestion.value.split(" ");
+    const value = Number(amount);
+    if (!Number.isFinite(value) || !currency || !["year", "month", "hour"].includes(period ?? "")) return;
     project.profile = mergeProfile(project.profile, {
-      [suggestion.field]: [...project.profile[suggestion.field], suggestion.value],
+      minSalary: { amount: value, currency, period: period as "year" | "month" | "hour" },
     });
+    return;
+  }
+  project.profile = mergeProfile(project.profile, {
+    [suggestion.field]: [...project.profile[suggestion.field], suggestion.value],
+  });
 }

@@ -96,6 +96,55 @@ const approve = (id: string) =>
     payload: { decision: "allow_once" },
   });
 
+describe("a helper used again", () => {
+  it("reads only its new task, not the tasks it was given before", async () => {
+    const { make, requests } = await start({
+      Boss: [
+        () => call("delegate", { tasks: [{ bot_name: "Scout", task: "Find the iPhone 16 price" }] }),
+        () => say("First done."),
+        () => call("delegate", { tasks: [{ bot_name: "Scout", task: "Find the Pixel 9 price" }] }),
+        () => say("Second done."),
+      ],
+    });
+    const boss = await make("Boss", { isPrimary: true });
+    let done = finalOf(boss);
+    await send(boss, "hi");
+    await done;
+    done = finalOf(boss);
+    await send(boss, "next");
+    await done;
+    const scout = requests.filter((r) => r.bot === "Scout");
+    expect(scout).toHaveLength(2);
+    const second = JSON.stringify(scout[1]!.body.messages);
+    expect(second).toContain("Pixel 9");
+    expect(second).not.toContain("iPhone 16");
+    // The thread keeps both tasks for the user to read.
+    const helper = h!.store.bots.list().find((b) => b.name === "Scout")!;
+    const pair = h!.store.threads.list().find((t) => t.pair && t.memberIds.includes(helper.id))!;
+    const texts = h!.store.messages.list(pair.id).map(messageText).join("\n");
+    expect(texts).toContain("iPhone 16");
+    expect(texts).toContain("Pixel 9");
+  });
+});
+
+describe("a helper whose model fails", () => {
+  it("is asked once more before the coordinator writes its answer without it", async () => {
+    const { make, requests } = await start({
+      Boss: [
+        () => call("delegate", { tasks: [{ bot_name: "Scout", task: "Find the Pixel 9 price" }] }),
+        (body) => say(JSON.stringify(body.messages).includes("£799") ? "Got it." : "Missing."),
+      ],
+      Scout: [() => Response.json({ error: "model crashed" }, { status: 400 }), () => say("£799")],
+    });
+    const boss = await make("Boss", { isPrimary: true });
+    const done = finalOf(boss);
+    await send(boss, "hi");
+    const reply = await done;
+    expect(requests.filter((r) => r.bot === "Scout")).toHaveLength(2);
+    expect(messageText(reply)).toContain("Got it.");
+  });
+});
+
 describe("coordinators and helpers", () => {
   it("lets only coordinators create helpers, without asking on the model already in use", async () => {
     const { make, toolsOf } = await start({
@@ -230,6 +279,13 @@ describe("coordinators and helpers", () => {
       "Look up C",
     ]);
     expect(parsePlan("ONE")).toEqual([]);
+    // ONE with its reasons listed after it is still one job, not a part per reason.
+    expect(parsePlan("ONE\n\nReason:\n1. It is a single lookup\n2. No parts")).toEqual([]);
+    expect(parsePlan("**ONE**\n- because it's one product")).toEqual([]);
+    // The same part twice counts once; a single word isn't a task.
+    expect(parsePlan("- Find the iPhone price\n- find the iPhone  price\n- Pixel")).toEqual([
+      "Find the iPhone price",
+    ]);
     expect(parsePlan(Array.from({ length: 8 }, (_, i) => `- part ${i}`).join("\n"))).toHaveLength(5);
   });
 
@@ -394,7 +450,7 @@ describe("coordinators and helpers", () => {
     expect(scoutSystem).not.toContain("group chat");
   });
 
-  it("takes a name with other spacing or case for the bot it names, and still stops at the helper limit", async () => {
+  it("takes a name with other spacing or case for the bot it names, and reuses an idle helper at the limit", async () => {
     const { make } = await start({
       Boss: [
         () => call("delegate", { tasks: [{ bot_name: "research_bot", task: "Look it up" }] }),
@@ -414,15 +470,36 @@ describe("coordinators and helpers", () => {
     expect(h!.store.bots.list().filter((bot) => bot.parentId === boss.id)).toHaveLength(0);
     expect(researcher.name).toBe("Research Bot");
 
+    const made = [];
     for (let i = 1; i <= 6; i++)
-      h!.store.bots.create(
-        { name: `Helper ${i}` },
-        { parentId: boss.id, temporary: true, section: "Helpers" },
+      made.push(
+        h!.store.bots.create(
+          { name: `Helper ${i}` },
+          { parentId: boss.id, temporary: true, section: "Helpers" },
+        ),
       );
+    // Helper 1's earlier work, in its thread with Boss.
+    const oldThread = h!.store.threads.createGroup("Boss ↔ Helper 1", [boss.id, made[0]!.id], { pair: true });
+    h!.store.messages.create({
+      threadId: oldThread.id,
+      role: "bot",
+      botId: boss.id,
+      parts: [{ type: "text", text: "Old task" }],
+    });
+    for (const [i, helper] of made.entries())
+      if (i > 0) h!.store.threads.createGroup(`Boss ↔ ${helper.name}`, [boss.id, helper.id], { pair: true });
     done = finalOf(boss);
     await send(boss, "second");
-    expect(toolParts(await done)[0]!.result).toContain("You already have 6 helpers");
-    expect(h!.store.bots.list().some((bot) => bot.name === "Seventh")).toBe(false);
+    // At the limit, the helper idle longest takes the new name: nothing is deleted, its thread carries on.
+    expect(toolParts(await done)[0]!.result).toContain("## Seventh");
+    const helpers = h!.store.bots.list().filter((bot) => bot.parentId === boss.id);
+    expect(helpers).toHaveLength(6);
+    const seventh = helpers.find((bot) => bot.name === "Seventh")!;
+    expect(seventh.id).toBe(made[0]!.id);
+    const thread = h!.store.threads.get(oldThread.id)!;
+    expect(thread.title).toBe("Boss ↔ Seventh");
+    const texts = h!.store.messages.list(thread.id).map(messageText).join("\n");
+    expect(texts).toMatch(/Old task[\s\S]*Helper 1 was reused for a new job as Seventh[\s\S]*One more/);
   });
 
   it("gives every helper its own thread with the coordinator, and keeps using it for later tasks", async () => {

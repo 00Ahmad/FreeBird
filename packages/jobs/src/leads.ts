@@ -1,4 +1,5 @@
 import { canonicalUrl, siteOf } from "./dedupe";
+import { words } from "./text";
 
 /**
  * Which search results are worth a Checker turn. A turn on a small local model takes tens of seconds, so results that
@@ -66,4 +67,64 @@ export function pickLeads(urls: string[], skip: ReadonlySet<string>): string[] {
     .map((url, index) => ({ url, index }))
     .toSorted((a, b) => RANK[leadKind(a.url)] - RANK[leadKind(b.url)] || a.index - b.index)
     .map((item) => item.url);
+}
+
+/** A web search result: its address, and the title the search engine showed for it when it said. */
+export interface SearchHit {
+  url: string;
+  title?: string;
+}
+
+/** A single posting's address (an id or a slug after /jobs/, /job/, /careers/, /positions/), not a list. */
+const POSTING_PATH =
+  /\/(jobs?|careers?|positions?|vacanc(y|ies)|openings?|o)\/[^/?#]*(\d{3,}|[a-z]+-[a-z]+)[^/?#]*\/?$/i;
+
+/** Words of a job title that don't say what the job is. */
+const TITLE_NOISE = new Set([
+  "senior",
+  "junior",
+  "lead",
+  "staff",
+  "principal",
+  "head",
+  "jobs",
+  "job",
+  "careers",
+  "career",
+  "hiring",
+  "remote",
+  "apply",
+]);
+
+const titleWords = (text: string) =>
+  words(text)
+    .map((word) => (word.length > 3 ? word.replace(/(es|s)$/, "") : word))
+    .filter((word) => !TITLE_NOISE.has(word));
+
+/**
+ * Search results in the order worth reading, using the titles the search showed: a result whose title has a title you
+ * want in it comes first; a single posting whose title shares no word with any title you want is another job, and is
+ * dropped before anyone reads it. A result with no title keeps its place.
+ */
+export function rankHits(hits: readonly (SearchHit | string)[], titles: readonly string[]): string[] {
+  const wanted = new Set(titles.flatMap(titleWords));
+  const ranked = hits
+    .map((hit, index) => (typeof hit === "string" ? { url: hit, index } : { ...hit, index }))
+    .flatMap((hit) => {
+      const title = "title" in hit ? hit.title : undefined;
+      if (!title) return [{ url: hit.url, index: hit.index, rank: 1 }];
+      const have = titleWords(title);
+      const fits = titles.some((wantedTitle) => {
+        const need = titleWords(wantedTitle);
+        return need.length > 0 && need.every((word) => have.includes(word));
+      });
+      if (fits) return [{ url: hit.url, index: hit.index, rank: 0 }];
+      if (
+        POSTING_PATH.test(new URL(hit.url, "https://x.invalid").pathname) &&
+        !have.some((word) => wanted.has(word))
+      )
+        return [];
+      return [{ url: hit.url, index: hit.index, rank: 1 }];
+    });
+  return ranked.toSorted((a, b) => a.rank - b.rank || a.index - b.index).map((hit) => hit.url);
 }

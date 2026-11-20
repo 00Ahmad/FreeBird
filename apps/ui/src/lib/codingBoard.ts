@@ -106,6 +106,8 @@ export interface BoardCard {
   /** The files a connector links. */
   linked: LinkedFile[];
   needsFixing: boolean;
+  /** Sent back as many times as the round limit: the Developer leaves it until you raise the limit and resume. */
+  setAside: boolean;
   comments: CardComment[];
 }
 
@@ -141,6 +143,7 @@ export function buildBoard(plan: Plan): BoardColumn[] {
       label: edge ? (labels.get(edge.id) ?? null) : null,
       linked: edge ? linkedFiles(edge, plan.nodes) : [],
       needsFixing: needsFixing(card),
+      setAside: card.parked === true,
       comments: sortComments(card.comments),
     };
   });

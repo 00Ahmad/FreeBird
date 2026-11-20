@@ -81,6 +81,11 @@ pnpm --filter @mrog/harness exec tsx evals/suite.eval.ts qwen3.5:9b
 # that the coordinator decides to use them by itself; EVAL_OLLAMA_URL runs it against an Ollama on another address
 pnpm --filter @mrog/harness exec tsx evals/delegation.eval.ts qwen3.5:9b
 
+# The main bot: a message sent mid-turn, a follow-up about "those three", a job split between helpers and three such
+# jobs in a row. Records every model request, the planner's questions, self-checks (and how many changed the answer)
+# and "carry on" nudges per case. --only=midturn,split picks cases; --no-self-check runs them without the self-check
+pnpm --filter @mrog/harness exec tsx evals/main-bot.eval.ts qwen3.5:9b
+
 # Parallel Bots: six questions, each sent as one request that must come back as three sections from three different
 # roles. Name several models to compare them (a 9B against a 14B or a 30B); every reply is written to evals/results/
 pnpm --filter @mrog/harness exec tsx evals/parallel.eval.ts qwen3.5:9b
@@ -90,7 +95,15 @@ pnpm --filter @mrog/harness exec tsx evals/parallel.eval.ts qwen3.5:9b
 pnpm --filter @mrog/harness exec tsx evals/reports.eval.ts qwen3.5:9b ornith-1.5:9b
 ```
 
-Only run `--allow-commands` on a machine where a model running commands unattended is acceptable.
+The Coding Bot benchmark measures the whole Planner → Developer → QA loop, so a change to it can be judged by numbers. Four fixed briefs (a to-do page, the same page with its ids named, a page that loads data from a public API, a small Node command-line tool) each run several times on a real local model, each in a fresh empty folder. For every run it checks whether the result works: a page must open in a hidden browser with a clean console, nothing it links missing and every button wired to something; the tool must print the right sum, and an error for a bad number. For `todo-ids` the page is also tried with a done check: typing a task and clicking Add must show it in the list. Results are saved after every run, and records the time, rounds, turns, tokens, turns that called no tool and turns cut off for editing without finishing. Results go to `evals/results/` as JSON and Markdown; `--compare` shows the change against an earlier run. A full run on a 9B model takes a few hours and keeps the GPU busy.
+
+```sh
+pnpm --filter @mrog/harness exec tsx evals/coding-bench.eval.ts ornith-1.5:9b
+# --repeat=N (default 2), --only=todo,todo-ids,api,cli, --rounds=N, --minutes=N per run, --ctx=N, --no-visual
+pnpm --filter @mrog/harness exec tsx evals/coding-bench.eval.ts ornith-1.5:9b --compare=evals/results/coding-bench-….json
+```
+
+Only run `--allow-commands` on a machine where a model running commands unattended is acceptable. The Coding Bot benchmark also runs the team's commands without asking (in throwaway folders).
 
 ## Packaging
 

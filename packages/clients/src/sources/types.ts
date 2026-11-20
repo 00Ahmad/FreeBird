@@ -10,6 +10,8 @@ export interface RegisterQuery {
   /** yyyy-mm-dd */
   incorporatedFrom: string | null;
   incorporatedTo: string | null;
+  /** Which page of results to ask for (from 1), for a register that pages; set by the scan. */
+  page?: number;
 }
 
 /** A request the harness sends for a register: plain data, so this package never reaches the network. */
@@ -61,6 +63,11 @@ export interface Register {
   queries(profile: OfferProfile, playbook: Playbook, now: Date): RegisterQuery[];
   request(query: RegisterQuery, key: string | null): RegisterRequest;
   parse(json: unknown): RegisterRecord[];
+  /**
+   * For a register that pages: whether this answer was the last page of `query`. Without it, the register has no
+   * paging (each scan asks the same, recent window), and nothing is remembered.
+   */
+  isLastPage?(json: unknown, query: RegisterQuery): boolean;
 }
 
 /** An empty record to fill in. */

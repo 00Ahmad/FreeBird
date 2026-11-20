@@ -4,6 +4,7 @@ import { MatchVerdict, type ClientFact, type FitKind, type FitLine, type OfferPr
 import { clientFact } from "./facts";
 import type { FitRequirement } from "./profile";
 import { placesIn, servesAnywhere } from "./region";
+import { stageVerdict, type StageEvidence } from "./stage";
 import { staffOf, staffText } from "./staff";
 
 /** How a company fits your ideal client, line by line. The Checker answers; code checks what it can. */
@@ -66,25 +67,35 @@ export function buildFit(
   claimed: ClaimedVerdict[],
   facts: ClientFact[],
   profile: OfferProfile,
+  /** What settles the stage line by code, when known (6.2). */
+  stage?: StageEvidence,
 ): FitLine[] {
   return requirements.map((requirement): FitLine => {
     const base = { kind: requirement.kind, requirement: requirement.text };
+    // A line the app wrote is marked, so the Checker's own words can be told apart on the card (6.5).
+    const app = { ...base, byCode: true };
+    if (requirement.kind === "stage" && stage) {
+      const byCode = stageVerdict(profile.stages, stage);
+      if (byCode) return { ...app, ...byCode };
+    }
     if (requirement.kind === "size") {
       const byCode = sizeVerdict(profile, facts);
       return {
-        ...base,
+        ...app,
         ...(byCode ?? { verdict: "unknown", reason: "The page doesn't say how many staff." }),
       };
     }
     const meets = codeMeets(requirement.kind, profile, facts);
-    if (meets) return { ...base, verdict: "meets", reason: meets };
+    if (meets) return { ...app, verdict: "meets", reason: meets };
     const said = claimed.find((v) => v.id === requirement.id);
     const parsed = MatchVerdict.safeParse(said?.verdict?.trim().toLowerCase());
     const reason = said?.reason?.trim() ?? "";
-    if (!said || !parsed.success) return { ...base, verdict: "unknown", reason: "Not checked." };
+    if (!said || !parsed.success) return { ...app, verdict: "unknown", reason: "Not checked." };
     if (parsed.data === "misses" && !reason)
-      return { ...base, verdict: "unknown", reason: "Not shown on the page." };
-    return { ...base, verdict: parsed.data, reason: reason || "Said so." };
+      return { ...app, verdict: "unknown", reason: "Not shown on the page." };
+    return reason
+      ? { ...base, verdict: parsed.data, reason }
+      : { ...app, verdict: parsed.data, reason: "Said so." };
   });
 }
 

@@ -37,3 +37,51 @@ describe("searches aimed at career sites", () => {
     expect(careerSearches(emptyProfile())).toEqual([]);
   });
 });
+
+describe("code-made searches across rounds and scans", async () => {
+  const { codeSearches, recentSearches, SEARCH_REPEAT_DAYS } = await import("./searches");
+  const { rankHits } = await import("./leads");
+  it("go through every title and place, not the first one again", () => {
+    const profile = mergeProfile(emptyProfile(), {
+      titles: ["Backend Engineer"],
+      relatedTitles: ["Platform Engineer"],
+      workplace: ["remote"],
+      places: ["Leeds"],
+    });
+    const all = codeSearches(profile, ["jobs.lever.co"]);
+    expect(all).toEqual([
+      '"Backend Engineer" remote site:jobs.lever.co',
+      '"Backend Engineer" Leeds site:jobs.lever.co',
+      '"Platform Engineer" remote site:jobs.lever.co',
+      '"Platform Engineer" Leeds site:jobs.lever.co',
+    ]);
+  });
+
+  it("remember searches run lately, and forget them after two weeks", () => {
+    const now = new Date("2026-11-20T12:00:00Z");
+    const old = new Date(now.getTime() - (SEARCH_REPEAT_DAYS + 1) * 86_400_000).toISOString();
+    expect(
+      recentSearches(
+        [
+          { query: "A", at: "2026-11-19T00:00:00Z" },
+          { query: "B", at: old },
+        ],
+        now,
+      ),
+    ).toEqual(["a"]);
+  });
+
+  it("rank results by the title the search showed, and drop a posting of another job", () => {
+    const hits = [
+      { url: "https://acme.example/jobs/123-product-designer", title: "Product Designer - Acme" },
+      { url: "https://acme.example/careers", title: "Careers at Acme" },
+      { url: "https://beta.example/jobs/456", title: "Senior Backend Engineer | Beta" },
+      "https://gamma.example/jobs/789",
+    ];
+    expect(rankHits(hits, ["Backend Engineer"])).toEqual([
+      "https://beta.example/jobs/456",
+      "https://acme.example/careers",
+      "https://gamma.example/jobs/789",
+    ]);
+  });
+});

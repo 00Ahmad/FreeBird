@@ -5,12 +5,15 @@ import {
   isCoordinator,
   messageText,
   ModelRef,
+  repeatsAction,
   type Bot,
   type Message,
   type Thread,
 } from "@mrog/shared";
 import { defineTool, safe, type ToolContext, type ToolSpec } from "@mrog/tools";
 
+import { fitAnswers } from "./delegate-answers";
+import { skipPlan } from "./plan-gate";
 import type { Services } from "./services";
 import type { Surface } from "./turns";
 
@@ -23,10 +26,6 @@ const MAX_PASSED_ON = 12_000;
 const LOOKUP_TOOLS = new Set(["web_search", "fetch_url", "browser_open", "screen_go_to"]);
 /** Lookups a coordinator makes itself before it's reminded that helpers could take the parts. */
 const SPLIT_REMINDER_AFTER = 3;
-/** Shorter messages are greetings or quick questions: no need to ask whether they split into parts. */
-const MIN_PLAN_WORDS = 8;
-/** The user already asked for helpers; the coordinator's prompt covers that. */
-const ASKS_FOR_HELPERS = /\b(sub-?agents?|helpers?|workers?|agents?|spawn|delegate)\b/i;
 const PLAN_SYSTEM = [
   "You plan work for a coordinator bot. It can do a job itself, or give parts of it to helper bots that work at the same time and report back; the coordinator then combines their answers (a final table, comparison, summary or recommendation is the coordinator's own job and never counts as a part).",
   "Split the job when it covers 2 to 5 separate things that each need their own research: one part per product, option, framework, company, city, source or site. Reply with one line per part, each starting with '- ' and saying that part as a short, complete task.",
@@ -34,12 +33,23 @@ const PLAN_SYSTEM = [
   "Don't split a quick question, a conversation, explaining or writing something from what you already know, a single lookup about one thing (even with several details), work on files in the coordinator's folder (helpers can't see them), or steps that each need the one before (write code, then test it). For those, reply with exactly: ONE",
 ].join("\n\n");
 
-/** The parts a planning reply lists (none when the job is one thing). */
+/**
+ * The parts a planning reply lists (none when the job is one thing). A reply that says ONE anywhere on a line of its
+ * own keeps the job whole, whatever reasons it lists after it; a part must be a short task (two words or more), and
+ * the same part twice counts once.
+ */
 export function parsePlan(reply: string): string[] {
-  return reply
-    .replace(/<think>[\s\S]*?<\/think>/g, "")
-    .split("\n")
+  const lines = reply.replace(/<think>[\s\S]*?<\/think>/g, "").split("\n");
+  if (lines.some((line) => /^\s*\**ONE\b/.test(line))) return [];
+  const seen = new Set<string>();
+  return lines
     .flatMap((line) => /^\s*(?:[-*•]|\d+[.)])\s+(.+\S)\s*$/.exec(line)?.[1] ?? [])
+    .filter((part) => {
+      const key = part.toLowerCase().replace(/\s+/g, " ");
+      if (part.split(/\s+/).length < 2 || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .slice(0, MAX_PARALLEL_TASKS);
 }
 
@@ -123,6 +133,8 @@ export function installDelegation(services: Services) {
     task: string,
     ctx: ToolContext,
     surface: Surface,
+    /** A task that stands on its own (delegate): the helper reads only it, not its earlier tasks in the thread. */
+    standalone = false,
   ): Promise<Message> => {
     const thread = pairThread(from, target);
     if (turns.isRunning(thread.id, target.id))
@@ -140,6 +152,7 @@ export function installDelegation(services: Services) {
       parentSignal: ctx.signal,
       delegated: true,
       surface,
+      ...(standalone ? { standalone: true } : {}),
     });
     if (ctx.signal.aborted) throw new Error("Stopped.");
     return reply;
@@ -178,17 +191,67 @@ export function installDelegation(services: Services) {
     return { text };
   };
 
-  /** A temporary helper of a coordinator, or why it can't be made. */
+  /**
+   * At the helper limit, the helper idle longest takes the new name and instructions instead of a new helper being
+   * made. Nothing is deleted: its thread with the coordinator carries on, renamed, with a note saying it was reused, so
+   * its earlier work stays readable. Null when every helper is busy (or none can be a helper of this kind).
+   */
+  const reuseHelper = (
+    bot: Bot,
+    helpers: Bot[],
+    input: { name: string; instructions: string; visual?: boolean },
+    model: string | null,
+    busy: ReadonlySet<string>,
+  ): Bot | null => {
+    const idle = helpers
+      .filter((helper) => !busy.has(helper.id) && helper.visual === (input.visual ?? false))
+      .map((helper) => ({ helper, thread: findPair(bot, helper) }))
+      .filter(({ helper, thread }) => !thread || !turns.isRunning(thread.id, helper.id))
+      .toSorted((a, b) =>
+        (a.thread?.updatedAt ?? a.helper.createdAt).localeCompare(b.thread?.updatedAt ?? b.helper.createdAt),
+      )[0];
+    if (!idle) return null;
+    const before = idle.helper.name;
+    const helper = store.bots.update(idle.helper.id, {
+      name: input.name,
+      label: `${input.visual ? "Visual helper" : "Helper"} of ${bot.name}`,
+      instructions: input.instructions,
+      model,
+      hidden: false,
+    });
+    if (!helper) return null;
+    bus.publish({ type: "bot.updated", bot: helper });
+    const thread = idle.thread
+      ? store.threads.update(idle.thread.id, { title: `${bot.name} ↔ ${helper.name}` })
+      : pairThread(bot, helper);
+    if (thread) {
+      bus.publish({ type: "thread.updated", thread });
+      const note = store.messages.create({
+        threadId: thread.id,
+        role: "system",
+        parts: [
+          {
+            type: "text",
+            text: `(${before} was reused for a new job as ${helper.name}, since ${bot.name} had ${MAX_HELPERS} helpers. Its earlier work is above.)`,
+          },
+        ],
+      });
+      bus.publish({ type: "message.created", message: note });
+    }
+    return helper;
+  };
+
+  /**
+   * A temporary helper of a coordinator, or why it can't be made. At the helper limit, an idle helper is reused (see
+   * reuseHelper); `busy` are helpers this same call is already giving work to.
+   */
   const createHelper = (
     bot: Bot,
     input: { name: string; instructions: string; model?: string; visual?: boolean },
+    busy: ReadonlySet<string> = new Set(),
   ): Bot | string => {
     const name = BotName.safeParse(input.name);
     if (!name.success) return `"${input.name.slice(0, 60)}" can't be a bot's name. Use a short name.`;
-    const helpers = store.bots.list().filter((other) => other.parentId === bot.id && other.temporary);
-    if (helpers.length >= MAX_HELPERS) {
-      return `You already have ${helpers.length} helpers (${helpers.map((h) => h.name).join(", ")}). Dismiss one with dismiss_bot first.`;
-    }
     if (store.bots.list().some((other) => other.name.toLowerCase() === name.data.toLowerCase())) {
       return `A bot called "${name.data}" already exists. Pick another name.`;
     }
@@ -199,6 +262,12 @@ export function installDelegation(services: Services) {
         return `"${input.model}" isn't an available model. Leave model out to use the shared one.`;
       }
       model = parsed.data;
+    }
+    const helpers = store.bots.list().filter((other) => other.parentId === bot.id && other.temporary);
+    if (helpers.length >= MAX_HELPERS) {
+      const reused = reuseHelper(bot, helpers, { ...input, name: name.data }, model, busy);
+      if (reused) return reused;
+      return `You already have ${helpers.length} helpers (${helpers.map((h) => h.name).join(", ")}) and all of them are busy. Wait for one to finish, or dismiss one with dismiss_bot.`;
     }
     const helper = store.bots.create(
       {
@@ -352,10 +421,15 @@ export function installDelegation(services: Services) {
               agent.allows(bot, "spawn_bot") &&
               teammatesNamed(bot, task.bot_name).length === 0
             ) {
-              const made = createHelper(bot, {
-                name: task.bot_name,
-                instructions: `You are a helper made by ${bot.name}. Do each task you're given with your tools, and reply with the result itself.`,
-              });
+              const made = createHelper(
+                bot,
+                {
+                  name: task.bot_name,
+                  instructions: `You are a helper made by ${bot.name}. Do each task you're given with your tools, and reply with the result itself.`,
+                },
+                // A helper this call already gives a task to can't be reused for another part of it.
+                new Set(targets.map((existing) => existing.id)),
+              );
               if (typeof made === "string") return made;
               created.push(made.name);
               target = made;
@@ -369,19 +443,27 @@ export function installDelegation(services: Services) {
             targets.push(target);
             texts.push(full.text);
           }
+          // A helper whose model failed (not stopped) is asked once more, unless it may already have changed
+          // something outside the chat: the same test "Try again" uses.
+          const handTwice = async (target: Bot, text: string) => {
+            const first = await hand(bot, target, text, ctx, surface, true);
+            if (first.status !== "error" || ctx.signal.aborted || repeatsAction(first)) return first;
+            return hand(bot, target, text, ctx, surface, true);
+          };
           const replies = await Promise.all(
-            texts.map((text, index) =>
-              hand(bot, targets[index]!, text, ctx, surface).catch((error: Error) => error),
-            ),
+            texts.map((text, index) => handTwice(targets[index]!, text).catch((error: Error) => error)),
           );
           if (ctx.signal.aborted) throw new Error("Stopped.");
-          const answers = replies
-            .map((reply, index) => {
+          // Every helper gets a fair share of the room, so the last answers aren't the ones cut off.
+          const answers = fitAnswers(
+            replies.map((reply, index) => {
               const target = targets[index]!;
-              const answer = reply instanceof Error ? `(${reply.message})` : answerOf(target, reply);
-              return `## ${target.name}\n${answer}`;
-            })
-            .join("\n\n");
+              return {
+                name: target.name,
+                text: reply instanceof Error ? `(${reply.message})` : answerOf(target, reply),
+              };
+            }),
+          );
           return created.length > 0
             ? `(Created ${created.length === 1 ? "helper" : "helpers"} ${created.join(", ")} for this.)\n\n${answers}`
             : answers;
@@ -441,7 +523,9 @@ export function installDelegation(services: Services) {
     if (info.delegated || bot.parentId !== null || thread.kind === "group") return null;
     if (!tools.includes("spawn_bot") || !tools.includes("delegate") || latest?.role !== "user") return null;
     const text = messageText(latest).trim();
-    if (text.split(/\s+/).length < MIN_PLAN_WORDS || ASKS_FOR_HELPERS.test(text)) return null;
+    // Code settles the clear cases (a quick message, one that points back at the chat or names a file); the model is
+    // asked only about a message that may name several things.
+    if (skipPlan(text)) return null;
     const parts = parsePlan(await ask(PLAN_SYSTEM, text.slice(-4000)));
     if (parts.length < 2) return null;
     return [

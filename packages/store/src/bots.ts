@@ -55,6 +55,7 @@ function toBot(row: Row): Bot {
     instructions: row.instructions ?? "",
     section: row.section ?? null,
     notifications: row.notifications !== 0,
+    approvalsWait: row.approvals_wait === 1,
     coordinator: row.coordinator === 1,
     parentId: row.parent_id ?? null,
     temporary: row.temporary === 1,
@@ -153,8 +154,8 @@ export class BotRepo {
       this.db
         .prepare(
           `UPDATE bots SET name = ?, label = ?, avatar_shape = ?, avatar_color = ?, avatar_image = ?, is_primary = ?,
-             pinned = ?, hidden = ?, model = ?, instructions = ?, section = ?, notifications = ?, coordinator = ?,
-             tools = ?, updated_at = ?
+             pinned = ?, hidden = ?, model = ?, instructions = ?, section = ?, notifications = ?, approvals_wait = ?,
+             coordinator = ?, tools = ?, updated_at = ?
            WHERE id = ?`,
         )
         .run(
@@ -170,6 +171,7 @@ export class BotRepo {
           next.instructions,
           next.section,
           next.notifications ? 1 : 0,
+          next.approvalsWait ? 1 : 0,
           // Helpers never coordinate: that is what keeps delegation one level deep.
           next.coordinator && next.parentId === null ? 1 : 0,
           writeTools(next.tools),

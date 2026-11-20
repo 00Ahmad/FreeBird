@@ -21,6 +21,10 @@ export const MAX_JOB_CARDS = 500;
 /** Fingerprints of jobs already shown, so a later scan counts only new ones. */
 export const MAX_SEEN_JOBS = 3000;
 export const MAX_JOB_LOG = 50;
+/** Pages that led nowhere, remembered so later scans don't read them again. */
+export const MAX_DEAD_PAGES = 2000;
+/** Searches run, remembered so later scans look somewhere new. */
+export const MAX_SEARCHES_RUN = 300;
 export const MAX_SITE_NOTES = 200;
 
 const Short = (max: number) => z.string().trim().max(max);
@@ -106,6 +110,8 @@ export const MatchLine = z.object({
   requirement: z.string(),
   verdict: MatchVerdict,
   reason: z.string(),
+  /** Decided by the app from facts checked against the page; otherwise the reason is the Checker's own words. */
+  byCode: z.boolean().optional(),
 });
 export type MatchLine = z.infer<typeof MatchLine>;
 
@@ -154,6 +160,8 @@ export const JobCard = z.object({
   company: z.array(z.object({ text: z.string(), quote: z.string() })),
   reaction: z.enum(["up", "down"]).nullable(),
   reason: z.string().nullable(),
+  /** Requirements added to your profile since this job was read, which only reading it again could check. */
+  unchecked: z.number().int().min(0).default(0),
 });
 export type JobCard = z.infer<typeof JobCard>;
 
@@ -183,6 +191,24 @@ export const SiteNote = z.object({
 });
 export type SiteNote = z.infer<typeof SiteNote>;
 
+/**
+ * A page that led nowhere: not a job, a closed or missing job, a job that couldn't be confirmed, or one already shown
+ * under another address. Never a list of jobs: new jobs appear on those.
+ */
+export const DeadPage = z.object({
+  /** The address, tidied (canonicalUrl). */
+  key: z.string(),
+  reason: z.string(),
+  at: z.iso.datetime(),
+  /** It won't come back (the page is gone, or the job closed): skipped for longer. */
+  lasting: z.boolean(),
+});
+export type DeadPage = z.infer<typeof DeadPage>;
+
+/** A web search a scan ran. */
+export const SearchRun = z.object({ query: z.string(), at: z.iso.datetime() });
+export type SearchRun = z.infer<typeof SearchRun>;
+
 /** The profile list fields a reaction can suggest adding to. */
 export const SUGGESTIBLE_FIELDS = [
   "dealBreakers",
@@ -190,6 +216,10 @@ export const SUGGESTIBLE_FIELDS = [
   "avoidCompanies",
   "mustHaves",
   "niceToHaves",
+  /** "too junior": the seniority you want, in words. */
+  "seniority",
+  /** "salary too low": your lowest salary, as "<amount> <currency> <period>". */
+  "minSalary",
 ] as const;
 
 /** A change to your profile suggested by a 👍 or 👎 with a reason. Never applied without you. */
@@ -234,6 +264,14 @@ export const JobProject = z.object({
   /** Fingerprints of every job ever shown (Not for me included), newest last. */
   seen: z.array(z.string()).max(MAX_SEEN_JOBS),
   siteNotes: z.array(SiteNote).max(MAX_SITE_NOTES),
+  /** Pages that led nowhere, skipped by later scans for a while. */
+  deadPages: z.array(DeadPage).max(MAX_DEAD_PAGES).default([]),
+  /** The interview's topics the Interviewer asked about, and those you skipped: not asked again. */
+  interview: z
+    .object({ asked: z.array(z.string()).max(20), skipped: z.array(z.string()).max(20) })
+    .default({ asked: [], skipped: [] }),
+  /** Searches run, newest last: a later scan starts with the ones not run lately. */
+  searchesRun: z.array(SearchRun).max(MAX_SEARCHES_RUN).default([]),
   suggestions: z.array(ProfileSuggestion).max(MAX_SUGGESTIONS),
   scan: JobScan.nullable(),
   /** The number you asked for last time: suggested next time. */
@@ -264,7 +302,30 @@ export const CreateJobBotInput = z.object({
 });
 export type CreateJobBotInput = z.infer<typeof CreateJobBotInput>;
 
-export const UpdateJobProfileInput = JobProfile.partial();
+/**
+ * A change to the profile: only the fields sent. Written out without defaults on purpose: `JobProfile.partial()`
+ * still fills every missing field with its default, so changing one field emptied all the others (your job titles
+ * went when you changed your seniority on the profile card).
+ */
+export const UpdateJobProfileInput = z
+  .object({
+    titles: List(80, 10),
+    relatedTitles: List(80, 15),
+    mustHaves: List(200, 20),
+    niceToHaves: List(200, 20),
+    dealBreakers: List(200, 20),
+    minSalary: SalaryFloor.nullable(),
+    workplace: z.array(Workplace).max(3),
+    places: List(100, 10),
+    travel: Short(200),
+    rightToWork: Short(300),
+    seniority: Short(80),
+    avoidIndustries: List(100, 20),
+    avoidCompanies: List(100, 50),
+    languages: List(60, 10),
+    experience: Short(2000),
+  })
+  .partial();
 export type UpdateJobProfileInput = z.infer<typeof UpdateJobProfileInput>;
 
 export const StartJobScanInput = z.object({

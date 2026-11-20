@@ -1,6 +1,7 @@
 import { Check, X } from "lucide-react";
 import { useState } from "react";
 
+import { requirementsLeftOut } from "@mrog/jobs";
 import { Workplace, type Bot, type JobProfile, type JobProject } from "@mrog/shared";
 import { Button, cn } from "@mrog/ui-kit";
 
@@ -26,6 +27,8 @@ export function ProfileCard({ bot, project }: { bot: Bot; project: JobProject })
     else setEdits(null);
   };
   const needsApproval = project.status === "interview" || project.status === "awaiting_profile";
+  // A small model loses track of a long list, so only the most important requirements are checked.
+  const leftOut = requirementsLeftOut(draft);
 
   return (
     <div className="flex flex-col gap-3 p-4 text-[13px]">
@@ -35,8 +38,7 @@ export function ProfileCard({ bot, project }: { bot: Bot; project: JobProject })
           {project.suggestions.map((suggestion) => (
             <div key={suggestion.id} className="flex items-start gap-2">
               <span className="min-w-0 flex-1">
-                Add <span className="font-medium">{suggestion.value}</span> to{" "}
-                {LIST_FIELDS.find(([key]) => key === suggestion.field)?.[1].toLowerCase()}
+                {suggestionText(suggestion)}
                 <span className="block text-[12px] text-ink-3">{suggestion.because}</span>
               </span>
               <Button
@@ -167,6 +169,14 @@ export function ProfileCard({ bot, project }: { bot: Bot; project: JobProject })
         </label>
       ))}
 
+      {leftOut > 0 && (
+        <p className="rounded-lg bg-warning/10 px-3 py-2 text-[12.5px] text-warning">
+          {leftOut} of your least important requirements aren't checked on each job: the list is longer than a
+          small model can keep track of. Deal-breakers and companies to avoid always are. Remove must-haves or
+          nice-to-haves you can do without.
+        </p>
+      )}
+
       <div className="sticky bottom-0 flex items-center gap-2 border-t border-border bg-surface py-3">
         <span className="min-w-0 flex-1 text-[12px] text-ink-3" aria-live="polite">
           {update.error?.message ??
@@ -188,5 +198,32 @@ export function ProfileCard({ bot, project }: { bot: Bot; project: JobProject })
         )}
       </div>
     </div>
+  );
+}
+
+/** What accepting a suggestion does, in words: set a field, or add to a list. */
+function suggestionText(suggestion: JobProject["suggestions"][number]) {
+  if (suggestion.field === "seniority")
+    return (
+      <>
+        Set your seniority to <span className="font-medium">{suggestion.value}</span>
+      </>
+    );
+  if (suggestion.field === "minSalary") {
+    const [amount, currency, period] = suggestion.value.split(" ");
+    return (
+      <>
+        Set your lowest salary to{" "}
+        <span className="font-medium">
+          {Number(amount).toLocaleString()} {currency} a {period}
+        </span>
+      </>
+    );
+  }
+  return (
+    <>
+      Add <span className="font-medium">{suggestion.value}</span> to{" "}
+      {LIST_FIELDS.find(([key]) => key === suggestion.field)?.[1].toLowerCase()}
+    </>
   );
 }

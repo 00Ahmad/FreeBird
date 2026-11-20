@@ -10,7 +10,7 @@ import {
   titleFits,
   WRONG_TITLE_CAP,
 } from "./match";
-import type { Requirement } from "./profile";
+import { emptyProfile, mergeProfile, requirementsOf, type Requirement } from "./profile";
 
 const REQUIREMENTS: Requirement[] = [
   { id: "r1", kind: "title", text: "The job is one of: Backend Engineer" },
@@ -41,6 +41,24 @@ describe("the match", () => {
       facts(null),
     );
     expect(lines[1]).toMatchObject({ verdict: "unknown", reason: "The posting doesn't state it." });
+  });
+
+  it("marks the lines the app decided, so the Checker's own words can be told apart", () => {
+    const lines = buildMatch(
+      [
+        { ...REQUIREMENTS[0]!, titles: ["Backend Engineer"] },
+        ...REQUIREMENTS.slice(1),
+        { id: "c1", kind: "dealbreaker", text: "Not at Acme", company: "Acme" },
+      ],
+      [
+        { id: "r1", verdict: "misses", reason: "Different stack." },
+        { id: "r2", verdict: "meets", reason: "Pays well." },
+        { id: "r3", verdict: "meets", reason: "Uses Python daily." },
+      ],
+      [...facts(null), { name: "title", value: "Senior Backend Engineer", quote: "Senior Backend Engineer" }],
+    );
+    // Title fixed by code, salary not stated, Python the Checker's words, r4/r5 not answered, company by code.
+    expect(lines.map((line) => !!line.byCode)).toEqual([true, true, false, true, true, true]);
   });
 
   it("ignores verdicts that aren't verdicts", () => {
@@ -87,6 +105,12 @@ describe("the match", () => {
     expect(titleFits("Senior Backend Engineer (Python)", "Backend Engineer")).toBe(true);
     expect(titleFits("Backend Engineers", "Backend Engineer")).toBe(true);
     expect(titleFits("Senior Software Engineer", "Backend Engineer")).toBe(false);
+    // Every word there, but with another job's word between them, or in another order: not that title.
+    expect(titleFits("Senior Product Marketing Manager", "Product Manager")).toBe(false);
+    expect(titleFits("Accounts Payable Manager", "Account Manager")).toBe(false);
+    expect(titleFits("Data Center Engineer", "Data Engineer")).toBe(false);
+    expect(titleFits("Backend Engineer, GitLab Orbit", "Backend Engineer")).toBe(true);
+    expect(titleFits("Senior Product Manager, Switchboard", "Product Manager")).toBe(true);
     const requirements: Requirement[] = [
       {
         id: "r1",
@@ -146,5 +170,24 @@ describe("the match", () => {
 
   it("labels scores", () => {
     expect([scoreLabel(80), scoreLabel(60), scoreLabel(20)]).toEqual(["strong", "good", "weak"]);
+  });
+});
+
+describe("a company you avoid", () => {
+  it("is decided by code from the confirmed company, never by the Checker", () => {
+    const profile = mergeProfile(emptyProfile(), { titles: ["Backend Engineer"], avoidCompanies: ["Acme"] });
+    const requirements = requirementsOf(profile);
+    const factsOf = (company: string | null) => [
+      { name: "company" as const, value: company, quote: company },
+    ];
+    // The Checker said "meets" for it: code decides anyway.
+    const at = (company: string | null) =>
+      buildMatch(requirements, [{ id: "c1", verdict: "meets", reason: "fine" }], factsOf(company)).find(
+        (line) => line.requirement === "Not at Acme",
+      );
+    expect(at("Acme Ltd")).toMatchObject({ verdict: "misses" });
+    expect(scoreMatch(buildMatch(requirements, [], factsOf("Acme"))).score).toBeLessThanOrEqual(10);
+    expect(at("Acmeville Robotics")).toMatchObject({ verdict: "meets" });
+    expect(at(null)).toMatchObject({ verdict: "unknown" });
   });
 });

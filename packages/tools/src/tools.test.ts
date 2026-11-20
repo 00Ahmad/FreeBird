@@ -433,7 +433,62 @@ describe("built-in tools", () => {
     });
     expect((await call("list_files", {})).result).toBe("notes/\n  todo.md");
     expect((await call("search_files", { query: "THREE" })).result).toBe("notes/todo.md:3: three");
+    // Given a file instead of a folder, it searches that file.
+    expect((await call("search_files", { query: "three", path: "notes/todo.md" })).result).toBe(
+      "notes/todo.md:3: three",
+    );
     expect(asked).toEqual([]);
+  });
+
+  it("cuts a very long line and reads the rest of it by characters", async () => {
+    const { call } = host();
+    const minified = `${"a".repeat(2_500)}END`;
+    await call("write_file", { path: "app.min.js", content: `first\n${minified}` });
+    const read = (await call("read_file", { path: "app.min.js" })).result;
+    expect(read).toContain(
+      "2| " + "a".repeat(2_000) + "…(line cut: 2503 characters; read the rest with from_char=2006)",
+    );
+    expect(read).not.toContain("END");
+    const rest = (await call("read_file", { path: "app.min.js", from_char: 2006 })).result;
+    expect(rest).toBe(`(characters 2006 to 2509)\n${"a".repeat(500)}END`);
+  });
+
+  it("asks for a copy of a file only when a write or an edit is really about to change it", async () => {
+    const kept: { path: string; callId: string; written?: string }[] = [];
+    const tools = createToolHost(
+      BUILTIN_TOOLS,
+      {
+        workspace,
+        botId: "bot_x",
+        botName: "Ada",
+        threadId: "thr_x",
+        ask: async () => "",
+        keepCopy: async (path, callId) => {
+          const entry: (typeof kept)[number] = { path, callId };
+          kept.push(entry);
+          return (written) => void (entry.written = written);
+        },
+      },
+      async () => "allow",
+    );
+    const call = (id: string, name: string, args: Record<string, unknown>) =>
+      tools.execute({ id, name, arguments: args }, new AbortController().signal);
+    await call("w1", "write_file", { path: "a.txt", content: "one two" });
+    await call("e1", "edit_file", { path: "a.txt", find: "nothing", replace: "x" });
+    await call("e2", "edit_file", { path: "a.txt", find: "two", replace: "2" });
+    expect(kept.map((entry) => [entry.callId, entry.written])).toEqual([
+      ["w1", "one two"],
+      ["e2", "one 2"],
+    ]);
+    expect(kept[0]!.path).toBe(join(workspace, "a.txt"));
+  });
+
+  it("won't open a file too large to edit", async () => {
+    const { call } = host();
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(join(workspace, "huge.log"), Buffer.alloc(5 * 1024 * 1024, 120));
+    const edited = await call("edit_file", { path: "huge.log", find: "x", replace: "y", all: true });
+    expect(edited.result).toMatch(/too large to open here/);
   });
 
   it("asks before touching files outside the bot folder, and respects a denial", async () => {

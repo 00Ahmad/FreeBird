@@ -183,8 +183,11 @@ describe("the team's working folder", () => {
         if (part.type === "tool" && part.status === "pending_approval" && part.approval)
           cards.push({ name: part.name, kind: part.approval.kind });
     });
-    const { bot } = await makeCoding(h, out, { autoApprove: true });
+    // Auto-approve off: with it on, QA's routine commands run without a card.
+    const { bot } = await makeCoding(h, out, { autoApprove: false });
     await type(h, bot, "Make a note");
+    await until(h, bot.id, (p) => p.status === "awaiting_approval");
+    await h.app.inject({ method: "POST", url: `/api/bots/${bot.id}/coding/approve`, headers: auth });
     // Only QA's command asks: the Developer's write_file into the folder (a relative path) was free.
     const waiting = await until(h, bot.id, (p) => p.active?.role === "qa");
     expect(waiting.cards[0]!.column).toBe("qa");

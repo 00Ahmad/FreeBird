@@ -4,6 +4,7 @@
  */
 import { BUSINESS } from "./builtins/business";
 import { CODING } from "./builtins/coding";
+import { CODING_TEAM } from "./builtins/coding-team";
 import { DATA } from "./builtins/data";
 import { PLANNING } from "./builtins/planning";
 import { RESEARCH } from "./builtins/research";
@@ -11,12 +12,15 @@ import { WRITING } from "./builtins/writing";
 import type { BuiltinSkill } from "./types";
 
 export type { BuiltinSkill } from "./types";
+export * from "./assigned";
+export * from "./layers";
 export * from "./search";
 
 /** Every built-in skill, by category. */
 export const BUILTIN_SKILLS: readonly BuiltinSkill[] = [
   ...WRITING,
   ...CODING,
+  ...CODING_TEAM,
   ...RESEARCH,
   ...BUSINESS,
   ...PLANNING,

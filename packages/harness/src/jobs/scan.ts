@@ -4,30 +4,48 @@ import {
   buildMatch,
   canonicalUrl,
   employerSite,
-  careerSearches,
+  codeSearches,
+  CODE_SEARCHES_PER_ROUND,
   checkFacts,
   checkNotes,
+  deadKeys,
   factValue,
   fingerprints,
+  isClosedPosting,
   isGoodMatch,
   isSeen,
   linksOnPage,
+  LIST_LINKS,
+  listPickLimit,
+  looksLikeJob,
   mayFollowLinks,
+  pickFromList,
   pickLeads,
+  rankHits,
+  recentSearches,
   remember,
+  rememberDead,
+  requirementsLeftOut,
   requirementsOf,
-  saysClosed,
   scoreMatch,
   siteOf,
   warningsFor,
   type PageRead,
+  type SearchHit,
 } from "@mrog/jobs";
-import { MAX_SEEN_JOBS, type JobCard, type JobProject } from "@mrog/shared";
+import {
+  MAX_DEAD_PAGES,
+  MAX_JOB_CARDS,
+  MAX_SEARCHES_RUN,
+  MAX_SEEN_JOBS,
+  type JobCard,
+  type JobProject,
+} from "@mrog/shared";
 
-import { checkTask } from "./roles/checker";
+import { checkTask, keptTask, PAGE_CHARS } from "./roles/checker";
 import { MAX_CAREER_PAGES, MAX_SEARCHES, searchTask } from "./roles/searcher";
 import type { Phase } from "./phase";
-import { MAX_VISUAL_PAGES, type PageReading } from "./read-page";
+import { MAX_VISUAL_PAGES, type PageReading, type ReadOutcome } from "./read-page";
 import type { RoleRunner } from "./run-role";
 import type { JobState } from "./state";
 import { addCard } from "./board";
@@ -45,8 +63,15 @@ export const SCAN_LIMITS = {
   siteFailures: 2,
 };
 
-/** Web search for the scan: result addresses, or null when the search engines gave nothing related. */
-export type SearchFn = (botId: string, query: string, signal: AbortSignal) => Promise<string[] | null>;
+/**
+ * Web search for the scan: the results (an address, with the title the search showed when there is one), or null when
+ * the search engines gave nothing related.
+ */
+export type SearchFn = (
+  botId: string,
+  query: string,
+  signal: AbortSignal,
+) => Promise<(string | SearchHit)[] | null>;
 
 export interface ScanDeps {
   state: JobState;
@@ -66,10 +91,17 @@ export function createScanner(deps: ScanDeps) {
   return async function scan(
     botId: string,
     target: number,
-    signal: AbortSignal,
+    stopSignal: AbortSignal,
     phase: Phase,
   ): Promise<string> {
     const start = Date.now();
+    // One deadline for the whole scan, passed down with Stop: a slow Checker turn or a slow page ends at it, instead
+    // of the limit being looked at only between pages.
+    const deadline = AbortSignal.timeout(limits().minutes * 60_000);
+    const signal = AbortSignal.any([stopSignal, deadline]);
+    const timeIsUp = () => deadline.aborted && !stopSignal.aborted;
+    /** Pages only you can get past, set aside so the scan carries on; you're asked about them at the end. */
+    const setAside: { url: string; reason: string }[] = [];
     const startProject = state.need(botId);
     const number = (startProject.scan?.number ?? 0) + 1;
     state.change(botId, (p) => {
@@ -89,7 +121,21 @@ export function createScanner(deps: ScanDeps) {
       state.logLine(p, `Scan ${number}: looking for ${target} new job${target === 1 ? "" : "s"}`);
     });
     const requirements = requirementsOf(startProject.profile);
-    const tried: string[] = [];
+    const leftOut = requirementsLeftOut(startProject.profile);
+    if (leftOut > 0)
+      state.change(botId, (p) =>
+        state.logLine(
+          p,
+          `${leftOut} of your least important requirements (must-haves or nice-to-haves at the end of the list) aren't checked: a small model loses track of a longer list`,
+        ),
+      );
+    /** Searches run in the last two weeks, by earlier scans: not run again, and the Searcher is told of them. */
+    const pastQueries = startProject.searchesRun
+      .filter((run) => recentSearches([run], new Date()).length > 0)
+      .map((run) => run.query);
+    const skipQueries = new Set(pastQueries.map((query) => query.toLowerCase()));
+    /** Searches this scan ran. */
+    const ran: string[] = [];
     const queue: string[] = [];
     const read = new Set<string>();
     let failures = 0;
@@ -114,24 +160,46 @@ export function createScanner(deps: ScanDeps) {
       phase.say(`Scan ${number}: found ${s.found} of ${s.target} new jobs (${s.pagesRead} pages read).`);
     };
     /** Addresses already shown or read this scan, as `pickLeads` skips them. */
-    const skipSet = () => new Set([...state.need(botId).seen, ...[...read].map((key) => `u:${key}`)]);
+    const skipSet = () => {
+      const project = state.need(botId);
+      return new Set([
+        ...project.seen,
+        ...deadKeys(project.deadPages, new Date()),
+        ...[...read].map((key) => `u:${key}`),
+      ]);
+    };
+    /**
+     * Remembers a page that led nowhere, so later scans skip it (never a list: new jobs appear on those). `lasting`:
+     * it won't come back (gone, closed, already shown).
+     */
+    const dead = (urls: string[], reason: string, lasting: boolean) =>
+      state.change(botId, (p) => {
+        for (const url of new Set(urls))
+          p.deadPages = rememberDead(p.deadPages, url, reason, lasting, new Date(), MAX_DEAD_PAGES);
+      });
 
     const searchMore = async () => {
       const project = state.need(botId);
       if (scanOf(project).searchRounds >= limits().searchRounds)
         throw new ScanEnd(
-          searchedNothing > 0 && tried.length === searchedNothing
+          ran.length > 0 && searchedNothing === ran.length
             ? "The web searches found nothing. A hidden browser often gets no results: set up a search service in Settings → Browser, or turn on Show the browser window."
             : "Ran out of places to look. Try again later, or widen your profile.",
         );
-      const first = scanOf(project).searchRounds === 0;
       state.change(botId, (p) => void (scanOf(p).searchRounds += 1));
-      // The first round starts with searches of companies' own job systems, made from the profile by code.
-      const careers = first ? careerSearches(project.profile) : [];
+      // Every round starts with searches of companies' own job systems, made from the profile by code: the next title,
+      // place and job system not searched lately, so a later round or scan looks somewhere new.
+      const careers = codeSearches(project.profile)
+        .filter((query) => !skipQueries.has(query.toLowerCase()))
+        .slice(0, CODE_SEARCHES_PER_ROUND);
       phase.say(`Scan ${number}: planning searches…`);
-      const reply = await roles.run(botId, "searcher", searchTask(project.profile, tried, target), signal, {
-        phase,
-      });
+      const reply = await roles.run(
+        botId,
+        "searcher",
+        searchTask(project.profile, [...pastQueries, ...ran], target),
+        signal,
+        { phase },
+      );
       const plan = reply.capture.plan;
       if (!plan) {
         if (reply.error && careers.length === 0)
@@ -141,17 +209,26 @@ export function createScanner(deps: ScanDeps) {
       const leads: string[] = (plan?.careerPages ?? [])
         .slice(0, MAX_CAREER_PAGES)
         .filter((url) => canonicalUrl(url));
+      const titles = [...project.profile.titles, ...project.profile.relatedTitles];
       for (const query of [...careers, ...(plan?.searches ?? []).slice(0, MAX_SEARCHES)]) {
-        if (tried.some((q) => q.toLowerCase() === query.toLowerCase())) continue;
-        tried.push(query);
+        if (skipQueries.has(query.toLowerCase())) continue;
+        skipQueries.add(query.toLowerCase());
+        ran.push(query);
+        state.change(botId, (p) => {
+          p.searchesRun = [
+            ...p.searchesRun.filter((run) => run.query.toLowerCase() !== query.toLowerCase()),
+            { query, at: state.now() },
+          ].slice(-MAX_SEARCHES_RUN);
+        });
         phase.say(`Scan ${number}: searching “${query}”…`);
-        const urls = await deps.search(botId, query, signal).catch((error: unknown) => {
+        const hits = await deps.search(botId, query, signal).catch((error: unknown) => {
           if (signal.aborted) throw error;
           state.change(botId, (p) => state.logLine(p, `Search failed: ${(error as Error).message}`));
           return null;
         });
-        if (!urls || urls.length === 0) searchedNothing += 1;
-        leads.push(...(urls ?? []));
+        if (!hits || hits.length === 0) searchedNothing += 1;
+        // The titles the search showed put postings of jobs you want first, and drop plainly other jobs unread.
+        leads.push(...rankHits(hits ?? [], titles));
       }
       const picked = pickLeads(leads, skipSet());
       queue.push(...picked);
@@ -170,6 +247,7 @@ export function createScanner(deps: ScanDeps) {
             `Couldn't confirm a job at ${siteOf(page.url)}: ${checked.dropped.join("; ") || "no title or company"}`,
           ),
         );
+        dead([page.url], "couldn't confirm a job", false);
         return;
       }
       const prints = fingerprints({
@@ -178,7 +256,11 @@ export function createScanner(deps: ScanDeps) {
         title: factValue(checked.facts, "title"),
         location: factValue(checked.facts, "location"),
       });
-      if (isSeen(new Set(state.need(botId).seen), prints)) return;
+      if (isSeen(new Set(state.need(botId).seen), prints)) {
+        // The same job under another address: already shown, so this address needn't be read again either.
+        dead([page.url], "a job already shown", true);
+        return;
+      }
       const match = buildMatch(requirements, result.verdicts, checked.facts);
       const { score } = scoreMatch(match);
       const card: JobCard = {
@@ -198,9 +280,21 @@ export function createScanner(deps: ScanDeps) {
         company: checkNotes(page.text, result.company),
         reaction: null,
         reason: null,
+        unchecked: 0,
       };
+      let full = false;
       state.change(botId, (p) => {
-        addCard(p, card);
+        const placed = addCard(p, card);
+        if (placed === "weaker") p.seen = remember(p.seen, prints, MAX_SEEN_JOBS);
+        if (placed !== "added") {
+          full = placed === "full";
+          if (placed === "weaker")
+            state.logLine(
+              p,
+              `Not added (the board is full, and every job in Found is a better match): ${factValue(card.facts, "title")}`,
+            );
+          return;
+        }
         p.seen = remember(p.seen, prints, MAX_SEEN_JOBS);
         // Only a job like yours counts toward the number you asked for; a weak one is still on the board.
         const good = isGoodMatch(score);
@@ -211,33 +305,87 @@ export function createScanner(deps: ScanDeps) {
           `${good ? "Found" : "Weaker match"}: ${factValue(card.facts, "title")} at ${factValue(card.facts, "company")} (${score})`,
         );
       });
+      if (full)
+        throw new ScanEnd(
+          `The board is full (${MAX_JOB_CARDS} jobs) with jobs you're working on. Move some to Not for me or Rejected to make room.`,
+        );
     };
 
-    const checkPage = async (url: string) => {
-      if (blockedSites.has(employerSite(url))) return;
+    /**
+     * The jobs a list page holds, picked by code: always for a job system's list; for another page only when it is
+     * longer than the Checker reads and code finds jobs you want on it (else the Checker reads it as before).
+     */
+    const listByCode = (page: PageRead): { jobs: number; picked: string[] } | null => {
+      const limit = listPickLimit(target);
+      const profile = state.need(botId).profile;
+      if (page.reader === "api" && page.links.length > 0)
+        return { jobs: page.links.length, picked: pickFromList(page.links, profile, limit) };
+      const jobLinks = page.links.filter((link) => looksLikeJob(link.url));
+      if (page.text.length <= PAGE_CHARS || jobLinks.length < LIST_LINKS || !mayFollowLinks(page.url))
+        return null;
+      const picked = pickFromList(jobLinks, profile, limit);
+      return picked.length > 0 ? { jobs: jobLinks.length, picked } : null;
+    };
+
+    /** Reads and checks one address; `pre`: the page as it is after you dealt with it (see the end of the scan). */
+    const checkPage = async (url: string, pre?: ReadOutcome) => {
+      if (!pre && blockedSites.has(employerSite(url))) return;
       const allowVisual = scanOf(state.need(botId)).visualPages < MAX_VISUAL_PAGES;
-      const outcome = await reading.read(url, { botId, signal, phase }, allowVisual);
+      const outcome =
+        pre ?? (await reading.read(url, { botId, signal, phase }, allowVisual, { defer: true }));
+      if ("skip" in outcome && outcome.needsYou) {
+        const reason = outcome.needsYou;
+        setAside.push({ url, reason });
+        state.change(botId, (p) => state.logLine(p, `Set aside for you: ${siteOf(url)}: ${reason}`));
+        // A site whose pages keep needing you (a sign-in for every job) is skipped like one that blocks the bot.
+        failedOn(url);
+        return;
+      }
       if ("skip" in outcome) {
         state.change(botId, (p) => state.logLine(p, `Skipped ${siteOf(url)}: ${outcome.skip}`));
-        // A closed job's missing page is about that job, not about the site blocking the bot.
-        if (!outcome.gone) failedOn(url);
+        // A closed job's missing page is about that job, not about the site blocking the bot; a page you skipped says
+        // nothing about the site either.
+        if (!outcome.gone && !pre) failedOn(url);
+        else dead([url], outcome.skip, true);
         return;
       }
       const page = outcome.page;
       read.add(canonicalUrl(page.url) ?? page.url);
-      state.change(botId, (p) => {
-        scanOf(p).pagesRead += 1;
-        if (page.reader === "visual") scanOf(p).visualPages += 1;
-      });
-      if (saysClosed(page.text)) return;
+      // (The Visual helper counts its own tries, worked or not: see readers/visual.ts.)
+      state.change(botId, (p) => void (scanOf(p).pagesRead += 1));
+      // A posting that says it's closed needs no model; a list that mentions a closed job is still read.
+      if (isClosedPosting(page)) {
+        state.change(botId, (p) =>
+          state.logLine(p, `Skipped ${siteOf(page.url)}: the page says the job is closed`),
+        );
+        dead([url, page.url], "the job is closed", true);
+        return;
+      }
+      // A list code can read: a job system's own list, or a long list whose links name jobs you want. Every title is
+      // checked by code and the ones that fit are queued: no model turn, and none missed past what a model would see.
+      const fromList = listByCode(page);
+      if (fromList) {
+        const picked = pickLeads(fromList.picked, skipSet());
+        queue.unshift(...picked);
+        state.change(botId, (p) =>
+          state.logLine(
+            p,
+            fromList.picked.length > 0
+              ? `${siteOf(page.url)} lists ${fromList.jobs} jobs: ${picked.length} new ones fit your titles`
+              : `${siteOf(page.url)} lists ${fromList.jobs} jobs, none with a title you want`,
+          ),
+        );
+        return;
+      }
       const reply = await roles.run(botId, "checker", checkTask(page, requirements), signal, {
         phase,
         url: page.url,
+        keepAs: keptTask,
       });
       const result = reply.capture.result;
       if (!result) {
+        // The model's failure, not the site's: two of them must not skip an employer for the rest of the scan.
         failures += 1;
-        failedOn(page.url);
         state.change(botId, (p) =>
           state.logLine(
             p,
@@ -252,16 +400,54 @@ export function createScanner(deps: ScanDeps) {
       }
       failures = 0;
       if (result.kind === "job") addJob(page, result);
+      else if (result.kind === "other") dead([url, page.url], "not a job", false);
       else if (result.kind === "list" && mayFollowLinks(page.url))
         queue.unshift(...pickLeads(linksOnPage(result.links, page.links), skipSet()).slice(0, 10));
     };
 
+    /**
+     * The pages set aside for you, one at a time: you deal with each in the browser, or skip it. Once you leave one
+     * unanswered, the rest are skipped without waiting: nobody is there.
+     */
+    const askAboutSetAside = async (): Promise<string> => {
+      if (setAside.length === 0) return "";
+      const unread = (n: number) =>
+        ` ${n} page${n === 1 ? "" : "s"} that needed you ${n === 1 ? "was" : "were"} left unread.`;
+      if (stopSignal.aborted || timeIsUp() || scanOf(state.need(botId)).found >= target)
+        return unread(setAside.length);
+      for (const [index, item] of setAside.entries()) {
+        if (scanOf(state.need(botId)).found >= target) break;
+        const left = setAside.length - index;
+        phase.say(`Scan ${number}: ${left} page${left === 1 ? " needs" : "s need"} you.`);
+        const outcome = await reading.askYou(item.url, item.reason, { botId, signal: stopSignal, phase });
+        if ("skip" in outcome && outcome.timedOut) {
+          const rest = setAside.length - index - 1;
+          state.change(botId, (p) =>
+            state.logLine(
+              p,
+              `Nobody answered${rest > 0 ? `: skipped the other ${rest} page(s) that need you` : ""}`,
+            ),
+          );
+          // The page nobody answered was left unread too, as were the rest.
+          return unread(rest + 1);
+        }
+        try {
+          await checkPage(item.url, outcome);
+        } catch (error) {
+          if (error instanceof ScanEnd) break;
+          throw error;
+        }
+      }
+      return "";
+    };
+
+    let ended: string;
     try {
       for (;;) {
         const s = scanOf(state.need(botId));
         if (s.found >= target) throw new ScanEnd(`Found ${s.found} new job${s.found === 1 ? "" : "s"}.`);
         if (s.pagesRead >= limits().pages(target)) throw new ScanEnd("Read the most pages one scan may.");
-        if (Date.now() - start > limits().minutes * 60_000)
+        if (Date.now() - start > limits().minutes * 60_000 || timeIsUp())
           throw new ScanEnd("Reached the time limit for one scan.");
         const next = queue.shift();
         if (!next) {
@@ -275,19 +461,24 @@ export function createScanner(deps: ScanDeps) {
         progress();
       }
     } catch (error) {
-      if (!(error instanceof ScanEnd)) throw error;
-      const found = scanOf(state.need(botId)).found;
-      const reason =
-        found >= target || found === 0
-          ? error.message
-          : `Found ${found} of the ${target} you asked for: ${error.message}`;
-      state.change(botId, (p) => {
-        scanOf(p).endedAt = state.now();
-        scanOf(p).stopReason = reason;
-        state.logLine(p, reason);
-      });
-      return reason;
+      // The deadline ended whatever was running (a Checker turn, a page): that is the time limit, not a Stop.
+      if (!(error instanceof ScanEnd) && !timeIsUp()) throw error;
+      ended = error instanceof ScanEnd ? error.message : "Reached the time limit for one scan.";
     }
+    const unread = await askAboutSetAside();
+    const found = scanOf(state.need(botId)).found;
+    const reason =
+      (found >= target
+        ? `Found ${found} new job${found === 1 ? "" : "s"}.`
+        : found === 0
+          ? ended
+          : `Found ${found} of the ${target} you asked for: ${ended}`) + unread;
+    state.change(botId, (p) => {
+      scanOf(p).endedAt = state.now();
+      scanOf(p).stopReason = reason;
+      state.logLine(p, reason);
+    });
+    return reason;
   };
 }
 

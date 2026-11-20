@@ -11,6 +11,8 @@ import {
   type CodingProject,
 } from "@mrog/shared";
 
+import { buildOrder } from "./coding-contract";
+import { readDone } from "./coding-done";
 import { nameProblem, protectedPathReason } from "./coding-paths";
 
 /** The longest purpose or connection description a plan may carry: a plan nobody can read is not a plan. */
@@ -24,8 +26,13 @@ const BAD_NAME = /[<>:"|?*]/;
 // oxlint-disable-next-line no-control-regex -- control characters are exactly what this looks for
 const INVISIBLE = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
 
+/**
+ * `dropped`: done checks left out because they weren't in one of the forms. An optional extra, so a check written
+ * wrong never costs a whole plan: the plan is accepted without it, and the Planner is told.
+ */
 export type PlanResult =
-  { ok: true; nodes: CodingNode[]; edges: CodingEdge[] } | { ok: false; errors: string[] };
+  | { ok: true; nodes: CodingNode[]; edges: CodingEdge[]; dropped?: string[] }
+  | { ok: false; errors: string[] };
 
 /**
  * A path the way the plan keeps it: one Unicode form, forward slashes, no "./" steps, no doubled slashes. Written two
@@ -111,6 +118,7 @@ export function validatePlan(raw: unknown): PlanResult {
     );
 
   const nodes: CodingNode[] = [];
+  const dropped: string[] = [];
   const seen = new Map<string, number>();
   rawNodes.slice(0, MAX_PLAN_FILES).forEach((entry, index) => {
     const item = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
@@ -127,7 +135,9 @@ export function validatePlan(raw: unknown): PlanResult {
     if (first !== undefined)
       return void errors.push(`${label}: listed twice (also nodes[${first}]). Each file appears once.`);
     seen.set(key, index);
-    nodes.push({ id: `n${nodes.length + 1}`, path, purpose });
+    const { done, errors: doneErrors } = readDone(item.done, label);
+    dropped.push(...doneErrors);
+    nodes.push({ id: `n${nodes.length + 1}`, path, purpose, ...(done ? { done } : {}) });
   });
   // "src" can't be a file when "src/app.py" needs it to be a folder.
   for (const node of nodes) {
@@ -186,7 +196,8 @@ export function validatePlan(raw: unknown): PlanResult {
     });
   }
 
-  return errors.length > 0 ? { ok: false, errors } : { ok: true, nodes, edges };
+  if (errors.length > 0) return { ok: false, errors };
+  return dropped.length > 0 ? { ok: true, nodes, edges, dropped } : { ok: true, nodes, edges };
 }
 
 /** How many times the scan starts again after a `{` that never closed (each start is one pass over the text). */
@@ -310,7 +321,31 @@ export const zeroWork = (): CardWork => ({
   turns: 0,
 });
 
-/** The board for a fresh plan: a card per file, then a card per connection, all in Todo. */
+/**
+ * The board for a new plan: a card per file, in Todo. Connections stay in the plan (what each file is told it connects
+ * to, the diagram) but get no card of their own: a card that only says "make this connection work" gives a small model
+ * nothing to finish, and in practice came back "already wired" or ran on without end. Each file card checks its own
+ * connections, and the code check at the start of every QA pass catches names, ids and imports that don't match.
+ * The cards are in build order (see coding-contract.ts): data and settings, pages, scripts, styles, docs, keeping the
+ * Planner's order within each kind, so a script is written against the page's real ids and a stylesheet sees the
+ * classes the scripts create.
+ */
+export function fileCardsFor(nodes: CodingNode[]): CodingCard[] {
+  return buildOrder(nodes, (node) => node.path).map((node): CodingCard => ({
+    id: `card_${node.id}`,
+    kind: "file",
+    ref: node.id,
+    title: node.path,
+    column: "todo",
+    comments: [],
+    work: zeroWork(),
+  }));
+}
+
+/**
+ * A board with a card per file and a card per connection, as plans made before connections lost their cards had.
+ * Such projects still run: the loop handles a connection card wherever it finds one.
+ */
 export function cardsFor(nodes: CodingNode[], edges: CodingEdge[]): CodingCard[] {
   const path = new Map(nodes.map((node) => [node.id, node.path]));
   return [
@@ -364,9 +399,10 @@ export function filesReady(project: CodingProject, card: CodingCard): boolean {
 /** The next card for the Developer: a Todo file in the planner's order, else a Todo connection whose files are ready. */
 export function nextForDeveloper(project: CodingProject): CodingCard | null {
   return (
-    project.cards.find((card) => card.kind === "file" && card.column === "todo") ??
+    project.cards.find((card) => card.kind === "file" && card.column === "todo" && !card.parked) ??
     project.cards.find(
-      (card) => card.kind === "connector" && card.column === "todo" && filesReady(project, card),
+      (card) =>
+        card.kind === "connector" && card.column === "todo" && !card.parked && filesReady(project, card),
     ) ??
     null
   );

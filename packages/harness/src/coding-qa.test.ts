@@ -71,7 +71,7 @@ const PAIR = {
 const SHOW = `export function show() {\n  document.getElementById('weather').textContent = 'sunny';\n}\n`;
 
 describe("a file that changes sends the cards that rely on it back to QA", () => {
-  it("replays the weather app: the connection fix edits a shared file, the passed cards are checked again, and only then is it done", async () => {
+  it("replays the weather app on an older board: the connection fix edits a shared file, the passed cards are checked again, and only then is it done", async () => {
     const team = codingTeam({
       plans: [{ tool: WEATHER }],
       develop: (card, attempt) => {
@@ -94,6 +94,7 @@ describe("a file that changes sends the cards that rely on it back to QA", () =>
             : { pass: true },
     });
     h = await startTeam(team);
+    h.services.coding.timing.connectionCards = true;
     const published = watch(h);
     const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
     await type(h, bot, "A weather page");
@@ -138,7 +139,7 @@ describe("a file that changes sends the cards that rely on it back to QA", () =>
     expect(requeued!.status).not.toBe("done");
   });
 
-  it("tells QA what was said on the cards around the one it is reviewing", async () => {
+  it("tells QA what was said on the cards around the one it is reviewing, on an older board", async () => {
     const team = codingTeam({
       plans: [{ tool: WEATHER }],
       develop: (card, attempt) =>
@@ -155,6 +156,7 @@ describe("a file that changes sends the cards that rely on it back to QA", () =>
           : { pass: true },
     });
     h = await startTeam(team);
+    h.services.coding.timing.connectionCards = true;
     const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
     await type(h, bot, "A weather page");
     await until(h, bot.id, (p) => p.status === "done");
@@ -168,17 +170,15 @@ describe("a file that changes sends the cards that rely on it back to QA", () =>
 });
 
 describe("the check of the whole project", () => {
-  it("catches the plain <script> that loads a module, sends the connection back, and finishes only after the fix", async () => {
+  it("catches the plain <script> that loads a module in the first QA pass, sends the page back, and finishes only after the fix", async () => {
     const team = codingTeam({
       plans: [{ tool: PAIR }],
       develop: (card, attempt) =>
         card.key === "index.html"
-          ? { write: PAGE_PLAIN }
+          ? { write: attempt === 1 ? PAGE_PLAIN : PAGE_MODULE }
           : card.key === "weather-app.js"
             ? { write: SHOW }
-            : attempt === 2
-              ? { extra: { path: "index.html", content: PAGE_MODULE } }
-              : {},
+            : {},
     });
     h = await startTeam(team);
     const published = watch(h);
@@ -186,21 +186,24 @@ describe("the check of the whole project", () => {
     await type(h, bot, "A weather page");
     const done = await until(h, bot.id, (p) => p.status === "done");
 
-    const connection = done.cards.find((c) => c.title === "index.html ↔ weather-app.js")!;
-    const comment = connection.comments.find((c) => c.author === "qa" && c.text.includes("plain <script"))!;
+    // It goes to the page: the file whose <script> tag needs type="module".
+    const page = done.cards.find((c) => c.title === "index.html")!;
+    const comment = page.comments.find((c) => c.author === "qa" && c.text.includes("plain <script"))!;
     expect(comment.text).toContain('type="module"');
     expect(comment.round).toBe(1);
-    // A finding of the automatic check is its own kind of comment.
+    // A finding of the automatic check is its own kind of comment. It is caught by the code check at the start of the
+    // first QA pass, before any QA turn, not only once every card has passed.
     expect(comment.kind).toBe("check");
-    expect(done.log!.map((l) => l.text)).toContain(
-      `The automatic check sent index.html ↔ weather-app.js back: ${comment.text.slice(0, 69).trim()}…`,
+    expect(comment.text).toMatch(/^Code check: /);
+    expect(done.log!.map((l) => l.text)).toContainEqual(
+      expect.stringMatching(/^The code check sent index\.html back: Code check: /),
     );
     // The model is asked about the whole project only once the automatic check finds nothing.
     expect(finalChecksOf(team)).toHaveLength(1);
     expect(done.round).toBe(2);
     // It was sent back, fixed, checked by QA again, and only then done.
     const back = published.findIndex(
-      (p) => p.cards[2]?.column === "todo" && p.round === 1 && p.status === "developing",
+      (p) => p.cards[0]?.column === "todo" && p.round === 1 && p.status === "developing",
     );
     const finished = published.findIndex((p) => p.status === "done");
     expect(back).toBeGreaterThan(-1);
@@ -320,7 +323,7 @@ describe("the closing message", () => {
     await type(h, bot, "A weather page");
     await until(h, bot.id, (p) => p.status === "done");
     const last = messageText(h.store.messages.list(bot.threadId).at(-1)!);
-    expect(last).toMatch(/^Done: all 5 cards passed QA\. The project is in /);
+    expect(last).toMatch(/^Done: all 3 cards passed QA\. The project is in /);
     expect(last).toContain(
       "\n\nBefore you run it:\n- add your own API key in api-config.js\n- open it through a local web server (for example run `python -m http.server` in the folder), not by double-clicking the file",
     );
@@ -376,11 +379,13 @@ describe("what QA and the Developer are told", () => {
     expect(text).toContain("Notes on this card so far:");
   });
 
-  it("gives a file card the comments of the connections that touch it", () => {
+  it("gives a file card the comments of its connections and the last 3 of each file it connects to", () => {
     const p = project();
     const text = qaMessage(p, p.cards[1]!, false, "linux");
     expect(text).toContain("- a.js ↔ b.js: QA (round 2): link: needs an import");
-    expect(text).not.toContain("a: note");
+    // A board with no connection cards still hears what was said about the files on the other end.
+    expect(text).toContain("- a.js: Developer (round 5): a: note 5");
+    expect(text).not.toContain("a: note 2");
   });
 
   it("has no neighbours section when nobody has said anything", () => {
@@ -403,8 +408,8 @@ describe("what QA and the Developer are told", () => {
     expect(shellNote("darwin")).toContain("sh");
     // The note follows this computer when nobody says otherwise.
     expect(shellNote()).toBe(shellNote(process.platform));
-    // And each command still asks the user first.
-    expect(windows).toContain("each command asks the user first");
+    // And QA knows a command may wait for the user's approval (Auto-approve covers routine ones).
+    expect(windows).toContain("a command may need the user's approval first");
   });
 
   it("forbids invented secrets, and has QA accept a marked placeholder", () => {

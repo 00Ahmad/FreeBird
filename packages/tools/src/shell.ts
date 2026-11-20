@@ -158,7 +158,7 @@ export function runShell(
 export function formatCommandResult(result: CommandResult, timeoutSeconds: number): string {
   const text =
     result.output.length > RETURN_CHARS
-      ? `â€¦(earlier output cut)\n${result.output.slice(-RETURN_CHARS)}`
+      ? `…(earlier output cut)\n${result.output.slice(-RETURN_CHARS)}`
       : result.output;
   const status = result.timedOut
     ? `Timed out after ${timeoutSeconds}s and was stopped.`

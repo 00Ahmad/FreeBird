@@ -9,7 +9,8 @@ import type {
 } from "@mrog/shared";
 
 import type { Services } from "../services";
-import { answerSuggestion, moveCard, react } from "./board";
+import { answerSuggestion, moveCard, react, rescoreBoard } from "./board";
+import { checkStillOpen } from "./check-open";
 import { createChat } from "./chat";
 import { createHandoffs, HANDOFF_LIMIT_MS, type HandoffAnswer } from "./handoff";
 import { installJobHooks } from "./hooks";
@@ -43,11 +44,15 @@ export function installJobs(services: Services) {
       api: apiReader(services.fetchImpl),
       text: textReader(services.fetchImpl),
       browser: browserReader(browser),
-      visual: visualReader(browser, state, roles),
+      visual: visualReader(browser, state, roles, services),
     } as Partial<Record<Exclude<JobReader, "you">, PageReader>>,
     /** Searches in the Job Bot's own tab (or the search service set in Settings → Browser). */
+    // The title each result showed goes along: the scan ranks postings of jobs you want first, and drops others.
     search: (async (botId, query, signal) =>
-      (await browser.searchResults(botId, query, signal))?.map((result) => result.url) ?? null) as SearchFn,
+      (await browser.searchResults(botId, query, signal))?.map((result) => ({
+        url: result.url,
+        ...(result.title ? { title: result.title } : {}),
+      })) ?? null) as SearchFn,
     reread: (botId: string) => tabPage(browser, botId, "you"),
     show: async (botId: string, url: string) => {
       await browser.goto(botId, url);
@@ -123,23 +128,83 @@ export function installJobs(services: Services) {
         closing = summary(state.need(botId), await scanner(botId, target, controller.signal, phase));
       } catch (error) {
         if (!(error instanceof Halt) && !controller.signal.aborted) {
-          closing = `The scan failed: ${(error as Error).message}`;
+          const failed = `The scan failed: ${(error as Error).message}`;
+          closing = failed;
           state.change(botId, (p) => {
             p.error = closing;
-            state.logLine(p, closing);
+            // The scan has ended, failed: its card and the status line say so instead of looking unfinished.
+            if (p.scan && !p.scan.endedAt)
+              Object.assign(p.scan, { endedAt: state.now(), stopReason: failed });
+            state.logLine(p, failed);
           });
-        } else
+          // What it found before it failed is on the board: said, so it isn't missed.
+          closing = summary(state.need(botId), failed);
+        } else {
           state.change(botId, (p) => {
             if (p.scan && !p.scan.endedAt)
               Object.assign(p.scan, { endedAt: state.now(), stopReason: "You stopped it." });
             state.logLine(p, "Scan stopped");
           });
+          // The jobs found before Stop are on the board: the closing words say which, as for a scan that finished.
+          const now = state.load(botId);
+          if (now) closing = summary(now, "Scan stopped.");
+        }
       } finally {
         runs.delete(botId);
         state.change(botId, (p) => {
           p.status = p.error ? "error" : "ready";
           p.active = null;
           p.handoff = null;
+        });
+        phase?.close(closing, controller.signal.aborted ? "stopped" : "done");
+      }
+    })();
+    runs.set(botId, { controller, done });
+    return structuredClone(state.need(botId));
+  };
+
+  /**
+   * Checks whether the board's Found and Shortlisted jobs are still open, when you press Check: the cheap readers and no
+   * model, never on a timer. Not while a scan runs (it reads with the same tab and limits).
+   */
+  const checkOpen = (botId: string) => {
+    const project = state.need(botId);
+    if (runs.has(botId))
+      throw new JobError("Wait for the scan to end, or stop it first.", "wrong_state", 409);
+    if (!project.cards.some((card) => card.column === "found" || card.column === "shortlisted"))
+      throw new JobError("There are no jobs in Found or Shortlisted to check.", "wrong_state", 409);
+    const controller = new AbortController();
+    const phase = openPhase(services, botId, "Checking whether your jobs are still open…");
+    state.change(botId, (p) => {
+      p.status = "scanning";
+      p.note = "Checking whether your jobs are still open";
+    });
+    const done = (async () => {
+      let closing = "Stopped checking.";
+      try {
+        if (!phase) return;
+        const { checked, closed, unreadable } = await checkStillOpen({
+          state,
+          botId,
+          readers: io.readers,
+          signal: controller.signal,
+          phase,
+        });
+        // Stopped part way: the closing words say so, not "all still open" for jobs never read.
+        closing = controller.signal.aborted
+          ? `Stopped checking.${closed > 0 ? ` ${closed} closed so far (marked on the board).` : ""}`
+          : `Checked ${checked} job${checked === 1 ? "" : "s"}: ${
+              closed === 0 ? "all still open" : `${closed} closed (marked on the board)`
+            }${unreadable > 0 ? `; ${unreadable} couldn't be read this way` : ""}.`;
+        state.change(botId, (p) => state.logLine(p, closing));
+      } catch (error) {
+        closing = `The check failed: ${(error as Error).message}`;
+        state.change(botId, (p) => state.logLine(p, closing));
+      } finally {
+        runs.delete(botId);
+        state.change(botId, (p) => {
+          p.status = p.error ? "error" : "ready";
+          p.note = null;
         });
         phase?.close(closing, controller.signal.aborted ? "stopped" : "done");
       }
@@ -186,6 +251,8 @@ export function installJobs(services: Services) {
       } catch (error) {
         throw new JobError(`That profile doesn't fit: ${(error as Error).message}`);
       }
+      // The board follows the profile: scores worked out again, by code.
+      rescoreBoard(p);
       if (p.status === "interview" && missingForApproval(p.profile).length === 0)
         p.status = "awaiting_profile";
     });
@@ -224,6 +291,8 @@ export function installJobs(services: Services) {
       team.removeTeam(project);
     }),
   );
+  // Saves still waiting go to disk as the app closes. (Disposers run in reverse order: this one after scans stop.)
+  services.disposers.push(() => state.flush());
   services.disposers.push(() => {
     for (const run of runs.values()) run.controller.abort();
   });
@@ -244,6 +313,7 @@ export function installJobs(services: Services) {
     updateProfile,
     approveProfile,
     startScan,
+    checkOpen,
     stop,
     answerHandoff,
     react: (botId: string, cardId: string, input: ReactToJobInput) =>
@@ -251,7 +321,10 @@ export function installJobs(services: Services) {
     move: (botId: string, cardId: string, column: JobColumn) =>
       edit(botId, (p) => moveCard(p, cardId, column)),
     answerSuggestion: (botId: string, id: string, accept: boolean) =>
-      edit(botId, (p) => answerSuggestion(p, id, accept)),
+      edit(botId, (p) => {
+        answerSuggestion(p, id, accept);
+        if (accept) rescoreBoard(p);
+      }),
     isTeamBot: team.isTeamBot,
     isTeamThread: team.isTeamThread,
     isRoleBot: (bot: Parameters<typeof team.roleOf>[0]) => team.roleOf(bot) !== null,

@@ -1,4 +1,4 @@
-import { Download, FileText, Pencil, Plus, Trash2, UserMinus, UserPlus, X } from "lucide-react";
+import { Download, FileText, Pencil, Pin, Plus, Trash2, UserMinus, UserPlus, X } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { MAX_GROUP_MEMBERS, type Bot, type Thread } from "@mrog/shared";
@@ -179,6 +179,24 @@ function BotDetails({ bot }: { bot: Bot }) {
           />
           Notify me when {bot.name} replies while I'm elsewhere
         </label>
+        {/* A helper follows its coordinator, and a Coding, Job or Client Bot's team has its own rules. */}
+        {!bot.parentId && !bot.coding && !bot.job && !bot.client && (
+          <label className="mt-1.5 flex items-start gap-2 text-[13px]">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={bot.approvalsWait}
+              onChange={(event) => patch({ approvalsWait: event.target.checked })}
+            />
+            <span>
+              Wait for my answer to approvals
+              <span className="block text-[11.5px] text-ink-3">
+                Otherwise a request nobody answers is dropped after 15 minutes and {bot.name} carries on
+                without it. Its helpers follow this too.
+              </span>
+            </span>
+          </label>
+        )}
       </Block>
 
       <TeamBlock bot={bot} />
@@ -293,8 +311,11 @@ function TeamBlock({ bot }: { bot: Bot }) {
 }
 
 function MemoryBlock({ bot }: { bot: Bot }) {
-  const { data: notes } = useMemory(bot.id);
-  const { add, update, remove, importText } = useMemoryActions(bot.id);
+  const { data: memory } = useMemory(bot.id);
+  const notes = memory?.notes;
+  const notSent = memory?.notSent ?? 0;
+  const sent = new Set(memory?.sentIds ?? notes?.map((note) => note.id) ?? []);
+  const { add, update, pin, remove, importText } = useMemoryActions(bot.id);
   const [adding, setAdding] = useState(false);
   const [text, setText] = useState("");
   const [importing, setImporting] = useState<string | null>(null);
@@ -313,9 +334,31 @@ function MemoryBlock({ bot }: { bot: Bot }) {
           Nothing yet. Bots save notes when you ask them to remember something.
         </p>
       )}
+      {notSent > 0 && (
+        <p className="mb-1 text-[12px] text-warning">
+          The {notSent === 1 ? "oldest note doesn't" : `${notSent} oldest notes don't`} fit the bot's prompt
+          any more, so it doesn't see {notSent === 1 ? "it" : "them"} (greyed out below). Delete or shorten
+          notes it no longer needs, or pin the ones it must always see.
+        </p>
+      )}
+      {memory?.pinnedOver && (
+        <p className="mb-1 text-[12px] text-warning">
+          The pinned notes alone are more than the room for memory in {bot.name}'s prompt. They are all still
+          sent; shorten or unpin some so its other notes fit.
+        </p>
+      )}
+      {pin.error && <p className="mb-1 text-[12px] text-danger">{pin.error.message}</p>}
       <ul className="flex flex-col gap-1">
         {notes?.map((note) => (
-          <li key={note.id} className="group flex items-start gap-1 text-[13px]">
+          <li
+            key={note.id}
+            className={cn("group flex items-start gap-1 text-[13px]", !sent.has(note.id) && "text-ink-3")}
+            title={
+              sent.has(note.id)
+                ? undefined
+                : `${bot.name} doesn't see this note: it no longer fits the prompt.`
+            }
+          >
             <div className="min-w-0 flex-1">
               <InlineText
                 label="memory note"
@@ -327,6 +370,17 @@ function MemoryBlock({ bot }: { bot: Bot }) {
                 }
               />
             </div>
+            <IconButton
+              label={note.pinned ? "Unpin note" : "Pin note: always sent, and the bot can't forget it"}
+              className={cn(
+                "size-6",
+                note.pinned ? "text-accent" : "opacity-0 group-hover:opacity-100 focus:opacity-100",
+              )}
+              onClick={() => pin.mutate({ id: note.id, pinned: !note.pinned })}
+            >
+              {/* Filled when pinned: the icon shows the note's state; the label says what a click does. */}
+              <Pin size={12} fill={note.pinned ? "currentColor" : "none"} />
+            </IconButton>
             <IconButton
               label="Delete note"
               className="size-6 opacity-0 group-hover:opacity-100 focus:opacity-100"

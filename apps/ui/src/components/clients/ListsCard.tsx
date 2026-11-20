@@ -169,6 +169,19 @@ export function ListsCard({ bot, project }: { bot: Bot; project: ClientProject }
             {learn.isPending && <Loader2 size={12} className="animate-spin" />} Learn
           </Button>
         </div>
+        {look.matched.length > 0 && (
+          <div className="text-[12px]">
+            <p className="text-ink-3">Matched in Companies House (by name and place, checked by the app):</p>
+            <ul className="mt-0.5 flex flex-col gap-0.5">
+              {look.matched.map((match) => (
+                <li key={match.id}>
+                  {match.client} → {match.record} <span className="text-ink-3">({match.id})</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-0.5 text-ink-3">A wrong match? Learn again without that client.</p>
+          </div>
+        )}
         {look.profile && (
           <div className="flex flex-col gap-1.5 rounded-lg bg-selected p-2 text-[12.5px]">
             <p>

@@ -29,6 +29,10 @@ export function staffRange(text: string): StaffRange | null {
   }
   if ((m = new RegExp(`\\b(fewer than|less than|under)\\s+${NUMBER}\\s+${PEOPLE}`).exec(t)))
     return { min: 0, max: Math.max(0, num(m[2]!) - 1) };
+  if ((m = new RegExp(`\\b(up to|at most|max(?:imum)?(?: of)?)\\s+${NUMBER}\\s+${PEOPLE}`).exec(t)))
+    return { min: 0, max: num(m[2]!) };
+  if ((m = new RegExp(`\\b(at least|from|min(?:imum)?(?: of)?)\\s+${NUMBER}\\s+${PEOPLE}`).exec(t)))
+    return { min: num(m[2]!), max: null };
   if ((m = new RegExp(`\\b${NUMBER}\\+\\s*${PEOPLE}`).exec(t))) return { min: num(m[1]!), max: null };
   if ((m = new RegExp(`\\bteam of\\s+${NUMBER}\\b`).exec(t))) return { min: num(m[1]!), max: num(m[1]!) };
   if ((m = new RegExp(`\\b${NUMBER}\\s+${PEOPLE}`).exec(t))) return { min: num(m[1]!), max: num(m[1]!) };

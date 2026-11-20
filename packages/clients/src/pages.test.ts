@@ -112,9 +112,121 @@ describe("contact routes", () => {
     expect(found).toEqual([]);
   });
 
+  it("never take another company's inbox from the page (1.6)", () => {
+    const found = findContacts(
+      page({
+        url: "https://junipercafe.test/",
+        text: "Juniper Cafe. Email info@junipercafe.test or bookings@mail.junipercafe.test. Site by Pixel Agency hello@pixelagency.test",
+      }),
+    );
+    expect(found.filter((c) => c.kind === "email").map((c) => c.value)).toEqual([
+      "info@junipercafe.test",
+      "bookings@mail.junipercafe.test",
+    ]);
+    // A site on a shared host: its own domain, when known, is the one that counts.
+    const shared = findContacts(
+      page({ url: "https://juniper.wixsite.com/cafe", text: "Email hello@junipercafe.test" }),
+      "junipercafe.test",
+    );
+    expect(shared.map((c) => c.value)).toEqual(["hello@junipercafe.test"]);
+  });
+
   it("merge without repeats", () => {
     const a = { kind: "email" as const, value: "hello@a.test", url: "u" };
     expect(mergeContacts([a], [{ ...a, value: "HELLO@a.test" }])).toHaveLength(1);
+  });
+});
+
+describe("a sign quoted too thinly (found in the benchmark)", () => {
+  it("is taken from the page's own sentence that says it", async () => {
+    const { checkSigns } = await import("./assemble");
+    const { emptyOffer, mergeOffer, playbookOf } = await import("./index");
+    const profile = mergeOffer(emptyOffer(), { offer: "Payroll for restaurants" });
+    const news = page({
+      url: "https://news.test/brightside",
+      text: "Brightside Kitchens is hiring\nPublished 3 November 2026\nLeeds restaurant group Brightside Kitchens is advertising for a Payroll Administrator to join its team.",
+    });
+    const signs = checkSigns(
+      news,
+      [{ kind: "hiring", quote: "Brightside Kitchens is hiring", date: "3 November 2026" }],
+      profile,
+      playbookOf(profile),
+      NOW,
+    );
+    expect(signs).toMatchObject([
+      {
+        kind: "hiring",
+        quote:
+          "Leeds restaurant group Brightside Kitchens is advertising for a Payroll Administrator to join its team.",
+        date: "2026-11-03",
+      },
+    ]);
+    // A quote that isn't on the page still gives nothing.
+    expect(
+      checkSigns(
+        news,
+        [{ kind: "hiring", quote: "We need a payroll clerk" }],
+        profile,
+        playbookOf(profile),
+        NOW,
+      ),
+    ).toEqual([]);
+  });
+
+  it("is found by code in a company's own quote when the kind given isn't a sign (found in the benchmark)", async () => {
+    const { signsInQuote } = await import("./assemble");
+    const { emptyOffer, mergeOffer, playbookOf } = await import("./index");
+    const profile = mergeOffer(emptyOffer(), { offer: "Payroll for restaurants" });
+    const quote =
+      "Leeds restaurant group Brightside Kitchens is advertising for a Payroll Administrator to join its team.";
+    expect(signsInQuote(quote, profile, playbookOf(profile), NOW)).toEqual(["hiring"]);
+    expect(signsInQuote("Brightside Kitchens serves great food.", profile, playbookOf(profile), NOW)).toEqual(
+      [],
+    );
+  });
+
+  it("never borrows another company's sentence further down the page", async () => {
+    const { checkSigns } = await import("./assemble");
+    const { emptyOffer, mergeOffer, playbookOf } = await import("./index");
+    const profile = mergeOffer(emptyOffer(), { offer: "Payroll for restaurants" });
+    const roundUp = page({
+      url: "https://news.test/roundup",
+      text: [
+        "Pine Cafe is hiring.",
+        "Pine Cafe opened in Leeds in 2019.",
+        "It serves breakfast all day.",
+        "It has a garden.",
+        "Elsewhere, Brightside Kitchens is advertising for a Payroll Administrator.",
+      ].join("\n"),
+    });
+    expect(
+      checkSigns(
+        roundUp,
+        [{ kind: "hiring", quote: "Pine Cafe is hiring" }],
+        profile,
+        playbookOf(profile),
+        NOW,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("traits found by code (2.6)", () => {
+  it("quote the first sentence that says each trait you look for", async () => {
+    const { findTraits } = await import("./assemble");
+    const { emptyOffer, mergeOffer } = await import("./profile");
+    const profile = mergeOffer(emptyOffer(), {
+      offer: "Payroll",
+      traits: ["has_staff", "multi_site", "regulated"],
+    });
+    const found = findTraits(
+      page({ text: "Welcome! Our team of 30 serves three restaurants across Leeds.\nWe love food." }),
+      profile,
+    );
+    expect(found.map((e) => [e.id, e.quote])).toEqual([
+      ["has_staff", "Our team of 30 serves three restaurants across Leeds."],
+      ["multi_site", "Our team of 30 serves three restaurants across Leeds."],
+    ]);
   });
 });
 
@@ -185,11 +297,30 @@ describe("facts as a small model writes them (found in the live run)", () => {
   });
 
   it("reads a company's name used as the fact's label, only when the name is on the page", () => {
-    const named = checkCompanyFacts(page({ text }), [
+    const own = { text, title: "Cinnamon Kitchen Leeds | City Square", url: "https://cinnamonkitchen.test/" };
+    const named = checkCompanyFacts(page(own), [
       { name: "Cinnamon Kitchen Leeds", quote: "a long line", value: "" },
     ]);
     expect(clientFact(named.facts, "company")).toBe("Cinnamon Kitchen Leeds");
-    const made = checkCompanyFacts(page({ text }), [{ name: "Invented Bistro", quote: "x" }]);
+    const made = checkCompanyFacts(page(own), [{ name: "Invented Bistro", quote: "x" }]);
     expect(made.confirmed).toBe(false);
+  });
+
+  it("never makes a field's name the company (1.3)", () => {
+    const cafe = page({
+      url: "https://junipercafe.test/",
+      title: "Juniper Cafe",
+      text: "Juniper Cafe. Our services include catering. Email us, call us, or find our address and location below. Contact the team.",
+    });
+    for (const label of ["services", "email", "phone", "address", "contact", "location"]) {
+      const checked = checkCompanyFacts(cafe, [{ name: label, quote: "Our services include catering" }]);
+      expect(clientFact(checked.facts, "company")).not.toBe(label);
+    }
+    // A name that isn't the page's own (not its title, not its address) isn't taken either.
+    const other = checkCompanyFacts(
+      page({ ...cafe, text: `${cafe.text} Cinnamon Kitchen Leeds caters too.` }),
+      [{ name: "Cinnamon Kitchen Leeds", quote: "caters too" }],
+    );
+    expect(other.confirmed).toBe(false);
   });
 });

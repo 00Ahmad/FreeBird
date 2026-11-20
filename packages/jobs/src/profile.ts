@@ -74,16 +74,23 @@ export interface Requirement {
   text: string;
   /** For the title requirement: the titles you want, which code checks the job's quoted title against. */
   titles?: string[];
+  /** A company to avoid: decided by code from the job's confirmed company, never sent to the Checker. */
+  company?: string;
+  /** For the workplace requirement: the workplaces you want, which code checks the confirmed workplace against. */
+  workplaces?: JobProfile["workplace"];
+  /** For the salary requirement: your lowest, which code checks the confirmed salary against. */
+  floor?: NonNullable<JobProfile["minSalary"]>;
 }
 
 /** At most this many requirements go to the Checker: a small model loses track of a longer list. */
 export const MAX_REQUIREMENTS = 30;
 
 /**
- * The profile as a numbered list of requirements the Checker answers one by one, each with its kind (which sets its
- * weight in the score). For a deal-breaker, "meets" means the job is free of it.
+ * Every requirement for the Checker, most important first, so the ones cut at MAX_REQUIREMENTS are the least
+ * important: the kind of job, where and how much, then deal-breakers and industries to avoid (a job that has one is
+ * never a match), then seniority, right to work and must-haves, nice-to-haves last.
  */
-export function requirementsOf(profile: JobProfile): Requirement[] {
+function forChecker(profile: JobProfile): Omit<Requirement, "id">[] {
   const list: Omit<Requirement, "id">[] = [];
   if (profile.titles.length > 0) {
     const related =
@@ -96,24 +103,53 @@ export function requirementsOf(profile: JobProfile): Requirement[] {
       titles: [...profile.titles, ...profile.relatedTitles],
     });
   }
-  if (profile.seniority) list.push({ kind: "must", text: `Seniority: ${profile.seniority}` });
   if (profile.workplace.length > 0)
-    list.push({ kind: "workplace", text: `Workplace: ${profile.workplace.join(" or ")}` });
+    list.push({
+      kind: "workplace",
+      text: `Workplace: ${profile.workplace.join(" or ")}`,
+      workplaces: profile.workplace,
+    });
   if (profile.places.length > 0) {
     const travel = profile.travel ? ` (${profile.travel})` : "";
     list.push({ kind: "place", text: `In or open to: ${profile.places.join(", ")}${travel}` });
   }
   if (profile.minSalary)
-    list.push({ kind: "salary", text: `Pays at least ${salaryText(profile.minSalary)}` });
-  if (profile.rightToWork)
-    list.push({ kind: "must", text: `Works with your right to work: ${profile.rightToWork}` });
-  for (const item of profile.mustHaves) list.push({ kind: "must", text: item });
+    list.push({
+      kind: "salary",
+      text: `Pays at least ${salaryText(profile.minSalary)}`,
+      floor: profile.minSalary,
+    });
   for (const item of profile.dealBreakers) list.push({ kind: "dealbreaker", text: `Free of: ${item}` });
   for (const item of profile.avoidIndustries)
     list.push({ kind: "dealbreaker", text: `Not in the ${item} industry` });
-  for (const item of profile.avoidCompanies) list.push({ kind: "dealbreaker", text: `Not at ${item}` });
+  if (profile.seniority) list.push({ kind: "must", text: `Seniority: ${profile.seniority}` });
+  if (profile.rightToWork)
+    list.push({ kind: "must", text: `Works with your right to work: ${profile.rightToWork}` });
+  for (const item of profile.mustHaves) list.push({ kind: "must", text: item });
   for (const item of profile.niceToHaves) list.push({ kind: "nice", text: item });
   if (profile.languages.length > 0)
     list.push({ kind: "nice", text: `Languages: ${profile.languages.join(", ")}` });
-  return list.slice(0, MAX_REQUIREMENTS).map((item, index) => ({ id: `r${index + 1}`, ...item }));
+  return list;
 }
+
+/**
+ * The profile as a numbered list of requirements, each with its kind (which sets its weight in the score). The
+ * Checker answers the first MAX_REQUIREMENTS by id; companies to avoid are added after them and decided by code, so
+ * they never take a place in that list. For a deal-breaker, "meets" means the job is free of it.
+ */
+export function requirementsOf(profile: JobProfile): Requirement[] {
+  const checked = forChecker(profile)
+    .slice(0, MAX_REQUIREMENTS)
+    .map((item, index) => ({ id: `r${index + 1}`, ...item }));
+  const companies = profile.avoidCompanies.map((company, index): Requirement => ({
+    id: `c${index + 1}`,
+    kind: "dealbreaker",
+    text: `Not at ${company}`,
+    company,
+  }));
+  return [...checked, ...companies];
+}
+
+/** How many of the profile's requirements don't fit in what the Checker is asked (the least important ones). */
+export const requirementsLeftOut = (profile: JobProfile) =>
+  Math.max(0, forChecker(profile).length - MAX_REQUIREMENTS);

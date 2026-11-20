@@ -161,6 +161,11 @@ export const Bot = z.object({
   section: z.string().max(40).nullable(),
   /** Desktop notification when it replies while you are elsewhere. */
   notifications: z.boolean(),
+  /**
+   * An approval card it (or a helper it made) shows waits for your answer for as long as it takes, instead of being
+   * dropped unrun after 15 minutes. Stop still ends it.
+   */
+  approvalsWait: z.boolean().default(false),
   /** Can create helper bots and delegate to teammates (the primary bot always can). */
   coordinator: z.boolean(),
   /** The coordinator that created this helper; null for bots you made. */
@@ -214,6 +219,7 @@ export const UpdateBotInput = z
     instructions: BotInstructions,
     section: z.string().trim().max(40).nullable(),
     notifications: z.boolean(),
+    approvalsWait: z.boolean(),
     coordinator: z.boolean(),
     tools: BotTools,
   })

@@ -9,6 +9,7 @@ const toNote = (row: Row) =>
     id: row.id,
     botId: row.bot_id,
     text: row.text,
+    pinned: row.pinned === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -41,6 +42,21 @@ export class MemoryRepo {
       .run(text, new Date().toISOString(), id).changes;
     if (!Number(changed)) return null;
     return toNote(this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id)!);
+  }
+
+  /** Pins or unpins a note; null when no note has this id. */
+  pin(id: string, pinned: boolean): MemoryNote | null {
+    const changed = this.db
+      .prepare("UPDATE memories SET pinned = ?, updated_at = ? WHERE id = ?")
+      .run(pinned ? 1 : 0, new Date().toISOString(), id).changes;
+    if (!Number(changed)) return null;
+    return toNote(this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id)!);
+  }
+
+  /** A note by its id. */
+  get(id: string): MemoryNote | null {
+    const row = this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id);
+    return row ? toNote(row) : null;
   }
 
   delete(id: string): MemoryNote | null {

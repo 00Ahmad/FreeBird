@@ -18,12 +18,17 @@ export interface CheckInput {
   files: string[];
   /** A file's text, or null when it isn't there. Any path inside the project may be asked for. */
   read(path: string): string | null;
+  /**
+   * What the user wrote (the brief): a key that appears in it was given, not made up, so the key check leaves it alone.
+   * The project then works; keeping it out of the code is a separate matter.
+   */
+  given?: string;
 }
 
-const extensionOf = (path: string) => /\.([A-Za-z0-9]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
+export const extensionOf = (path: string) => /\.([A-Za-z0-9]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
 const nameOf = (path: string) => (path.split("/").at(-1) ?? "").toLowerCase();
-const isHtml = (path: string) => ["html", "htm"].includes(extensionOf(path));
-const isScript = (path: string) =>
+export const isHtml = (path: string) => ["html", "htm"].includes(extensionOf(path));
+export const isScript = (path: string) =>
   ["js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts"].includes(extensionOf(path));
 
 /** Pictures, icons, fonts, sound and video: files the Developer can't write, so a missing one is the user's to add. */
@@ -41,11 +46,11 @@ const BINARY = new Set([
 ]);
 
 /** Comments out of the way, so a commented-out import isn't taken for a real one. */
-const withoutComments = (source: string) =>
+export const withoutComments = (source: string) =>
   source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 /** A page without its <!-- comments -->, found with indexOf so an unclosed one costs one pass (it hides the rest). */
-function withoutHtmlComments(html: string): string {
+export function withoutHtmlComments(html: string): string {
   let kept = "";
   let at = 0;
   for (;;) {
@@ -58,6 +63,27 @@ function withoutHtmlComments(html: string): string {
   }
 }
 
+/** A page's markup with what isn't markup taken out: comments, scripts, styles and templates. */
+export function markupOf(html: string): string {
+  return withoutHtmlComments(html)
+    .replace(/<script\b[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<style\b[\s\S]*?<\/style\s*>/gi, "")
+    .replace(/<template\b[\s\S]*?<\/template\s*>/gi, "");
+}
+
+/** Every id written on a page's markup, in order, repeats included. */
+export function idsOnPage(html: string): string[] {
+  return [...markupOf(html).matchAll(/<[a-z][^>]*?\sid\s*=\s*["']([\w-]+)["']/gi)].map((match) => match[1]!);
+}
+
+/** The ids written more than once on one page (an id must be unique on its page). */
+export function duplicateIds(html: string): string[] {
+  const seen = new Set<string>();
+  const twice = new Set<string>();
+  for (const id of idsOnPage(html)) (seen.has(id) ? twice : seen).add(id);
+  return [...twice];
+}
+
 /** Top-level `import` / `export` statements: what makes a file an ES module. */
 const ES_MODULE_SYNTAX =
   /^[ \t]*(?:import\s*(?:[\w$*{][^"'\n;]*?\s*from\s*)?["'][^"'\n]+["']|import\s*\{|export\s+(?:default\b|(?:async\s+)?function\b|class\b|const\b|let\b|var\b|\{|\*))/m;
@@ -65,13 +91,13 @@ const ES_MODULE_SYNTAX =
 export const usesModuleSyntax = (source: string) => ES_MODULE_SYNTAX.test(withoutComments(source));
 
 /** An attribute of a tag written as text (`src="x"`, `src='x'` or `src=x`); `data-src` is another attribute. */
-function attribute(tag: string, name: string): string | null {
+export function attribute(tag: string, name: string): string | null {
   const match = new RegExp(`(?<![\\w-])${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);
   return match ? (match[1] ?? match[2] ?? match[3] ?? "") : null;
 }
 
 /** A reference to a file in the project (not a web address, an anchor, a site-root path or a template). */
-function localTarget(from: string, reference: string | null): string | null {
+export function localTarget(from: string, reference: string | null): string | null {
   const ref = reference?.trim().split(/[?#]/)[0] ?? "";
   if (!ref || /^[a-z][a-z0-9+.-]*:/i.test(ref) || ref.startsWith("//") || ref.startsWith("/")) return null;
   if (/\{\{|<%|\$\{/.test(ref)) return null;
@@ -96,7 +122,7 @@ const SCRIPT_SUFFIXES = [
 const SOURCE_FOR: Record<string, string[]> = { js: ["ts", "tsx"], jsx: ["tsx"], mjs: ["mts"], cjs: ["cts"] };
 
 /** The file a relative import points at, trying the endings a bundler or Node would. */
-function resolveImport(
+export function resolveImport(
   from: string,
   specifier: string,
   read: CheckInput["read"],
@@ -116,7 +142,7 @@ function resolveImport(
 }
 
 /** The names a module exports, or null when it can't be told for sure (CommonJS, `export *`, destructured exports). */
-function exportsOf(source: string): Set<string> | null {
+export function exportsOf(source: string): Set<string> | null {
   const code = withoutComments(source);
   if (/\bmodule\.exports\b|\bexports\.\w+\s*=|^[ \t]*export\s*(?:\*|=|import\b|as\s+namespace\b)/m.test(code))
     return null;
@@ -145,7 +171,7 @@ function exportsOf(source: string): Set<string> | null {
  * What an import clause asks for: `{ a, b as c }`, `d`, `d, { a }`; a namespace import asks for nothing in particular.
  * Types (`import type …`, `{ type T }`) are left out: they don't exist when the code runs, and TypeScript checks them.
  */
-function importedNames(clause: string): string[] {
+export function importedNames(clause: string): string[] {
   if (/^type\s+[\w${*]/.test(clause.trim())) return [];
   const names: string[] = [];
   const braces = /\{([^}]*)\}/.exec(clause);
@@ -319,12 +345,13 @@ const KEY_IN_ADDRESS =
   /[?&](appid|api[_-]?key|apikey|key|token|access[_-]?token|auth|client[_-]?secret|secret|password)=([^&#\s"'`<>]+)/gi;
 
 /** The made-up keys in one file's text. */
-function keysIn(file: string, text: string): Finding[] {
+function keysIn(file: string, text: string, given = ""): Finding[] {
   const found: Finding[] = [];
   // One finding per key, however many of the patterns below see it.
   const seen = new Set<string>();
   const add = (key: string, problem: string) => {
-    if (seen.has(key)) return;
+    // A key the user gave (in the brief) was copied, not invented.
+    if (seen.has(key) || (key.length >= 8 && given.includes(key))) return;
     seen.add(key);
     found.push({ file, problem: `${problem} ${NEVER_INVENT}` });
   };
@@ -361,7 +388,7 @@ const PLAIN_SCRIPT = new Set([
 ]);
 
 /** Every check, over the planned files. */
-export function checkProject({ files, read }: CheckInput): Finding[] {
+export function checkProject({ files, read, given }: CheckInput): Finding[] {
   const findings: Finding[] = [];
   const found = (finding: Finding) => {
     if (!findings.some((other) => other.file === finding.file && other.problem === finding.problem))
@@ -410,6 +437,12 @@ export function checkProject({ files, read }: CheckInput): Finding[] {
           });
         }
       }
+      // An id must be unique on its page: a script that looks it up gets only the first.
+      for (const id of duplicateIds(text))
+        found({
+          file,
+          problem: `${file} has id="${id}" on more than one element; an id must be unique on its page. Give the repeated elements a class instead (class="${id}"), and look them up with querySelectorAll(".${id}").`,
+        });
       // A missing stylesheet or page is a gap; a missing picture, icon, font or video is the user's to add.
       for (const tag of page.matchAll(/<link\b[^>]*>/gi)) {
         if (/(?:^|[\s-])(?:icon|manifest)(?:$|\s)/i.test(attribute(tag[0], "rel") ?? "")) continue;
@@ -465,7 +498,7 @@ export function checkProject({ files, read }: CheckInput): Finding[] {
     }
 
     if (!BINARY.has(extensionOf(file)) && !text.includes("\0"))
-      for (const finding of keysIn(file, text)) found(finding);
+      for (const finding of keysIn(file, text, given)) found(finding);
   }
 
   // Element ids a script looks for must exist in some page of the project: only ids, classes are too noisy.
@@ -505,7 +538,45 @@ export function checkProject({ files, read }: CheckInput): Finding[] {
     }
   }
 
+  // Plain scripts on one page share their top-level names: the same const, let or class declared in two of them stops
+  // the page on load ("has already been declared"); the same function silently replaces the first one.
+  for (const page of files.filter(isHtml)) {
+    const text = texts.get(page);
+    if (!text) continue;
+    const seen = new Map<string, string>();
+    for (const tag of withoutHtmlComments(text).matchAll(/<script\b[^>]*>/gi)) {
+      const type = (attribute(tag[0], "type") ?? "").trim().toLowerCase();
+      const target = localTarget(page, attribute(tag[0], "src"));
+      const file = target && planned(target);
+      const code = file ? texts.get(file) : null;
+      if (!file || !code || !PLAIN_SCRIPT.has(type) || usesModuleSyntax(code)) continue;
+      for (const name of topLevelNames(code)) {
+        const first = seen.get(name);
+        if (first && first !== file)
+          found({
+            file,
+            problem: `${file} and ${first} both declare ${name} at the top level, and ${page} loads both as plain scripts, which share their top-level names: the page stops on load ("Identifier '${name}' has already been declared"), or one replaces the other. Rename it in ${file}, or put ${file}'s code inside one name of its own: window.Something = (() => { … return { start }; })();`,
+            related: [first],
+          });
+        else seen.set(name, file);
+      }
+    }
+  }
+
   return findings;
+}
+
+/**
+ * The names a plain script declares at its top level (const, let, class or function written at the start of a line):
+ * the ones that clash with another script's on the same page. `var` may be declared twice, so it isn't counted.
+ */
+export function topLevelNames(code: string): string[] {
+  const names = new Set<string>();
+  for (const match of withoutComments(code).matchAll(
+    /^(?:const|let|class|(?:async\s+)?function\s*\*?)\s+([A-Za-z_$][\w$]*)/gm,
+  ))
+    names.add(match[1]!);
+  return [...names];
 }
 
 /** The ends of a placeholder written for the user to fill in (YOUR_API_KEY_HERE), as words ("API key"). */

@@ -14,6 +14,7 @@ import {
   LIST,
   LIST_PAGE,
   makeJobBot,
+  pad,
   page,
   patch,
   post,
@@ -170,6 +171,60 @@ describe("the interview", () => {
     expect(team.seen.filter((s) => s.role === "interviewer" && s.fresh)).toHaveLength(1);
   });
 
+  it("changes only the fields sent: editing one doesn't empty the others", async () => {
+    h = await jobHarness(jobTeam());
+    const { bot } = await readyJobBot(h);
+    // Before: this emptied the titles and the workplace (the input filled every missing field with its default).
+    const res = await patch(h, `/api/bots/${bot.id}/job/profile`, { seniority: "Senior" });
+    expect(res.json().project.profile).toMatchObject({
+      seniority: "Senior",
+      titles: ["Backend Engineer"],
+      workplace: ["hybrid"],
+    });
+  });
+
+  it("tells the Interviewer its last question, adds list items, and remembers a skip", async () => {
+    const team = jobTeam({
+      interview: (said, nth) =>
+        nth === 1
+          ? { profile: { titles: ["Backend Engineer"], mustHaves: ["Python"] } }
+          : nth === 2
+            ? // A small model sends only the new item, as before: it must not wipe Python.
+              { profile: { mustHaves: ["Go"] } }
+            : { say: "OK." },
+    });
+    h = await jobHarness(team);
+    const { bot } = await makeJobBot(h);
+    const reply = async (words: string) => {
+      const before = botSaid(h, bot).length;
+      await type(h, bot, words);
+      const start = Date.now();
+      while (
+        botSaid(h, bot).length <= before ||
+        h.store.messages.list(bot.threadId).at(-1)?.status === "streaming"
+      ) {
+        if (Date.now() - start > 5000) throw new Error("no reply");
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+    };
+    await reply("Backend Engineer jobs, must know Python");
+    await reply("also add Go");
+    expect(projectOf(h, bot.id).profile.mustHaves).toEqual(["Python", "Go"]);
+    expect(botSaid(h, bot).at(-1)).toContain("Saved: Added must-have: Go");
+    const asked = team.seen.filter((s) => s.role === "interviewer").at(-1)!.task;
+    expect(asked).toContain("YOU LAST ASKED (the user is answering this)");
+    // The bot's last words before "skip" asked about salary: that topic is skipped from now on.
+    h.store.messages.create({
+      threadId: bot.threadId,
+      role: "bot",
+      botId: bot.id,
+      parts: [{ type: "text", text: "What's the lowest salary you'd take?" }],
+    });
+    await reply("skip");
+    const after = team.seen.filter((s) => s.role === "interviewer").at(-1)!.task;
+    expect(after).toContain("THE USER SKIPPED (leave these empty, don't ask again): lowest salary");
+  });
+
   it("won't scan before you approve the profile", async () => {
     h = await jobHarness(jobTeam());
     const { bot } = await makeJobBot(h);
@@ -210,11 +265,104 @@ describe("a scan", () => {
     expect(designer.warnings.map((w) => w.id)).toContain("no-salary");
     // A link the Checker made up was never read.
     expect(readers.calls.some((c) => c.includes("made-up-9"))).toBe(false);
+    // The Checker's thread keeps each task, but no longer the whole page once it is checked.
+    const checker = h.store.bots.get(project.roles.checker.botId)!;
+    const pair = h.store.threads.list().find((t) => t.pair && t.memberIds.includes(checker.id))!;
+    const tasks = h.store.messages.list(pair.id).filter((m) => m.botId === bot.id);
+    expect(tasks.length).toBeGreaterThan(0);
+    expect(tasks.every((m) => m.parts.some((p) => p.type === "text" && p.text.includes("ADDRESS:")))).toBe(
+      true,
+    );
     const checks = team.seen.filter((s) => s.role === "checker" && s.fresh);
     expect(checks.every((s) => s.tools.join() === "finish_job" && s.think === false)).toBe(true);
     expect(botSaid(h, bot).at(-1)).toMatch(
       /Found 2 new jobs\.\n\nStrongest new matches:\n- Senior Backend Engineer at Northwind Robotics: 100 \(strong\)/,
     );
+  });
+
+  it("tells a Checker that answered in words, once and in the same turn, to call finish_job", async () => {
+    let backendTries = 0;
+    const team = jobTeam({
+      check: (url) => {
+        if (url !== BACKEND) return siteChecker(url);
+        // The first time it only talks; told to call its tool, it reports.
+        backendTries += 1;
+        return backendTries === 1 ? null : BACKEND_REPORT;
+      },
+    });
+    h = await jobHarness(team);
+    const { bot } = await readyJobBot(h);
+    serveSite(h);
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 1 });
+    const project = await until(h, bot.id, (p) => p.status === "ready" && !!p.scan?.endedAt);
+    expect(project.cards.some((c) => c.url === BACKEND)).toBe(true);
+    const asked = team.seen.filter((s) => s.role === "checker" && s.task.includes(`ADDRESS: ${BACKEND}`));
+    // Asked twice before it reported (the nudge, in the same turn), then its closing sentence. Before: the page was
+    // given up after the first answer.
+    expect(asked.filter((s) => s.fresh)).toHaveLength(2);
+    expect(backendTries).toBe(2);
+  });
+
+  it("picks the jobs you want from a job system's list by code, with no Checker turn on the list", async () => {
+    const board = "https://boards.greenhouse.io/acme";
+    const posting = (n: number) => `https://boards.greenhouse.io/acme/jobs/${n}`;
+    const titles = ["Data Analyst", "Backend Engineer", "Sales Lead", "Senior Backend Engineer", "Designer"];
+    const team = jobTeam({
+      check: (url) => (url.startsWith(posting(0).slice(0, -1)) ? BACKEND_REPORT : { kind: "other" }),
+    });
+    h = await jobHarness(team);
+    const { bot } = await readyJobBot(h);
+    const read: string[] = [];
+    h.services.jobs.io.readers = {
+      api: {
+        id: "api",
+        async read(url) {
+          read.push(url);
+          if (url === board)
+            return page(board, titles.map((t, i) => `${t} (${posting(i + 1)})`).join(" / "), {
+              reader: "api",
+              links: titles.map((text, i) => ({ text, url: posting(i + 1) })),
+            });
+          return page(url, BACKEND_PAGE, { reader: "api" });
+        },
+      },
+    };
+    h.services.jobs.io.search = async () => [board];
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 1 });
+    const project = await until(h, bot.id, (p) => p.status === "ready" && !!p.scan?.endedAt);
+    // Only backend jobs are read (the scan stops at the first, as asked); the list never goes to the Checker.
+    const postings = read.filter((u) => u !== board);
+    expect(postings.length).toBeGreaterThan(0);
+    expect(postings.every((u) => u === posting(2) || u === posting(4))).toBe(true);
+    const addresses = team.seen
+      .filter((s) => s.role === "checker")
+      .map((s) => /^ADDRESS: (.+)$/m.exec(s.task)?.[1]);
+    expect(addresses).not.toContain(board);
+    expect(project.log.map((l) => l.text)).toContain(
+      "boards.greenhouse.io lists 5 jobs: 2 new ones fit your titles",
+    );
+  });
+
+  it("doesn't read a page that led nowhere again in a later scan, but always reads a list again", async () => {
+    const blog = `${SITE}/careers/life-at-northwind`;
+    const team = jobTeam({ check: (url) => siteChecker(url) });
+    h = await jobHarness(team);
+    const { bot } = await readyJobBot(h);
+    const readers = serveSite(h, { text: { [blog]: page(blog, pad("Life at Northwind. Our values.")) } });
+    h.services.jobs.io.search = async () => [LIST, blog];
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 5 });
+    let project = await until(h, bot.id, (p) => p.status === "ready" && !!p.scan?.endedAt);
+    expect(project.deadPages.map((d) => d.reason)).toContain("not a job");
+    expect(project.deadPages.some((d) => d.key.endsWith("/careers"))).toBe(false);
+    const firstReads = readers.calls.length;
+    // A new related title gives the second scan searches it hasn't run yet.
+    await patch(h, `/api/bots/${bot.id}/job/profile`, { relatedTitles: ["Platform Engineer"] });
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 5 });
+    project = await until(h, bot.id, (p) => p.status === "ready" && p.scan?.number === 2 && !!p.scan.endedAt);
+    const again = readers.calls.slice(firstReads);
+    // Before: the page was read and checked again in every scan.
+    expect(again.some((c) => c.endsWith(blog))).toBe(false);
+    expect(again.some((c) => c.endsWith(LIST))).toBe(true);
   });
 
   it("counts only jobs like yours toward the number; a weak match goes on the board uncounted", async () => {
@@ -248,6 +396,29 @@ describe("a scan", () => {
       '"Backend Engineer" site:myworkdayjobs.com',
       "backend engineer jobs leeds",
     ]);
+  });
+
+  it("runs new searches in a later scan instead of the same ones again", async () => {
+    h = await jobHarness(jobTeam({ check: (url) => siteChecker(url), plan: () => null }));
+    const { bot } = await readyJobBot(h);
+    await patch(h, `/api/bots/${bot.id}/job/profile`, { relatedTitles: ["Platform Engineer"] });
+    serveSite(h);
+    const queries: string[] = [];
+    h.services.jobs.io.search = async (_botId, query) => {
+      queries.push(query);
+      return [LIST];
+    };
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 2 });
+    await until(h, bot.id, (p) => p.status === "ready" && !!p.scan?.endedAt);
+    const first = [...queries];
+    queries.length = 0;
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 2 });
+    await until(h, bot.id, (p) => p.status === "ready" && p.scan?.number === 2 && !!p.scan.endedAt);
+    // Before: scan 2 ran exactly the searches of scan 1.
+    expect(first.some((q) => q.startsWith('"Backend Engineer"'))).toBe(true);
+    expect(queries.length).toBeGreaterThan(0);
+    expect(queries.every((q) => !first.includes(q))).toBe(true);
+    expect(queries.some((q) => q.startsWith('"Platform Engineer"'))).toBe(true);
   });
 
   it("skips the rest of a site after two of its pages couldn't be used", async () => {
@@ -343,7 +514,11 @@ describe("a scan", () => {
   it("waits for you on a CAPTCHA, and carries on when you press Continue", async () => {
     h = await jobHarness(jobTeam({ check: (url) => siteChecker(url) }));
     const { bot } = await readyJobBot(h);
-    serveSite(h, { text: { [BACKEND]: page(BACKEND, BACKEND_PAGE, { humanCheck: true }) } });
+    // The page needs scripts as text; in the browser it shows a CAPTCHA.
+    serveSite(h, {
+      text: { [BACKEND]: page(BACKEND, "Loading…") },
+      browser: { [BACKEND]: page(BACKEND, BACKEND_PAGE, { humanCheck: true }) },
+    });
     h.services.jobs.io.search = async () => [BACKEND];
     const shown: string[] = [];
     h.services.jobs.io.show = async (_botId, url) => void shown.push(url);
@@ -361,10 +536,47 @@ describe("a scan", () => {
     expect(project.handoff).toBeNull();
   });
 
+  it("sets a page that needs you aside, carries on, and skips the rest once nobody answers", async () => {
+    const other = "https://jobs.other-company.example/careers/7";
+    h = await jobHarness(jobTeam({ check: (url) => siteChecker(url) }));
+    const { bot } = await readyJobBot(h);
+    serveSite(h, {
+      text: { [DESIGNER]: page(DESIGNER, "Loading…"), [other]: page(other, "Loading…") },
+      browser: {
+        [DESIGNER]: page(DESIGNER, DESIGNER_PAGE, { humanCheck: true }),
+        [other]: page(other, DESIGNER_PAGE, { humanCheck: true }),
+      },
+    });
+    // The pages that need you come first; the job that doesn't, last.
+    h.services.jobs.io.search = async () => [DESIGNER, other, BACKEND];
+    h.services.jobs.io.show = async () => undefined;
+    h.services.jobs.io.handoffLimitMs = 30;
+    h.services.jobs.io.limits = { ...h.services.jobs.io.limits, searchRounds: 1 };
+    let waitedBeforeJob = false;
+    h.bus.subscribe((e) => {
+      if (e.type === "job.updated" && e.project.status === "waiting_for_you" && e.project.cards.length === 0)
+        waitedBeforeJob = true;
+    });
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 2 });
+    const project = await until(h, bot.id, (p) => p.status === "ready" && !!p.scan?.endedAt);
+    // Before: the scan stopped and waited up to 10 minutes on each such page, in turn.
+    expect(waitedBeforeJob).toBe(false);
+    expect(project.cards.map((c) => c.url)).toEqual([BACKEND]);
+    const log = project.log.map((l) => l.text);
+    expect(log.filter((l) => l.startsWith("Set aside for you"))).toHaveLength(2);
+    expect(log).toContain("Nobody answered: skipped the other 1 page(s) that need you");
+    // The one nobody answered and the one skipped after it.
+    expect(project.scan?.stopReason).toMatch(/2 pages that needed you were left unread\.$/);
+  });
+
   it("skips the page when you press Skip, and nothing waits when nothing is asked", async () => {
     h = await jobHarness(jobTeam({ check: (url) => siteChecker(url) }));
     const { bot } = await readyJobBot(h);
-    serveSite(h, { text: { [BACKEND]: page(BACKEND, BACKEND_PAGE, { humanCheck: true }) } });
+    // The page needs scripts as text; in the browser it shows a CAPTCHA.
+    serveSite(h, {
+      text: { [BACKEND]: page(BACKEND, "Loading…") },
+      browser: { [BACKEND]: page(BACKEND, BACKEND_PAGE, { humanCheck: true }) },
+    });
     h.services.jobs.io.search = async () => [BACKEND];
     h.services.jobs.io.show = async () => undefined;
     h.services.jobs.io.limits = { ...h.services.jobs.io.limits, searchRounds: 1 };
@@ -388,6 +600,27 @@ describe("a scan", () => {
     expect(project.scan!.stopReason).toMatch(/set up a search service in Settings → Browser/);
   });
 
+  it("ends a page still loading at the scan's time limit, as the time limit and not a Stop", async () => {
+    h = await jobHarness(jobTeam({ check: (url) => siteChecker(url) }));
+    const { bot } = await readyJobBot(h);
+    // A page that never finishes loading until the scan's deadline cuts it off.
+    h.services.jobs.io.readers = {
+      text: {
+        id: "text",
+        read: (_url, { signal }) =>
+          new Promise((_resolve, reject) =>
+            signal.addEventListener("abort", () => reject(new Error("aborted"))),
+          ),
+      },
+    };
+    h.services.jobs.io.search = async () => [BACKEND];
+    h.services.jobs.io.limits = { ...h.services.jobs.io.limits, minutes: 0.005 };
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 1 });
+    const project = await until(h, bot.id, (p) => p.status === "ready" && !!p.scan?.endedAt);
+    // Before: the limit was only looked at between pages, so this scan would never have ended.
+    expect(project.scan?.stopReason).toBe("Reached the time limit for one scan.");
+  });
+
   it("stops when you press Stop", async () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
@@ -405,6 +638,67 @@ describe("a scan", () => {
     await stopping;
     const project = await until(h, bot.id, (p) => p.status === "ready");
     expect(project.scan!.stopReason).toBe("You stopped it.");
+    // The closing words are the scan's summary, not a bare "Scan stopped.".
+    await until(h, bot.id, () => botSaid(h, bot).at(-1)?.startsWith("Scan stopped.") === true);
+  });
+});
+
+describe("checking the board's jobs are still open", () => {
+  it("reads each Found job again without a model, and marks the ones gone or closed", async () => {
+    const team = jobTeam({ check: (url) => siteChecker(url) });
+    h = await jobHarness(team);
+    const { bot } = await readyJobBot(h);
+    serveSite(h);
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 2 });
+    await until(h, bot.id, (p) => p.status === "ready" && !!p.scan?.endedAt);
+    const checkerTurns = team.seen.filter((s) => s.role === "checker").length;
+    // Since the scan, the backend job's page is gone and the designer job says it has closed.
+    serveSite(h, {
+      text: {
+        [BACKEND]: page(BACKEND, "", { status: 404 }),
+        [DESIGNER]: page(DESIGNER, pad("Product Designer. This position has been filled.")),
+      },
+    });
+    const started = await post(h, `/api/bots/${bot.id}/job/check-open`);
+    expect(started.statusCode).toBe(200);
+    const project = await until(
+      h,
+      bot.id,
+      (p) => p.status === "ready" && p.log.at(-1)!.text.startsWith("Checked"),
+    );
+    expect(project.log.at(-1)!.text).toBe("Checked 2 jobs: 2 closed (marked on the board).");
+    for (const url of [BACKEND, DESIGNER])
+      expect(project.cards.find((c) => c.url === url)!.warnings.map((w) => w.id)).toContain("closed");
+    // No model was asked.
+    expect(team.seen.filter((s) => s.role === "checker").length).toBe(checkerTurns);
+    // It can be run again whenever you like; nothing runs it on its own.
+    expect((await post(h, `/api/bots/${bot.id}/job/check-open`)).statusCode).toBe(200);
+    await until(h, bot.id, (p) => p.status === "ready");
+  });
+
+  it("stops when you press Stop, and leaves the last scan as it was", async () => {
+    h = await jobHarness(jobTeam({ check: (url) => siteChecker(url) }));
+    const { bot } = await readyJobBot(h);
+    serveSite(h);
+    await post(h, `/api/bots/${bot.id}/job/scan`, { target: 2 });
+    const before = (await until(h, bot.id, (p) => p.status === "ready" && !!p.scan?.endedAt)).scan;
+    // A page that never answers until the check is stopped.
+    h.services.jobs.io.readers = {
+      text: {
+        id: "text",
+        read: (_url, context) =>
+          new Promise((_resolve, reject) =>
+            context.signal.addEventListener("abort", () => reject(new Error("aborted"))),
+          ),
+      },
+    };
+    await post(h, `/api/bots/${bot.id}/job/check-open`);
+    await until(h, bot.id, (p) => p.status === "scanning");
+    await post(h, `/api/bots/${bot.id}/job/stop`);
+    const project = await until(h, bot.id, (p) => p.status === "ready");
+    expect(project.log.at(-1)!.text).toBe("Stopped checking.");
+    expect(project.scan).toEqual(before);
+    expect(project.note).toBeNull();
   });
 });
 

@@ -5,7 +5,7 @@ import { JOB_COLUMNS, type Bot, type JobCard, type JobColumn, type MatchVerdict 
 import { Button, cn } from "@mrog/ui-kit";
 
 import { useMoveJob, useReactToJob } from "../../hooks/jobs";
-import { cardCompany, cardTitle, COLUMN_LABELS } from "../../lib/jobs";
+import { cardCompany, cardTitle, COLUMN_LABELS, foundOn, uncheckedLine } from "../../lib/jobs";
 
 const VERDICT: Record<MatchVerdict, [string, string]> = {
   meets: ["✅", "Meets"],
@@ -45,7 +45,12 @@ export function JobDetails({ bot, card, onBack }: { bot: Bot; card: JobCard; onB
       <div>
         <h3 className="text-[15px] font-semibold">{cardTitle(card)}</h3>
         <p className="text-ink-2">{cardCompany(card)}</p>
-        {card.summary && <p className="mt-1 text-ink-3">{card.summary}</p>}
+        {card.summary && (
+          <p className="mt-1 text-ink-3">
+            <span className="text-[11.5px] font-medium">The Checker's summary: </span>
+            {card.summary}
+          </p>
+        )}
         <a
           href={card.url}
           target="_blank"
@@ -55,9 +60,13 @@ export function JobDetails({ bot, card, onBack }: { bot: Bot; card: JobCard; onB
           Open the posting <ExternalLink size={12} />
         </a>
         <p className="mt-1 text-[11.5px] text-ink-3">
-          Read by {READ_BY[card.readBy]} · score {card.score}
+          Read by {READ_BY[card.readBy]} · found {foundOn(card)} in scan {card.scan} · score {card.score}
         </p>
       </div>
+
+      {uncheckedLine(card) && (
+        <p className="rounded-xl border border-border bg-selected p-3 text-[12.5px]">{uncheckedLine(card)}</p>
+      )}
 
       {card.warnings.length > 0 && (
         <ul className="flex flex-col gap-1 rounded-xl border border-warning/40 bg-warning/10 p-3 text-[12.5px]">
@@ -88,13 +97,21 @@ export function JobDetails({ bot, card, onBack }: { bot: Bot; card: JobCard; onB
 
       <section>
         <h4 className="mb-1 text-[12.5px] font-medium text-ink-2">How it matches you</h4>
+        <p className="mb-1.5 text-[11.5px] text-ink-3">
+          Reasons are the Checker's own words, except those marked "checked by the app".
+        </p>
         <ul className="flex flex-col gap-1.5">
           {card.match.map((line) => (
             <li key={line.requirement} className="flex gap-2">
               <span aria-label={VERDICT[line.verdict][1]}>{VERDICT[line.verdict][0]}</span>
               <span className="min-w-0">
                 {line.requirement}
-                {line.reason && <span className="block text-[12px] text-ink-3">{line.reason}</span>}
+                {line.reason && (
+                  <span className="block text-[12px] text-ink-3">
+                    {line.reason}
+                    {line.byCode && <span className="ml-1 text-[11px] italic">(checked by the app)</span>}
+                  </span>
+                )}
               </span>
             </li>
           ))}

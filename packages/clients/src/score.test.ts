@@ -1,6 +1,7 @@
 import type { FitLine, LeadSignal } from "@mrog/shared";
 import { describe, expect, it } from "vitest";
 
+import { kindOf } from "./assemble";
 import { daysBefore } from "./dates";
 import { buildFit, excludedBy, scoreFit } from "./fit";
 import { emptyOffer, mergeOffer, requirementsOf } from "./profile";
@@ -32,6 +33,62 @@ const sign = (kind: LeadSignal["kind"], age: number): LeadSignal => ({
   url: "u",
   date: daysBefore(NOW, age),
   foundAt: NOW.toISOString(),
+});
+
+describe("fit lines the app wrote (6.5)", () => {
+  it("are marked, so the Checker's own words can be told apart", () => {
+    const lines = buildFit(
+      requirementsOf(profile),
+      [{ id: "r1", verdict: "meets", reason: "They run three restaurants." }],
+      facts({ size: "30 staff", place: "Leeds" }),
+      profile,
+    );
+    // Industry: the Checker's words. Place and size: the app's.
+    expect(lines.map((l) => [l.kind, !!l.byCode])).toEqual([
+      ["industry", false],
+      ["place", true],
+      ["size", true],
+    ]);
+  });
+});
+
+describe("the stage, by code (6.2)", () => {
+  it("is new, growing or established from the record's date and the signs", async () => {
+    const { stageVerdict } = await import("./stage");
+    const at = (years: number) => daysBefore(NOW, Math.round(years * 365.25));
+    const ev = (incorporated: string | null, signals: LeadSignal[] = []) => ({
+      incorporated,
+      signals,
+      now: NOW,
+    });
+    expect(stageVerdict(["new"], ev(at(1.5)))).toMatchObject({
+      verdict: "meets",
+      reason: "Incorporated 1 year ago.",
+    });
+    expect(stageVerdict(["new"], ev(at(0.5)))?.reason).toBe("Incorporated under a year ago.");
+    expect(stageVerdict(["new"], ev(at(12)))).toMatchObject({ verdict: "misses" });
+    expect(stageVerdict(["established"], ev(at(8)))?.verdict).toBe("meets");
+    expect(stageVerdict(["established"], ev(at(1)))?.verdict).toBe("misses");
+    // In between, or not known: left to the Checker.
+    expect(stageVerdict(["new"], ev(at(3)))).toBeNull();
+    expect(stageVerdict(["new"], ev(null))).toBeNull();
+    expect(stageVerdict(["growing"], ev(null, [sign("hiring", 5)]))?.verdict).toBe("meets");
+    expect(stageVerdict(["growing"], ev(at(12)))).toBeNull();
+  });
+});
+
+describe("weak signs (1.2)", () => {
+  const undated = (kind: LeadSignal["kind"]): LeadSignal => ({ ...sign(kind, 0), date: null });
+  it("count as a quiet fit when every sign is weak and undated, or faded", () => {
+    expect(kindOf({ asking: false, signals: [undated("new_company")] }, NOW)).toBe("quiet");
+    expect(kindOf({ asking: false, signals: [undated("funding"), undated("growing")] }, NOW)).toBe("quiet");
+    expect(kindOf({ asking: false, signals: [sign("hiring", 200)] }, NOW)).toBe("quiet");
+    // A dated sign, or a strong one even undated, is still a sign.
+    expect(kindOf({ asking: false, signals: [sign("new_company", 10)] }, NOW)).toBe("signs");
+    expect(kindOf({ asking: false, signals: [undated("hiring")] }, NOW)).toBe("signs");
+    expect(kindOf({ asking: false, signals: [undated("asking")] }, NOW)).toBe("asking");
+    expect(kindOf({ asking: true, signals: [] }, NOW)).toBe("asking");
+  });
 });
 
 describe("fit", () => {

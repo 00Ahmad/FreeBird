@@ -41,7 +41,12 @@ const memoryKey = (botId: string) => ["memory", botId] as const;
 export function useMemory(botId: string) {
   return useQuery({
     queryKey: memoryKey(botId),
-    queryFn: async () => (await api<{ notes: MemoryNote[] }>(`/bots/${botId}/memory`)).notes,
+    // `notSent`: the oldest notes that no longer fit the prompt, so the bot doesn't see them; `sentIds` are the ones it
+    // sees; `pinnedOver`: the pinned notes alone are more than the room for memory.
+    queryFn: async () =>
+      await api<{ notes: MemoryNote[]; notSent?: number; sentIds?: string[]; pinnedOver?: boolean }>(
+        `/bots/${botId}/memory`,
+      ),
   });
 }
 
@@ -60,6 +65,12 @@ export function useMemoryActions(botId: string) {
     update: useMutation({
       mutationFn: ({ id, text }: { id: string; text: string }) =>
         api(`/memory/${id}`, { method: "PATCH", body: { text } }),
+      onSuccess: invalidate,
+    }),
+    /** Pinned notes are always sent to the model, and the bot can't forget them. */
+    pin: useMutation({
+      mutationFn: ({ id, pinned }: { id: string; pinned: boolean }) =>
+        api(`/memory/${id}`, { method: "PATCH", body: { pinned } }),
       onSuccess: invalidate,
     }),
     remove: useMutation({

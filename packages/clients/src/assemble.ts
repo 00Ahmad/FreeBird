@@ -1,4 +1,4 @@
-import { onPage, siteOf, type PageRead } from "@mrog/jobs";
+import { fold, onPage, siteOf, type PageRead } from "@mrog/jobs";
 import {
   SignalKindId,
   type ClientFact,
@@ -16,10 +16,11 @@ import {
 import { parseDate } from "./dates";
 import { clientFact } from "./facts";
 import { buildFit, excludedBy, type ClaimedVerdict } from "./fit";
-import type { Playbook } from "./playbooks";
+import { serviceNamesOf, type Playbook } from "./playbooks";
 import type { FitRequirement } from "./profile";
 import { scoreLead } from "./score";
 import { signalKind } from "./signals";
+import { signalStrength } from "./signals/strength";
 import { traitById } from "./traits";
 import { leadWarnings } from "./warnings";
 import { movedUpText, newSignals } from "./watch";
@@ -44,11 +45,17 @@ export function checkSigns(
   now: Date,
 ): LeadSignal[] {
   const kept: LeadSignal[] = [];
+  const context = { serviceNames: serviceNamesOf(profile), now };
   for (const sign of said) {
     const kind = SignalKindId.safeParse(sign.kind.trim().toLowerCase());
     if (!kind.success || !profile.signals.includes(kind.data)) continue;
-    const quote = sign.quote.trim();
-    if (!onPage(page.text, quote) || !signalKind(kind.data).indicates(quote, playbook)) continue;
+    const says = (text: string) => signalKind(kind.data).indicates(text, playbook, context);
+    const claimed = sign.quote.trim();
+    if (!onPage(page.text, claimed)) continue;
+    // The quote is on the page but too thin to say the sign (a headline, "X is hiring"): the page's own sentence that
+    // says it is taken instead, found by code. Found in the benchmark: the next sentence named the job.
+    const quote = says(claimed) ? claimed : sentenceSaying(page.text, claimed, says);
+    if (!quote) continue;
     const dateText = sign.date?.trim() ?? "";
     const date =
       (dateText && onPage(page.text, dateText) ? parseDate(dateText, now) : null) ?? parseDate(quote, now);
@@ -56,6 +63,42 @@ export function checkSigns(
     kept.push({ kind: kind.data, quote, url: page.url, date, foundAt: now.toISOString() });
   }
   return kept;
+}
+
+/**
+ * The signs you look for that a quote says, by code, strongest first: for a company on a round-up whose sign kind
+ * the Checker gave as something else ("competitor", "company"). Only that company's own words are read.
+ */
+export function signsInQuote(
+  quote: string,
+  profile: OfferProfile,
+  playbook: Playbook,
+  now: Date,
+): SignalKindId[] {
+  const context = { serviceNames: serviceNamesOf(profile), now };
+  return profile.signals.filter((id) => signalKind(id).indicates(quote, playbook, context));
+}
+
+/** The page's sentences, for code to quote from. */
+const sentencesOf = (text: string) =>
+  text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 8 && s.length <= MAX_TRAIT_QUOTE);
+
+/** Sentences after the quoted one that may carry its sign ("X is hiring" then "X is advertising for a…"). */
+const NEAR_SENTENCES = 2;
+
+/**
+ * The sentence holding `quote`, or one of the next NEAR_SENTENCES, that says it; null when none does. Never a sentence
+ * further away: on a round-up or a page of several stories, another company's sentence would give this one its sign.
+ */
+function sentenceSaying(text: string, quote: string, says: (sentence: string) => boolean): string | null {
+  const sentences = sentencesOf(text);
+  const want = fold(quote);
+  const at = sentences.findIndex((s) => fold(s).includes(want) || want.includes(fold(s)));
+  if (at < 0) return null;
+  return sentences.slice(at, at + 1 + NEAR_SENTENCES).find(says) ?? null;
 }
 
 /** The traits a page really shows: one you look for, quoted from the page, and the quote says it. */
@@ -73,6 +116,31 @@ export function checkTraits(
       kept.push({ kind: "trait", id: found.id, quote, url: page.url });
   }
   return kept;
+}
+
+/** A sentence longer than this isn't kept as a trait's quote. */
+const MAX_TRAIT_QUOTE = 300;
+
+/**
+ * The traits a page shows, found by code (2.6): each trait you look for, quoted with the first sentence of the page
+ * whose words say it. No model is asked: the trait checks are code anyway, so asking the Checker to quote them only
+ * made its task longer.
+ */
+export function findTraits(page: PageRead, profile: OfferProfile): LeadEvidence[] {
+  const sentences = sentencesOf(page.text);
+  const kept: LeadEvidence[] = [];
+  for (const id of profile.traits) {
+    const trait = traitById(id);
+    const quote = trait && sentences.find((s) => trait.indicates(s));
+    if (trait && quote) kept.push({ kind: "trait", id: trait.id, quote, url: page.url });
+  }
+  return kept;
+}
+
+/** Traits from the Checker's quotes and from code, one of each. */
+export function traitsOf(page: PageRead, said: SaidSigns["traits"], profile: OfferProfile): LeadEvidence[] {
+  const byCode = findTraits(page, profile);
+  return [...byCode, ...checkTraits(page, said, profile).filter((e) => !byCode.some((x) => x.id === e.id))];
 }
 
 /** A lead in the making: what was found, before it is scored. */
@@ -103,10 +171,17 @@ export interface BuildContext {
   now: Date;
 }
 
-/** Asking now when it asked or shows an asking sign, with signs when it shows another, else a quiet fit. */
-export function kindOf(draft: Pick<Draft, "asking" | "signals">): LeadKind {
+/** A sign weaker than this now (an undated new-company line, a faded one) doesn't make a lead "with signs". */
+export const WEAK_SIGN = 0.3;
+
+/**
+ * Asking now when it asked or shows an asking sign, with signs when it shows another sign of some strength, else a
+ * quiet fit. A company whose signs are all weak (undated, or faded) is a quiet fit: it must clear the quiet bar and is
+ * capped as one, instead of one undated "Registered in England" line taking it past every check (1.2).
+ */
+export function kindOf(draft: Pick<Draft, "asking" | "signals">, now: Date = new Date()): LeadKind {
   if (draft.asking || draft.signals.some((s) => s.kind === "asking")) return "asking";
-  return draft.signals.length > 0 ? "signs" : "quiet";
+  return draft.signals.some((s) => signalStrength(s, now) >= WEAK_SIGN) ? "signs" : "quiet";
 }
 
 export interface Scored {
@@ -119,8 +194,12 @@ export interface Scored {
 
 /** The lead's kind, fit lines, score and warnings, all by code. */
 export function scoreDraft(draft: Draft, context: BuildContext): Scored {
-  const kind = kindOf(draft);
-  const fit = buildFit(context.requirements, context.verdicts, draft.facts, context.profile);
+  const kind = kindOf(draft, context.now);
+  const fit = buildFit(context.requirements, context.verdicts, draft.facts, context.profile, {
+    incorporated: draft.records.find((r) => r.incorporated)?.incorporated ?? null,
+    signals: draft.signals,
+    now: context.now,
+  });
   const { score, capped } = scoreLead({
     kind,
     fit,
@@ -220,7 +299,10 @@ export function mergeIntoLead(lead: Lead, found: Partial<Draft>, context: BuildC
     {
       ...context,
       verdicts:
-        context.verdicts.length > 0 ? context.verdicts : lead.fit.map(toVerdict(context.requirements)),
+        // Lines the app wrote are worked out again by code, not passed off as the Checker's words.
+        context.verdicts.length > 0
+          ? context.verdicts
+          : lead.fit.filter((line) => !line.byCode).map(toVerdict(context.requirements)),
     },
   );
   lead.kind = scored.kind;

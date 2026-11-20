@@ -58,6 +58,21 @@ describe("what a comment is", () => {
   });
 });
 
+describe("a card set aside", () => {
+  it("is marked on the board, and other cards are not", () => {
+    const board = buildBoard({
+      nodes: [node("a", "a.js"), node("b", "b.js")],
+      edges: [],
+      cards: [{ ...fileCard("a"), parked: true }, fileCard("b")],
+    });
+    const todo = board.find((column) => column.column === "todo")!;
+    expect(todo.cards.map((item) => [item.card.ref, item.setAside])).toEqual([
+      ["a", true],
+      ["b", false],
+    ]);
+  });
+});
+
 describe("board columns", () => {
   it("has the four columns in the shared order, with labels and a colour each", () => {
     const board = buildBoard({ nodes: [], edges: [], cards: [] });

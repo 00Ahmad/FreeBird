@@ -5,7 +5,16 @@ import type { Bot, ClientProject, Lead } from "@mrog/shared";
 import { Button, cn } from "@mrog/ui-kit";
 
 import { exportLeads } from "../../hooks/clients";
-import { boardColumns, COLUMN_LABELS, KIND_LABELS, leadLine, scoreTone } from "../../lib/clients";
+import {
+  boardColumns,
+  changesLine,
+  COLUMN_LABELS,
+  goneStale,
+  isNewLead,
+  KIND_LABELS,
+  leadLine,
+  scoreTone,
+} from "../../lib/clients";
 import { useUi } from "../../state";
 import { LeadDetails } from "./LeadDetails";
 
@@ -22,7 +31,8 @@ export function LeadBoard({ bot, project }: { bot: Bot; project: ClientProject }
   // The time the panel opened: ages on the card ("12 days ago") don't need to tick.
   const [now] = useState(() => new Date());
   const open = project.leads.find((lead) => lead.id === openId);
-  if (open) return <LeadDetails bot={bot} lead={open} onBack={() => setOpenId(null)} />;
+  if (open) return <LeadDetails bot={bot} lead={open} project={project} onBack={() => setOpenId(null)} />;
+  const changes = changesLine(project);
   return (
     <div className="flex flex-col gap-3 p-3">
       <p className="rounded-xl bg-selected px-3 py-2 text-[12px] text-ink-2">
@@ -38,7 +48,8 @@ export function LeadBoard({ bot, project }: { bot: Bot; project: ClientProject }
         </p>
       ) : (
         <>
-          <div className="flex justify-end">
+          <div className="flex items-center justify-end gap-2">
+            {changes && <span className="min-w-0 flex-1 text-[12px] text-ink-2">{changes}</span>}
             <Button
               size="sm"
               variant="ghost"
@@ -70,7 +81,12 @@ export function LeadBoard({ bot, project }: { bot: Bot; project: ClientProject }
                     <ul className="flex flex-col gap-1.5">
                       {leads.map((lead) => (
                         <li key={lead.id}>
-                          <LeadRow lead={lead} now={now} onOpen={() => setOpenId(lead.id)} />
+                          <LeadRow
+                            lead={lead}
+                            now={now}
+                            fresh={isNewLead(lead, project)}
+                            onOpen={() => setOpenId(lead.id)}
+                          />
                         </li>
                       ))}
                     </ul>
@@ -84,7 +100,7 @@ export function LeadBoard({ bot, project }: { bot: Bot; project: ClientProject }
   );
 }
 
-function LeadRow({ lead, now, onOpen }: { lead: Lead; now: Date; onOpen(): void }) {
+function LeadRow({ lead, now, fresh, onOpen }: { lead: Lead; now: Date; fresh: boolean; onOpen(): void }) {
   const tone = scoreTone(lead.score);
   return (
     <button
@@ -103,10 +119,18 @@ function LeadRow({ lead, now, onOpen }: { lead: Lead; now: Date; onOpen(): void 
           <span className="shrink-0 rounded bg-ink-3/10 px-1 text-[10.5px] text-ink-3">
             {KIND_LABELS[lead.kind]}
           </span>
+          {fresh && (
+            <span className="shrink-0 rounded bg-accent/15 px-1 text-[10.5px] font-semibold text-accent">
+              New
+            </span>
+          )}
           {lead.movedUp && (
             <span className="flex shrink-0 items-center gap-0.5 rounded bg-success/15 px-1 text-[10.5px] text-success">
               <TrendingUp size={10} /> Moved up
             </span>
+          )}
+          {goneStale(lead) && (
+            <span className="shrink-0 rounded bg-warning/15 px-1 text-[10.5px] text-warning">Gone stale</span>
           )}
         </span>
         <span className="block truncate text-[12px] text-ink-3">{leadLine(lead, now)}</span>

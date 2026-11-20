@@ -1,5 +1,13 @@
 import type { Register, RegisterQuery, RegisterRecord, RegisterRequest } from "@mrog/clients";
-import { companyProfile, companyRecord, foodHygiene, nameSearch, premisesByName } from "@mrog/clients";
+import {
+  companyProfile,
+  companyRecord,
+  foodHygiene,
+  nameSearch,
+  premisesByName,
+  sameCompany,
+  sameRecord,
+} from "@mrog/clients";
 import type { ClientKeyName } from "@mrog/shared";
 import type { Vault } from "@mrog/vault";
 
@@ -45,37 +53,59 @@ export function createRegisters(deps: () => RegisterDeps) {
   /** Whether a register can run now (it needs no key, or its key is saved). */
   const ready = (register: Register) => !register.needsKey || !!keyOf(register.needsKey);
 
-  /** Runs a register's queries; the records, or a plain reason it couldn't. */
+  /**
+   * Runs a register's queries; the records, or a plain reason it couldn't. `pages`: for a register that pages, each
+   * query and whether its answer was the last page (2.2).
+   */
   const search = async (
     register: Register,
     queries: RegisterQuery[],
     signal: AbortSignal,
-  ): Promise<{ records: RegisterRecord[] } | { error: string }> => {
+  ): Promise<
+    { records: RegisterRecord[]; pages: { query: RegisterQuery; last: boolean }[] } | { error: string }
+  > => {
     const key = keyOf(register.needsKey);
     if (register.needsKey && !key) return { error: "no API key saved" };
     const records: RegisterRecord[] = [];
+    const pages: { query: RegisterQuery; last: boolean }[] = [];
     try {
-      for (const query of queries)
-        records.push(...register.parse(await deps().fetch(register.request(query, key), signal)));
+      for (const query of queries) {
+        const json = await deps().fetch(register.request(query, key), signal);
+        records.push(...register.parse(json));
+        if (register.isLastPage)
+          pages.push({ query, last: json === null || register.isLastPage(json, query) });
+      }
     } catch (error) {
       if (signal.aborted) throw error;
       return { error: (error as Error).message };
     }
     const seen = new Set<string>();
-    return { records: records.filter((r) => !seen.has(r.id) && !!seen.add(r.id)) };
+    return { records: records.filter((r) => !seen.has(r.id) && !!seen.add(r.id)), pages };
   };
 
-  /** One company found by name in Companies House, with its profile (for lookalikes). Null when not found. */
-  const findCompany = async (name: string, signal: AbortSignal): Promise<RegisterRecord | null> => {
+  /**
+   * One company found by name in Companies House, with its profile. Of the results, the first whose name is this
+   * company's (and, when `place` is known, whose address agrees) is taken; never just the first result. Null when none.
+   */
+  const findCompany = async (
+    name: string,
+    signal: AbortSignal,
+    place: string | null = null,
+  ): Promise<RegisterRecord | null> => {
     const key = keyOf("companiesHouse");
     if (!key) throw new RegisterError("Add a Companies House API key first.");
     const found = (await deps().fetch(nameSearch(name, key), signal)) as {
-      items?: { company_number?: string }[];
+      items?: { company_number?: string; title?: string }[];
     } | null;
-    const number = found?.items?.[0]?.company_number;
-    if (!number) return null;
-    const profile = await deps().fetch(companyProfile(number, key), signal);
-    return profile ? companyRecord(profile as never) : null;
+    const candidates = (found?.items ?? []).filter(
+      (item) => item.company_number && sameCompany(item.title, name),
+    );
+    for (const item of candidates) {
+      const profile = await deps().fetch(companyProfile(item.company_number!, key), signal);
+      const record = profile ? companyRecord(profile as never) : null;
+      if (record && sameRecord(record, name, place)) return record;
+    }
+    return null;
   };
 
   /** Food businesses with this name near this place (no key needed). */

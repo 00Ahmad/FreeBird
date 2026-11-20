@@ -2,7 +2,18 @@ import { z } from "zod";
 
 import { BotName } from "./bots";
 import { BotId } from "./ids";
-import { JobReader, JobRoleSeat, JobStatus, JobWarning, MatchVerdict, SiteNote } from "./jobs";
+import {
+  DeadPage,
+  JobReader,
+  JobRoleSeat,
+  JobStatus,
+  JobWarning,
+  MatchVerdict,
+  MAX_DEAD_PAGES,
+  MAX_SEARCHES_RUN,
+  SearchRun,
+  SiteNote,
+} from "./jobs";
 import { ModelRef } from "./models";
 
 /**
@@ -28,6 +39,28 @@ export const MAX_WATCH_PER_SCAN = 20;
 export const MAX_LIST_ENTRIES = 2000;
 export const MAX_LOOKALIKE_CLIENTS = 10;
 export const MAX_CLIENT_SUGGESTIONS = 10;
+/** Companies looked at and not shown (a quiet fit below the bar), remembered with why and when. */
+export const MAX_NOT_SHOWN = 2000;
+
+/** How far one register query has been read across scans (see @mrog/clients register-pages). */
+export const RegisterPage = z.object({
+  /** The page to read next (from 1), or the last one read when used up. */
+  page: z.number().int().min(1),
+  /** Its last page was read: nothing new until it starts again. */
+  usedUp: z.boolean(),
+  at: z.iso.datetime(),
+});
+export type RegisterPage = z.infer<typeof RegisterPage>;
+
+/** A company looked at and not shown, with why and when: judged again later (see @mrog/clients not-shown). */
+export const NotShown = z.object({
+  /** Its fingerprints, by domain and by name. */
+  prints: z.array(z.string()).max(2),
+  name: z.string().max(200),
+  reason: z.string().max(200),
+  at: z.iso.datetime(),
+});
+export type NotShown = z.infer<typeof NotShown>;
 
 const Short = (max: number) => z.string().trim().max(max);
 const List = (item: number, count: number) => z.array(Short(item).min(1)).max(count);
@@ -156,6 +189,8 @@ export const FitLine = z.object({
   requirement: z.string(),
   verdict: MatchVerdict,
   reason: z.string(),
+  /** Decided by the app from facts and records; otherwise the reason is the Checker's own words. */
+  byCode: z.boolean().optional(),
 });
 export type FitLine = z.infer<typeof FitLine>;
 
@@ -169,6 +204,8 @@ export const LeadRecord = z.object({
   deadline: z.string().nullable().default(null),
   /** A register's status for the company ("active", "dissolved"). */
   status: z.string().nullable().default(null),
+  /** When the register says the company was incorporated (yyyy-mm-dd): its stage is worked out from it. */
+  incorporated: z.string().nullable().default(null),
 });
 export type LeadRecord = z.infer<typeof LeadRecord>;
 
@@ -249,8 +286,19 @@ export const LookalikeProfile = z.object({
 });
 export type LookalikeProfile = z.infer<typeof LookalikeProfile>;
 
+export const LookalikeMatch = z.object({
+  /** The client as you wrote it. */
+  client: Short(200),
+  /** The register entry it was matched to, by name (and place) checked by code. */
+  record: Short(200),
+  id: Short(20),
+});
+export type LookalikeMatch = z.infer<typeof LookalikeMatch>;
+
 export const Lookalikes = z.object({
   clients: z.array(ListEntry).max(MAX_LOOKALIKE_CLIENTS),
+  /** Which register entry each client was matched to, so a wrong one can be seen and removed. */
+  matched: z.array(LookalikeMatch).max(MAX_LOOKALIKE_CLIENTS).default([]),
   profile: LookalikeProfile.nullable(),
   /** You approved the profile: scans use it. */
   approved: z.boolean(),
@@ -278,6 +326,8 @@ export const ClientScan = z.object({
   weaker: z.number().int().min(0),
   /** Watched quiet fits that showed a new sign this scan. */
   movedUp: z.number().int().min(0),
+  /** Watched quiet fits re-checked this scan. */
+  watched: z.number().int().min(0).default(0),
   pagesRead: z.number().int().min(0),
   visualPages: z.number().int().min(0),
   searchRounds: z.number().int().min(0),
@@ -305,6 +355,14 @@ export const ClientProject = z.object({
   profile: OfferProfile,
   leads: z.array(Lead),
   seen: z.array(z.string()).max(MAX_SEEN_COMPANIES),
+  /** Companies looked at and not shown, kept apart from `seen` so a later scan can judge them again. */
+  notShown: z.array(NotShown).max(MAX_NOT_SHOWN).default([]),
+  /** How far each register query has been read, so the next scan asks for the next page. */
+  registerPages: z.record(z.string(), RegisterPage).default({}),
+  /** Pages that led nowhere (a competitor, a list of providers, nothing about a client, gone), skipped for a while. */
+  deadPages: z.array(DeadPage).max(MAX_DEAD_PAGES).default([]),
+  /** Web searches run and when, so a later scan doesn't run them again soon. */
+  searchesRun: z.array(SearchRun).max(MAX_SEARCHES_RUN).default([]),
   siteNotes: z.array(SiteNote),
   suggestions: z.array(OfferSuggestion).max(MAX_CLIENT_SUGGESTIONS),
   lists: ClientLists,
@@ -315,6 +373,10 @@ export const ClientProject = z.object({
   lastTarget: z.number().int().min(1).max(MAX_CLIENT_TARGET),
   lastKinds: z.array(LeadKind).min(1),
   askingCount: z.boolean(),
+  /** The interview's topics asked about so far, and those you skipped, so neither is asked again. */
+  interview: z
+    .object({ asked: z.array(z.string()).max(20), skipped: z.array(z.string()).max(20) })
+    .default({ asked: [], skipped: [] }),
   active: z.object({ role: ClientRole, url: z.string().nullable(), since: z.iso.datetime() }).nullable(),
   handoff: z.object({ url: z.string(), reason: z.string(), since: z.iso.datetime() }).nullable(),
   log: z.array(z.object({ at: z.iso.datetime(), text: z.string() })).max(MAX_CLIENT_LOG),

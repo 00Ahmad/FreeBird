@@ -187,13 +187,15 @@ export function NewCodingBotDialog() {
             <Switch
               on={form.autoApprove}
               onChange={(autoApprove) => change({ autoApprove })}
-              label="Auto-approve the plan"
+              label="Auto-approve the plan and QA's commands"
             />
             <div className="min-w-0">
-              <p className="text-[13px] font-medium">Auto-approve the plan</p>
+              <p className="text-[13px] font-medium">Auto-approve the plan and QA's commands</p>
               <p className="text-xs text-ink-3">
-                Off: the Developer waits until you approve the plan. On: it starts as soon as the plan is
-                ready.
+                Off: the Developer waits until you approve the plan, and QA asks before each command. On: the
+                Developer starts as soon as the plan is ready, and QA runs its checks without asking. A
+                command that can't be undone, changes security, uses your secrets or works outside the project
+                folder still asks.
               </p>
             </div>
           </div>

@@ -116,7 +116,7 @@ export function createToolHost(
         return { status: "error", result: `Invalid arguments for ${call.name}: ${issues.join("; ")}` };
       }
       // A spread, so an `env` getter on the context is read now and each call sees the secrets granted so far.
-      const ctx: ToolContext = { ...context, signal };
+      const ctx: ToolContext = { ...context, signal, callId: call.id };
       let risk: Risk;
       try {
         risk = await spec.risk(parsed.data, ctx);

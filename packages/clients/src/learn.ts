@@ -2,7 +2,7 @@ import { fold } from "@mrog/jobs";
 import { SUGGESTIBLE_OFFER_FIELDS, type Lead, type OfferProfile } from "@mrog/shared";
 
 import { clientFact } from "./facts";
-import { staffOf } from "./staff";
+import { staffOf, staffRange } from "./staff";
 
 /** Profile changes your reactions suggest. Only ever suggested: you accept or skip each one on the profile card. */
 
@@ -68,6 +68,24 @@ export function suggestFrom(
       because: `You turned down ${lead.company} for where it is.`,
     };
   return sizePattern(board, profile);
+}
+
+/**
+ * A client size your price states (3.3): "£300 a month for up to 50 staff", "from 10 employees". Only when the price
+ * says it in so many words, and only for a size your profile leaves open: a suggestion you accept or skip, never
+ * applied by itself. A price that names no size suggests nothing.
+ */
+export function sizeFromPrice(profile: OfferProfile): Suggested[] {
+  if (!profile.price) return [];
+  const range = staffRange(profile.price);
+  if (!range) return [];
+  const because = `Your price says “${profile.price}”.`;
+  const out: Suggested[] = [];
+  if (profile.sizeMin === null && range.min > 1)
+    out.push({ field: "sizeMin", value: String(range.min), because });
+  if (profile.sizeMax === null && range.max !== null && range.max > 0)
+    out.push({ field: "sizeMax", value: String(range.max), because });
+  return out;
 }
 
 /** "You turned down 4 companies with over 200 staff": a size limit, once enough 👎 leads share a size. */

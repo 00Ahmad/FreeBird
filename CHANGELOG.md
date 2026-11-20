@@ -2,6 +2,174 @@
 
 All notable changes to FreeBird. The format follows [Keep a Changelog](https://keepachangelog.com), and the project uses [semantic versioning](https://semver.org).
 
+## 0.0.18 - 2026-11-21
+
+Fixes to the main bot (the one made with **+ → New bot**), the Job Bot and the Client Bot from three audits, aimed at small local models.
+
+### Added
+
+- **Client Bot: UK Find a Tender.** Public tenders above the thresholds, from the whole UK, join Contracts Finder's. No key needed. Only tenders that name what you sell are kept.
+- **Client Bot: see what's new.** Leads from the latest scan are marked **New**, faded ones **Gone stale**. A line says what changed with the latest scan.
+- **Client Bot: who to ask for.** Each lead shows your buyers' job titles ("Ask for the Finance Director"), and the CSV has an "Ask for" column. No person is ever looked up.
+- **Client Bot: your price suggests a client size** when it states one ("for up to 50 staff"). It's a suggestion on the profile card, never applied by itself.
+- **Client Bot: the stage is worked out from the official record.** Up to 2 years old is a new company, 5 or more is established, and a fresh sign of growth makes it growing.
+- **Client Bot: lookalikes say which register entry each client was matched to**, so a wrong match can be spotted.
+- A Client Bot benchmark for developers (`evals/client-bench.eval.ts`):
+  - pages that must not become leads: a menu, a competitor, a "top 10" list, a footer, a charity post, a news site;
+  - a wrong register record, a tender, a real lead, and the interview.
+
+- **Job Bot: Check still open.** A button on the board reads each Found and Shortlisted job again, with no model, and marks the ones whose posting is gone or says it's closed. It only runs when you press it.
+- **Job Bot: see what's new.** Jobs from the latest scan are marked **New**, each card shows the day it was found, and the board can sort newest first or show only new jobs.
+- **Job Bot reads Ashby and SmartRecruiters job boards** through their public job lists, as it already did for Greenhouse and Lever. Lever jobs now show their posting date.
+- **Job Bot: pages that need you no longer hold up a scan.** A CAPTCHA or sign-in page is set aside and the scan carries on. At the end you're asked about those pages one at a time. If you don't answer one, the rest are skipped, and the closing words say how many were left unread.
+- **Job Bot remembers pages that led nowhere and searches it has run.** A page that wasn't a job, a closed or missing posting, or a job already on the board under another address is skipped for 30 days (a year for one that won't come back). Searches run in the last 14 days aren't run again.
+- **Job Bot: better suggestions from your reasons.** "Too junior" suggests a seniority, and "salary too low" suggests a lowest salary just above that job's pay.
+- **Job Bot: the profile card says when requirements won't be checked.** It warns when the profile has more than the Checker can take (30).
+- **Job Bot: a desktop notice when a scan ends** while you're looking at another chat.
+- A Job Bot benchmark for developers (`evals/job-bench.eval.ts`): real-model cases for title matching, posting dates, a long profile, an error page, a closed job in a list, a Greenhouse list and the interview.
+
+- **Details → Memory says when old notes no longer reach the bot.** On a local model, memory now takes at most a tenth of the context window in the prompt (and at most 60 notes); when the oldest notes don't fit, the panel says how many. Cloud models keep the newest 60 notes as before.
+- **Undo a bot's file change from the chat.** When a bot writes or edits a file, its card shows **Undo**, which puts the file back as it was (or removes a file the bot created). If the file was changed again since, you're asked first. The bot is told about the undo in its next turn. Copies are kept on this computer, at most 100 per bot, and none for files over 4 MB.
+- **Pinned memory notes.** Pin a note in **Details → Memory** and it is always sent to the bot, however old, and the bot's `forget` can't delete it (at most 10 per bot). Notes the bot no longer sees are greyed out.
+- **Wait for my answer to approvals**, per bot in **Details → Notifications**: an approval card of that bot or its helpers stays open until you answer, instead of being dropped after 15 minutes.
+- `read_file` can read a file by characters (`from_char`), for minified files whose single line is longer than a read can show.
+- A main-bot eval for developers (`evals/main-bot.eval.ts`): real-model cases for a message sent mid-turn, a follow-up about "those three", a job split between helpers and three such jobs in a row, recording every model request each one costs.
+
+### Changed
+
+- **Client Bot: scans that run while you're away.**
+  - **A page that needs you no longer holds up the scan.** A CAPTCHA or sign-in page is set aside, and you're asked about such pages at the end.
+  - **The time limit covers the whole scan.**
+  - **The Visual helper is limited:** 3 minutes per try, every try counted, and skipped when its model can't see pictures.
+  - **It's faster on a big board:** saved at most every 0.4 seconds.
+  - **A saved project that doesn't fully load is kept.**
+  - All of this is shared with the Job Bot now, as one copy (`harness/src/teams/`).
+- **Client Bot: fewer model turns per scan:**
+  - The Checker is asked only what a page can give, and never for traits (code finds them).
+  - A list of providers, or a tender for another service, never reaches a model.
+  - The Checker is reminded once, in the same turn, to call its tool.
+  - The Searcher runs only when the app has no new searches left.
+- **Client Bot: more from the same work:**
+  - Registers give their next page each scan and say when they have nothing more.
+  - Searches and registers cover each place and industry you serve, not just the first.
+  - Pages that led nowhere and searches already run aren't repeated for a while.
+  - The watch list takes at most a quarter of the scan's pages.
+  - A company's contact page is read when its home page only links to it.
+- **Client Bot: the interview listens better:**
+  - It knows which question you're answering.
+  - It doesn't ask again what it already asked or what you skipped.
+  - It adds to lists instead of replacing them, removes on request, and keeps only what you said.
+  - Each reply says what was saved, with the kind of service it picked.
+- **Client Bot: the chat says which kinds of lead a scan will look for**, and takes "10, only tenders" or "5, no quiet fits" in the answer.
+- **Client Bot: the Checker's words are labelled.** A lead's summary is marked as the Checker's, and fit lines the app checked say so.
+
+- **Coordinators ask the model whether a job splits into parts less often.** FreeBird settles the clear cases itself: a quick message, a request for helpers, one that points back at the chat ("compare those three"), one naming a file, or one asking to write, explain or fix something is never planned, nor one that names no several things. Each skipped question saves a model request before the work starts.
+- **A helper given a new task reads only that task**, not every task it was given before. Its thread with the coordinator still shows them all.
+- **Helpers' answers share the room fairly.** With several long answers, each is shortened at its own end and says the full answer is in the helper's thread, instead of the last helpers' answers being cut off.
+- **A coordinator no longer runs out of helpers.** At the limit of six, the helper idle longest is given the new job, name and instructions instead of the call failing. Nothing is deleted: its thread with the coordinator carries on, renamed, with a note, so its earlier work stays readable.
+- **A helper whose model fails is asked once more** before the coordinator answers without it, unless it may already have changed something.
+- **Only the newest three pictures you attached are sent again** on each step; older ones are replaced by a note.
+- **The size of a chat in another alphabet is estimated better.** Urdu, Arabic, Russian and similar text counts about twice as much per character as English, and Chinese, Japanese and Korean about 3.5 times, so such a chat no longer overruns the model's window unnoticed.
+- **Job Bot: code decides what it can, so fewer model turns per scan:**
+  - Jobs on a job system's list are picked by their titles, in code, preferring places that suit you.
+  - Searches are made from every title, related title, place and job system you have, a few new ones each round.
+  - Search results whose title is plainly another job are dropped before they're read.
+  - Workplace, pay, job title and companies to avoid are judged from the facts confirmed on the page.
+- **Job Bot: the interview listens better:**
+  - It knows which question you're answering.
+  - It doesn't ask again what it already asked or what you skipped.
+  - It adds to a list instead of replacing it, and removes an item when you say so.
+  - It keeps only what you actually said.
+  - Each reply ends with what was saved ("Saved: Added must-have: Go").
+- **Job Bot: changing your profile updates the board.** The parts code decides, and each score, are worked out again for every job. A job read before you added a requirement says so.
+- **Job Bot: the Checker's words are labelled.** A job's summary is marked as the Checker's, and match lines the app checked itself say "(checked by the app)".
+- **Job Bot: when a message could mean a scan or a profile change**, the bot asks "Start a scan now, or change your profile?" instead of guessing. A number counts as the number of jobs only when it's said that way ("12 jobs"), never inside an amount like "40,000" or "50k". The Client Bot uses the same rules.
+- **Job Bot: the time limit covers the whole scan.** One deadline now ends a slow page read or model turn too, as "Reached the time limit for one scan."
+- **Job Bot: limits on the Visual helper.** Each try has 3 minutes, and failed tries count toward the 5 per scan. A model that can't see pictures isn't tried again that scan.
+- **Job Bot: faster on a big board.** It saves and updates the screen at most every 0.4 seconds instead of on every small change. A Checker's stored task keeps only the start of the page once its turn has ended.
+- **Job Bot: the cheap ways of reading are tried again.** A job system's own list is always tried first, and a note that a site needs the browser lasts 30 days, per employer, not per host. The Client Bot does the same.
+
+### Fixed
+
+- **Client Bot: ordinary sentences no longer pass as signs.** None of these count any more:
+  - "Slow cooked tender beef" and "We recommend booking early" as asking for a provider;
+  - "Registered in England and Wales" and "Established in 1987" as a new company;
+  - "We raised £500 for the local hospice" or "Grant Thornton" as funding;
+  - "He is on parole" as hiring.
+- **Client Bot: one weak, undated sign no longer gets a company past the quiet-fit checks.**
+- **Client Bot: "Brightside Kitchens" is no longer "Brightside Cleaning".** Companies sharing one word count as the same no more, so the wrong website and the wrong official record (a dissolved one) are no longer taken.
+- **Client Bot: a field's name ("services", "email") can no longer become a company's name.**
+- **Client Bot: a web designer's footer email is no longer offered as the company's inbox.**
+- **Client Bot: "IT support for accountants" is IT support, not accounting.** The kind of service is picked from what you sell, not who it's for.
+- **Client Bot: a company turned down as a quiet fit is judged again later**, instead of never.
+- **Client Bot: "Forget" also deletes what was read about the lead** from the team's role threads.
+- **Client Bot: a full board no longer drops a lead you're working.**
+- **Client Bot: a failed scan is marked as ended, and a register that can't help says why.**
+- **Client Bot: a watched company whose site couldn't be read keeps its place** in the queue.
+- **Client Bot: a short home page counts as loaded in the browser**, and a site with no https is read over http (the "no secure connection" clue).
+- **Client Bot: fixes found with a real 9B model in the benchmark:**
+  - A tender for another service is never taken as one for yours.
+  - A sign the model wrote nested under its company, or quoted only by a headline, is read.
+  - A news page's own address is no longer taken as the company's website.
+  - Profile fields the model wrote as JSON inside the "what you sell" field are read properly, and so are a page report's lists under another name or as JSON text.
+  - A business's own hiring page is no longer "asking now" because the model called it a request.
+- **Job Bot and Client Bot: "keep only what you said" accepts a word's other form.** "Accounting" for "accountants" was dropped as unsaid.
+- **Job Bot: the closing words count the page nobody answered as left unread too.**
+- **A message you send while the bot is working is no longer answered twice.** The reply records that it took the message in, and later turns are told so; before, the message read as new in every later turn and could be acted on again.
+- **A finished answer is no longer taken for an unfinished one.** A reply ending "Let me know if…", "I'd suggest…", or a list after "Next, I recommend…" no longer gets a "carry on" nudge and an extra model request.
+- **A bot going back and forth between the same two or three steps** now stops after three rounds, as one repeating the same step did, instead of using every step of the turn.
+- **"ONE" from the helper planner, followed by its reasons**, no longer becomes a helper per reason.
+- **`forget` can no longer empty a bot's memory.** It matches whole words, needs a word of at least four letters, and asks you before deleting more than three notes.
+- **`remember` doesn't save the same note twice.**
+- `edit_file` refuses a file too large to open (over 4 MB), as `read_file` does, instead of reading it all into memory.
+- **Job Bot: "Product Manager" no longer matches "Senior Product Marketing Manager".** The words of a title you want must come together and in order.
+- **Job Bot: posting dates are read properly.** "Posted Nov 12" was read as about 9,000 days old. Dates with no year, and day/month dates, are now read correctly.
+- **Job Bot: deal-breakers are no longer dropped from a long profile.** Companies to avoid are checked by code. When the profile is too long, nice-to-haves and must-haves are cut first, and you're told.
+- **Job Bot: an error page (403, 429, 500) is no longer checked as a job.** The next way of reading is tried instead.
+- **Job Bot: a careers page with one closed job is no longer dropped whole.** Only a single posting that says it's closed is skipped, and the activity list says so.
+- **Job Bot: changing one profile field no longer empties the others.** Editing a field on the profile card emptied your job titles and workplace.
+- **Job Bot: a full board no longer drops a job you're working on.** Only Not for me and weaker Found jobs make room. When there's no room, the scan ends and says so.
+- **Job Bot: a failed or stopped scan says what it found** and is marked as ended.
+- **Job Bot: a saved project that doesn't fully load is kept**, with its profile and jobs, instead of being lost.
+- **Job Bot: a Checker that ends without reporting is reminded once**, and its failures no longer get a site skipped.
+
+## 0.0.17 - 2026-11-17
+
+A release about making the Coding Bot work on small local models (9B to 27B): code holds the structure and checks the work, and the models get small, narrow tasks.
+
+### Added
+
+- **Skills for each Coding Bot role.** In a Coding Bot's **Details → Skills** you can give skills to the whole team, or to the Planner, the Developer or QA alone. Three new built-in skills, one each for the Planner, the Developer and QA, are assigned by default (43 built-in skills in all).
+- **The Developer checks its own work.** When the Developer says a file is finished, FreeBird first checks that it parses, runs the code check on it, and (with Visual QA on, once the page's scripts exist) opens the page in a hidden tab. A problem comes back to the Developer at once, with the error and the line, up to twice per card, before QA sees it. A crash on load like `Cannot read properties of null (reading 'addEventListener')` is now caught here.
+- **Done checks.** For a web page, the plan can say how to tell a file works, in four one-line forms the browser runs: `#list has items`, `#status contains "Ready"`, `click #refresh -> #list changes` and `type #task "Buy milk" then click #add -> #list contains "Buy milk"`. A check that fails goes back to its file's card. Each check starts from a fresh page with saved browser data cleared. Plan exports keep them.
+- **Your messages reach the right card.** A message in the Coding Bot's chat that names one of the project's files (`movies.js:289 Uncaught TypeError…`) becomes your comment on that file's card and sends it back to the Developer, who is told your note comes first. It works while the team works, while it's stopped or waiting for you, and after it's done when you report a fault.
+- **Plan problems go back to the Planner.** A file that keeps failing, or that QA says is the plan's fault, goes back to the Planner, which changes only that part of the plan (at most twice per project). Files whose plan stays the same keep their work, and with Auto-approve off you approve the change first.
+- **QA sees what changed.** When QA looks at a card again, it is shown a short diff of what changed since its last review instead of rereading the whole file.
+- **The exact names, read from the code.** Each Developer and QA turn is told the ids, classes, exports and imports the files around it really use, read from the code already written. The diagram has a **Planned / In the code** switch.
+- **A Coding Bot benchmark** for developers: fixed briefs run on a real local model, with whether the result works (see `docs/development.md`).
+
+### Changed
+
+- **Auto-approve covers QA's routine commands.** With Auto-approve on, QA checks, installs and runs the project without asking. It still asks for anything that can't be undone, changes security, uses your saved secrets, touches a secret file or a path outside the project, or writes a file.
+- **The code check runs on every QA pass**, not only at the end, and with Visual QA on the app is also opened by itself after every development pass. What they find goes straight back to the right card.
+- **The round limit counts per card.** A card sent back that many times is set aside for you, marked so on the board, and the rest carries on. Raising the limit brings set-aside cards back. The whole project stops after three times the limit.
+- **One card per file.** New plans have no separate cards for connections; each file's card covers its connections, and findings go to the file at fault. Files are built pages first, then scripts, then stylesheets.
+- **Small files.** The Planner is asked for one feature per file (under about 150 lines) and a short `main.js` that starts them; the code check catches two scripts on one page declaring the same top-level name.
+- **Shorter turns.** The Developer and QA see only the files their card connects to, plus the rest by name.
+- **Old files in the output folder** are listed for the Planner, which is told not to build on them, and the plan says which ones it will replace.
+
+### Fixed
+
+- **Keys in your brief are never retyped.** An API key or token in the brief (or a later message) is taken out and kept on this computer; the team only sees a name like `{{TMDB_API_KEY}}`, and FreeBird puts the real key into the file as it is written. Before, the Developer retyped keys and got them wrong, and the brief with its keys went to every model turn.
+- **A Developer turn that edits without finishing** is ended after 6 edits, and what it wrote goes on to the checks.
+- **A Developer that calls `finish_card` again and again** has its turn ended after the second call.
+- **A Developer or QA turn that answers without using any tool** is told once, in the same turn, what to call.
+- **A Coding Bot's approval card no longer expires quietly.** The team waits for your answer, and the Coding Bot reminds you in its chat every 15 minutes.
+- **The whole-project check** no longer skips QA's turn when the automatic check finds problems in files outside the plan: they are reported in the activity list, and QA is asked which planned file has to change.
+- **Token counts on cards.** A stopped or failed turn keeps the tokens it used, and a turn whose model reported none is shown as unknown rather than 0.
+- `search_files` given a file (not a folder) searches that file instead of failing.
+- Long command output started with garbled text (`â€¦`) instead of `…`.
+
 ## 0.0.16 - 2026-11-16
 
 ### Added

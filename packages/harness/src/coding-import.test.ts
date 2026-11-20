@@ -92,8 +92,9 @@ describe("bringing in a plan", () => {
     expect(body.project.cards.map((c: { id: string; column: string }) => [c.id, c.column])).toEqual([
       ["card_n1", "todo"],
       ["card_n2", "todo"],
-      ["card_e1", "todo"],
     ]);
+    // The plan file's connection is kept in the plan, without a card of its own.
+    expect(body.project.edges).toHaveLength(1);
     expect(body.project.log.at(-1).text).toBe("You brought in a plan: 2 files, 1 connections");
     expect(published.at(-1)!.status).toBe("awaiting_approval");
     expect(messageText(chat(h, bot.threadId).at(-1)!)).toContain(
@@ -220,9 +221,9 @@ describe("bringing in a plan", () => {
     expect(moved.json().needsReplace).toBe(true);
     const replaced = await importTo(h, bot.id, { plan: file, replace: true });
     expect(replaced.statusCode).toBe(200);
-    expect(replaced.json().project.cards).toHaveLength(3);
+    expect(replaced.json().project.cards).toHaveLength(2);
     // Auto-approve is on: the new plan is built straight away.
-    await until(h, bot.id, (p) => p.status === "done" && p.cards.length === 3);
+    await until(h, bot.id, (p) => p.status === "done" && p.cards.length === 2);
   });
 
   it("takes a plan when the project stopped with an error or waits for you", async () => {
@@ -305,7 +306,7 @@ describe("bringing in a plan", () => {
     const res = await importTo(h, bot.id, { plan: file });
     expect(res.json().project.status).toBe("developing");
     const done = await until(h, bot.id, (p) => p.status === "done");
-    expect(done.cards).toHaveLength(3);
+    expect(done.cards).toHaveLength(2);
     expect(existsSync(join(out, "src", "main.ts"))).toBe(true);
     expect(turnsOf(team, "planner")).toHaveLength(0);
   });
@@ -314,5 +315,19 @@ describe("bringing in a plan", () => {
     h = await startTeam(codingTeam());
     const plain = (await post(h, "/api/bots", { name: "Plain" })).json().bot;
     expect((await importTo(h, plain.id, { plan: file })).statusCode).toBe(404);
+  });
+});
+
+describe("a key in a plan file's brief", () => {
+  it("is taken out like any brief's: the project keeps its name", async () => {
+    const key = "3f9a8c7d6e5b4a3f2e1d0c9b8a7f6e5d";
+    h = await startTeam(codingTeam());
+    const { bot } = await makeCoding(h, tmp("out"));
+    const res = await importTo(h, bot.id, {
+      plan: { ...file, brief: `A movie list.\nTMDB API Key: ${key}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(getProject(h, bot.id).brief).toBe("A movie list.\nTMDB API Key: {{TMDB_API_KEY}}");
+    expect(JSON.stringify(getProject(h, bot.id))).not.toContain(key);
   });
 });

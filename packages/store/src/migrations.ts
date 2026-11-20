@@ -251,4 +251,22 @@ export const MIGRATIONS: readonly Migration[] = [
     // When to use a skill, in one line: what a bot reads to pick one by itself.
     sql: `ALTER TABLE skills ADD COLUMN description TEXT NOT NULL DEFAULT '';`,
   },
+  {
+    id: 20,
+    name: "messages-took-in",
+    // The user's messages a reply took in while it was being written, so they aren't read as new afterwards.
+    sql: `ALTER TABLE messages ADD COLUMN took_in TEXT NOT NULL DEFAULT '[]';`,
+  },
+  {
+    id: 21,
+    name: "bots-approvals-wait",
+    // An approval card of this bot (and its helpers) waits for the user instead of being dropped after 15 minutes.
+    sql: `ALTER TABLE bots ADD COLUMN approvals_wait INTEGER NOT NULL DEFAULT 0;`,
+  },
+  {
+    id: 22,
+    name: "memories-pinned",
+    // A note the user pinned: always sent to the model, however old, and never deleted by the bot's forget.
+    sql: `ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];

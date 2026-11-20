@@ -2,6 +2,7 @@ import type { LeadSignal } from "@mrog/shared";
 import { describe, expect, it } from "vitest";
 
 import { daysBefore, parseDate } from "./dates";
+import { generic } from "./playbooks/generic";
 import { payroll } from "./playbooks/payroll";
 import { SIGNALS, signalKind } from "./signals";
 import { isStale, signalStrength, UNDATED_SHARE, whyNow } from "./signals/strength";
@@ -33,6 +34,35 @@ describe("signals", () => {
     expect(signalKind("asking").indicates("We are seeking a payroll provider for 2027", payroll)).toBe(true);
     expect(signalKind("growing").indicates("We have 12 open roles", payroll)).toBe(true);
     expect(signalKind("unhappy").indicates("Fed up with our payroll company", payroll)).toBe(true);
+  });
+
+  it("don't pass ordinary sentences (1.1)", () => {
+    const says = (kind: LeadSignal["kind"], quote: string, serviceNames?: string[]) =>
+      signalKind(kind).indicates(quote, kind === "hiring" && serviceNames ? generic : payroll, {
+        now: NOW,
+        ...(serviceNames ? { serviceNames } : {}),
+      });
+    // Asking must name the service next to the asking words.
+    expect(says("asking", "Slow cooked tender beef with roast potatoes")).toBe(false);
+    expect(says("asking", "We recommend booking early for weekends")).toBe(false);
+    expect(says("asking", "Can anyone recommend a good payroll bureau in Leeds?")).toBe(true);
+    expect(says("asking", "Invitation to tender: payroll services for 300 staff")).toBe(true);
+    expect(says("asking", "We are looking for an office cleaning company", ["office cleaning"])).toBe(true);
+    expect(says("asking", "We are looking for a new head chef", ["office cleaning"])).toBe(false);
+    // A new company needs a recent date, or "new", "just", "recently".
+    expect(says("new_company", "Registered in England and Wales No. 01234567")).toBe(false);
+    expect(says("new_company", "Established in 1987, family run")).toBe(false);
+    expect(says("new_company", "Founded in March 2026 by two chefs")).toBe(true);
+    expect(says("new_company", "We just opened our doors on Briggate")).toBe(true);
+    // Funding needs money of a size or a round, and isn't a charity's.
+    expect(says("funding", "Grant Thornton are our auditors")).toBe(false);
+    expect(says("funding", "We raised £500 for the local hospice")).toBe(false);
+    expect(says("funding", "Brightside secured £250k of investment to open two more sites")).toBe(true);
+    expect(says("funding", "The startup closed a series A round")).toBe(true);
+    // Hiring for a service with no job titles needs a hiring phrase, with word boundaries.
+    expect(says("hiring", "Our role in the community matters to us", ["office cleaning"])).toBe(false);
+    expect(says("hiring", "He is on parole", ["office cleaning"])).toBe(false);
+    expect(says("hiring", "We're hiring: join our team as a site manager", ["office cleaning"])).toBe(true);
   });
 
   it("fade with age, count weakly when undated, and nothing past their fresh period", () => {

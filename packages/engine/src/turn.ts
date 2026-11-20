@@ -9,7 +9,15 @@ import {
 import type { ModelCapability, ToolStatus, Usage } from "@mrog/shared";
 
 import { dropOldPictures, shrinkOldResults } from "./budget";
-import { estimateToolTokens, fitHistory, withoutPictures, writeToolUse } from "./history";
+import {
+  estimateTextTokens,
+  estimateToolTokens,
+  fitHistory,
+  onlyRecentPictures,
+  withoutPictures,
+  writeToolUse,
+} from "./history";
+import { goesRoundInCircles, keptSignatures } from "./loops";
 import { FenceFilter, parseToolCalls, reactInstructions, startsToolCall } from "./react";
 
 export interface ToolOutcome {
@@ -33,7 +41,18 @@ export interface TurnSink {
   discardReasoning?(): void;
   toolStart(call: ToolCall): void;
   toolEnd(callId: string, outcome: ToolOutcome): void;
+  /**
+   * The tokens one model request used, as soon as it ends: a turn that is stopped or fails later still knows what it
+   * spent. Not called for a request whose provider reported no counts.
+   */
+  usage?(spent: Usage): void;
 }
+
+/**
+ * When the engine asks for messages to fold in: "between" after a batch of tool calls (the model called tools, even if
+ * some were refused), "ending" when the model replied with no tool call and the turn would end there.
+ */
+export type SteerMoment = "between" | "ending";
 
 export interface RunTurnOptions {
   provider: ChatProvider;
@@ -52,21 +71,33 @@ export interface RunTurnOptions {
   signal: AbortSignal;
   sink: TurnSink;
   /** Messages the user sent while this turn ran; folded in between steps. */
-  steer?: () => ChatMessage[];
+  steer?: (moment: SteerMoment) => ChatMessage[];
   /** Check the answer against the request once before finishing, when the task took several tool calls. */
   selfCheck?: boolean;
 }
 
 export interface TurnResult {
   usage: Usage;
+  /** Whether any request reported its token counts; when none did, `usage` is zero for want of them, not measured. */
+  usageReported: boolean;
   finishReason: string | null;
   steps: number;
   droppedHistory: number;
 }
 
-/** A reply whose last sentence says what the model is about to do, cut off before it did it. */
-export const announcesMove = (text: string) =>
-  /\b(I'll|I will|I'm going to|let me|next,? I|now I)\b[^.!?]*$/i.test(text.trim());
+/** Words that end a finished answer with an offer or advice, not a move the bot is about to make. */
+const NOT_A_MOVE =
+  /\b(let me know|I(?:'d| would)? (?:recommend|suggest)|next,? I (?:recommend|suggest|'d))\b/i;
+
+/**
+ * A reply whose last line says what the model is about to do, cut off before it did it. Only the last line counts:
+ * a list after "Next, I recommend…" is the answer, and "Let me know if…" is an offer, not a move.
+ */
+export const announcesMove = (text: string) => {
+  const last = text.trim().split("\n").at(-1)!.trim();
+  if (NOT_A_MOVE.test(last)) return false;
+  return /\b(I'll|I will|I'm going to|let me|next,? I|now I)\b[^.!?]*$/i.test(last);
+};
 
 const CONTINUE_NUDGE: ChatMessage = {
   role: "user",
@@ -100,7 +131,7 @@ const SELF_CHECK_NUDGE: ChatMessage = {
 const NO_PROGRESS_NUDGE: ChatMessage = {
   role: "user",
   content:
-    "(You've made the same tool call with the same result several times in a row, so it is not getting anywhere. Don't call it again. Reply now with what you found so far, say plainly what didn't work, and suggest a different approach if there is one.)",
+    "(You've made the same tool call with the same result several times in a row (or gone back and forth between the same few calls), so it is not getting anywhere. Don't call them again. Reply now with what you found so far, say plainly what didn't work, and suggest a different approach if there is one.)",
 };
 
 /** The same call (same arguments) with the same outcome this many times in a row ends the turn. */
@@ -163,11 +194,13 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
   const toolTokens = nativeTools ? estimateToolTokens(toolDefs) : 0;
   const budget = Math.max(
     512,
-    options.contextWindow - Math.ceil(system.length / 3.5) - toolTokens - REPLY_RESERVE,
+    options.contextWindow - Math.ceil(estimateTextTokens(system)) - toolTokens - REPLY_RESERVE,
   );
   let history = options.history;
   // Pictures the user attached earlier would be re-sent every turn to a model that can't see them.
   if (!vision) history = withoutPictures(history);
+  // Pictures the user attached long ago would be re-sent on every step of every turn.
+  else history = onlyRecentPictures(history);
   // A model without native tools reads earlier tool use only in the written form it uses itself.
   if (!capabilities.includes("tools")) history = writeToolUse(history);
   const fitted = fitHistory(history, budget);
@@ -176,6 +209,15 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
   const room = Math.max(1024, options.contextWindow - REPLY_RESERVE - toolTokens);
 
   const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+  let usageReported = false;
+  /** Counts one request's tokens, and tells the sink at once. */
+  const spend = (spent: Usage | null | undefined) => {
+    if (!spent) return;
+    usageReported = true;
+    usage.inputTokens += spent.inputTokens;
+    usage.outputTokens += spent.outputTokens;
+    sink.usage?.(spent);
+  };
   let usedTools = false;
   let nudged = false;
   let brokenCalls = 0;
@@ -185,9 +227,8 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
   let checkStep = 0;
   let finishReason: string | null = null;
   const think = capabilities.includes("thinking") ? options.think : undefined;
-  /** The last tool call's signature and how many calls in a row had it. */
-  let lastSignature = "";
-  let repeats = 0;
+  /** The newest tool calls' signatures, to notice the bot going round in circles. */
+  const signatures: string[] = [];
   /** The step on which the bot was found going round in circles. */
   let stuckAt = 0;
 
@@ -258,10 +299,7 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
         thinking.push(chunk.block);
       } else {
         finishReason = chunk.finishReason;
-        if (chunk.usage) {
-          usage.inputTokens += chunk.usage.inputTokens;
-          usage.outputTokens += chunk.usage.outputTokens;
-        }
+        spend(chunk.usage);
       }
     }
     let spoken = text;
@@ -297,7 +335,7 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
     if (checking) {
       // "OK" means the answer stands. Corrections are shown under a heading; work continues normally.
       if (calls.length === 0 && isOk(held)) {
-        return { usage, finishReason, steps: step, droppedHistory: fitted.dropped };
+        return { usage, usageReported, finishReason, steps: step, droppedHistory: fitted.dropped };
       }
       if (held.trim()) sink.text(calls.length === 0 ? `\n\n**After checking:** ${held.trim()}` : held);
     }
@@ -305,7 +343,7 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
     if (calls.length === 0 || !tools) {
       // On the last step a new message is left waiting rather than answered with the out-of-steps reply: the turn
       // ends normally and the caller starts a fresh one for whatever is still unread.
-      const steered = step < maxSteps ? (options.steer?.() ?? []) : [];
+      const steered = step < maxSteps ? (options.steer?.("ending") ?? []) : [];
       if (
         steered.length === 0 &&
         options.selfCheck &&
@@ -334,7 +372,8 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
         messages.push({ role: "assistant", content: text }, CONTINUE_NUDGE);
         continue;
       }
-      if (steered.length === 0) return { usage, finishReason, steps: step, droppedHistory: fitted.dropped };
+      if (steered.length === 0)
+        return { usage, usageReported, finishReason, steps: step, droppedHistory: fitted.dropped };
       messages.push({ role: "assistant", content: text }, ...steered);
       continue;
     }
@@ -368,10 +407,9 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
         outcome = { status: "error", result: `Tool failed: ${(error as Error).message}` };
       }
       sink.toolEnd(call.id, outcome);
-      const signature = callSignature(call, outcome);
-      repeats = signature === lastSignature ? repeats + 1 : 1;
-      lastSignature = signature;
-      if (repeats >= NO_PROGRESS_REPEATS && !stuckAt) stuckAt = step;
+      signatures.push(callSignature(call, outcome));
+      if (signatures.length > keptSignatures(NO_PROGRESS_REPEATS)) signatures.shift();
+      if (!stuckAt && goesRoundInCircles(signatures, NO_PROGRESS_REPEATS)) stuckAt = step;
       // The host says why a call wasn't run (the user said no, or nobody answered in time): those are different
       // facts for the bot. Only a host that gave no reason gets the usual refusal.
       let content =
@@ -401,7 +439,7 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
     // that has none). Like running out of steps, a message sent meanwhile waits for a fresh turn.
     if (stuckAt) break;
     // After the last step only the out-of-steps reply is left; a new message waits for a fresh turn instead.
-    if (step < maxSteps) messages.push(...(options.steer?.() ?? []));
+    if (step < maxSteps) messages.push(...(options.steer?.("between") ?? []));
   }
 
   // Out of steps, or stuck repeating itself: one last call without tools, so the turn ends with what was found
@@ -422,10 +460,7 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
           const visible = filter ? filter.push(chunk.text) : chunk.text;
           if (visible) sink.text(visible);
         } else if (chunk.type === "reasoning") sink.reasoning(chunk.text);
-        else if (chunk.type === "done" && chunk.usage) {
-          usage.inputTokens += chunk.usage.inputTokens;
-          usage.outputTokens += chunk.usage.outputTokens;
-        }
+        else if (chunk.type === "done") spend(chunk.usage);
       }
       if (filter) sink.text(filter.flush());
     } catch {
@@ -438,9 +473,15 @@ export async function runTurn(options: RunTurnOptions): Promise<TurnResult> {
       sink.text(
         `\n\n_Stopped: the same step gave the same result ${NO_PROGRESS_REPEATS} times in a row. Ask me to continue, or tell me what to try differently._`,
       );
-    return { usage, finishReason: "no_progress", steps: stuckAt, droppedHistory: fitted.dropped };
+    return {
+      usage,
+      usageReported,
+      finishReason: "no_progress",
+      steps: stuckAt,
+      droppedHistory: fitted.dropped,
+    };
   }
   if (options.stepLimitNote !== false)
     sink.text(`\n\n_Stopped after ${maxSteps} steps. Ask me to continue if there's more to do._`);
-  return { usage, finishReason: "max_steps", steps: maxSteps, droppedHistory: fitted.dropped };
+  return { usage, usageReported, finishReason: "max_steps", steps: maxSteps, droppedHistory: fitted.dropped };
 }

@@ -20,10 +20,26 @@ describe("learning from your reactions", () => {
     );
   });
 
-  it("any other 👎 reason suggests a deal-breaker", () => {
+  it("a 👎 about seniority or pay suggests that field, not a deal-breaker", () => {
+    // Before: "too junior" became the deal-breaker "too junior", which no Checker can judge.
     expect(suggestFrom("down", "too junior", { company: "Acme" }, profile)).toMatchObject({
+      field: "seniority",
+      value: "Senior",
+    });
+    expect(
+      suggestFrom("down", "salary too low", { company: null, salary: "£40,000 - £45,000 a year" }, profile),
+    ).toMatchObject({
+      field: "minSalary",
+      value: "45001 GBP year",
+    });
+    // A job that doesn't say what it pays gives nothing to go by.
+    expect(suggestFrom("down", "pay too low", { company: null, salary: null }, profile)).toBeNull();
+  });
+
+  it("any other 👎 reason suggests a deal-breaker", () => {
+    expect(suggestFrom("down", "too much travel", { company: "Acme" }, profile)).toMatchObject({
       field: "dealBreakers",
-      value: "too junior",
+      value: "too much travel",
     });
     expect(suggestFrom("down", "no weekly on-call", { company: null }, profile)?.value).toBe(
       "weekly on-call",
@@ -38,7 +54,9 @@ describe("learning from your reactions", () => {
 
   it("suggests nothing without a reason, or what the profile already has", () => {
     expect(suggestFrom("down", " ", { company: null }, profile)).toBeNull();
-    const has = mergeProfile(profile, { dealBreakers: ["Too junior"] });
-    expect(suggestFrom("down", "too junior", { company: null }, has)).toBeNull();
+    const has = mergeProfile(profile, { dealBreakers: ["Too much travel"] });
+    expect(suggestFrom("down", "too much travel", { company: null }, has)).toBeNull();
+    const senior = mergeProfile(profile, { seniority: "senior" });
+    expect(suggestFrom("down", "too junior", { company: null }, senior)).toBeNull();
   });
 });

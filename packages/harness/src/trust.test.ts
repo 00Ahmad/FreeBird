@@ -259,6 +259,41 @@ describe("a bot whose request went unanswered", () => {
     expect(replayed.content).not.toMatch(/user denied/i);
   });
 
+  it("keeps waiting, past the usual time, for a bot whose owner chose to wait for approvals", async () => {
+    const { bot, requests } = await setup([
+      [toolCall("run_command", { command: "echo hi" })],
+      [{ message: { content: "Done." } }],
+    ]);
+    // Switched on through the API, as the Details panel does.
+    const patched = await h!.app.inject({
+      method: "PATCH",
+      url: `/api/bots/${bot.id}`,
+      headers: auth,
+      payload: { approvalsWait: true },
+    });
+    expect(patched.json().bot.approvalsWait).toBe(true);
+    h!.services.agent.approvals.timeoutMs = 40;
+    const card = nextEvent<string>(h!.bus, (e) => {
+      if (e.type !== "message.updated") return undefined;
+      const part = toolPart(e.message);
+      return part?.status === "pending_approval" && part.approval?.id;
+    });
+    const done = finished();
+    await send(bot, "run it");
+    const id = await card;
+    // Several times the usual wait: before, the call was dropped as "nobody answered".
+    await sleep(200);
+    const answered = await h!.app.inject({
+      method: "POST",
+      url: `/api/approvals/${id}`,
+      headers: auth,
+      payload: { decision: "deny" },
+    });
+    expect(answered.statusCode).toBe(204);
+    expect(toolPart(await done)).toMatchObject({ status: "denied", decidedBy: "user" });
+    expect(requests[1].messages.at(-1).content).toMatch(/user denied/i);
+  });
+
   it("still tells the bot the user said no, when the user did", async () => {
     const { bot, requests } = await setup([
       [toolCall("run_command", { command: "echo hi" })],

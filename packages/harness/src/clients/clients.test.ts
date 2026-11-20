@@ -8,6 +8,7 @@ import {
   clientTeam,
   makeClientBot,
   NEWS,
+  NEWS_PAGE,
   NEWS_REPORT,
   page,
   pad,
@@ -115,6 +116,48 @@ describe("the interview", () => {
     expect(approved.json().project.status).toBe("ready");
   });
 
+  it("knows the question you're answering, adds to lists, keeps a skip, and says what it saved (4.2–4.4, 1.7)", async () => {
+    const team = clientTeam({
+      interview: (said) =>
+        /IT support/.test(said)
+          ? {
+              profile: { offer: "IT support for accountants", areas: ["Leeds"], industries: ["accountants"] },
+              say: "Roughly how many staff do your ideal clients have?",
+            }
+          : /law firms/.test(said)
+            ? { profile: { industries: ["law firms"] }, say: "Roughly how many staff do they have?" }
+            : { say: "No problem." },
+    });
+    h = await clientHarness(team);
+    const { bot } = await makeClientBot(h);
+    const reply = async (n: number) => {
+      for (
+        let i = 0;
+        i < 400 &&
+        h.store.messages.list(bot.threadId).filter((m) => m.role === "bot" && m.status === "done").length < n;
+        i++
+      )
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      return botSaid(h, bot).at(-1)!;
+    };
+    await type(h, bot, "I sell IT support for accountants in Leeds");
+    // The kind of service picked is said back, with what was saved.
+    expect(await reply(2)).toMatch(/_Saved: Sells: IT support for accountants; Kind of service: IT support;/);
+    await type(h, bot, "Also law firms");
+    expect(await reply(3)).toMatch(/_Saved: Added industry: law firms/);
+    // Added to the list, not replacing it; and the Interviewer saw the question being answered.
+    expect(projectOf(h, bot.id).profile.industries).toEqual(["accountants", "law firms"]);
+    const tasks = team.seen.filter((s) => s.role === "interviewer").map((s) => s.task);
+    expect(tasks.at(-1)).toMatch(/YOU LAST ASKED \(the user is answering this\)\n[\s\S]*how many staff/);
+    const before = team.seen.length;
+    await type(h, bot, "skip");
+    await reply(4);
+    // A skip is kept, and has nothing to save: no second turn asking to save it.
+    expect(projectOf(h, bot.id).interview.skipped).toContain("size");
+    expect(team.seen.slice(before).filter((s) => s.role === "interviewer").length).toBeLessThanOrEqual(2);
+    expect(team.seen.at(-1)!.task).not.toMatch(/You replied without calling save_offer/);
+  });
+
   it("won't scan before the profile is approved", async () => {
     h = await clientHarness(clientTeam());
     const { bot } = await makeClientBot(h);
@@ -154,6 +197,17 @@ describe("a scan", () => {
     );
   });
 
+  it("doesn't make a hiring page 'asking now' because the Checker called it a request (found in the benchmark)", async () => {
+    h = await clientHarness(
+      clientTeam({ check: (url) => (url === NEWS ? { ...NEWS_REPORT, kind: "request" } : checker(url)) }),
+    );
+    const { bot } = await readyClientBot(h);
+    serve(h);
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    expect(project.leads.map((l) => l.kind)).toEqual(["signs"]);
+    expect(project.leads[0]!.contacts.some((c) => c.kind === "respond")).toBe(false);
+  });
+
   it("drops a sign whose quote isn't on the page", async () => {
     h = await clientHarness(
       clientTeam({
@@ -181,6 +235,37 @@ describe("a scan", () => {
     const first = await scan(h, bot.id, 1, ["signs"]);
     expect(first.leads).toEqual([]);
     expect(first.log.some((l) => /on your clients/.test(l.text))).toBe(true);
+  });
+
+  it("doesn't read pages that led nowhere, or run the same searches, in the next scan (2.4, 2.5)", async () => {
+    const LIST = "https://news.test/leeds/roundup";
+    const team = clientTeam({ check: checker });
+    h = await clientHarness(team);
+    const { bot } = await readyClientBot(h);
+    const pages = {
+      ...SITE_PAGES(),
+      [LIST]: page(LIST, pad("The 10 best payroll providers in Leeds for 2026")),
+    };
+    const readers = savedReaders(pages);
+    h.services.clients.io.readers = { text: readers.text };
+    const queries: string[] = [];
+    h.services.clients.io.search = async (_bot, query) => {
+      queries.push(query);
+      return /"Brightside Kitchens"/.test(query) ? [SITE] : [RIVAL, LIST];
+    };
+    const first = await scan(h, bot.id, 1, ["signs"]);
+    // A list of providers, by its own words: never given to the Checker.
+    expect(team.seen.filter((s) => s.role === "checker" && s.task.includes(`ADDRESS: ${LIST}`))).toEqual([]);
+    expect(first.deadPages.map((d) => d.reason)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/competitor/), expect.stringMatching(/lists providers/)]),
+    );
+    const read = readers.calls.length;
+    const searched = queries.length;
+    await scan(h, bot.id, 1, ["signs"]);
+    // Neither page is read again, and no search of the first scan is run again.
+    expect(readers.calls.slice(read).filter((u) => u === RIVAL || u === LIST)).toEqual([]);
+    const again = queries.slice(searched).filter((q) => queries.slice(0, searched).includes(q));
+    expect(again).toEqual([]);
   });
 
   it("counts a company only once across scans", async () => {
@@ -273,6 +358,62 @@ describe("registers", () => {
     expect(lead!.score).toBeLessThanOrEqual(70);
   });
 
+  it("never asks the Checker about a tender that doesn't name what you sell (found in the benchmark)", async () => {
+    const team = clientTeam({ check: () => ({ kind: "request", summary: "Yes." }) });
+    h = await clientHarness(team);
+    const { bot } = await readyClientBot(h);
+    serve(h);
+    const grounds = structuredClone(TENDERS);
+    grounds.noticeList[0]!.item = {
+      ...grounds.noticeList[0]!.item,
+      title: "Grounds maintenance",
+      description: "Grass cutting and hedge trimming for parks.",
+    };
+    h.services.clients.io.fetch = async (request) => (/contractsfinder/.test(request.url) ? grounds : null);
+    const project = await scan(h, bot.id, 1, ["asking"]);
+    expect(project.leads).toEqual([]);
+    expect(team.seen.filter((s) => s.role === "checker")).toEqual([]);
+    expect(project.log.some((l) => /left out 1 tender that don't name what you sell/.test(l.text))).toBe(
+      true,
+    );
+  });
+
+  it("takes the register entry that is really the company's, not the first sharing a word (1.4)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    serve(h);
+    h.services.clients.io.search = async () => [SITE];
+    h.services.vault.set(KEY_NAMES.companiesHouse, "made-up-key");
+    const profiles: Record<string, unknown> = {
+      "11111111": {
+        company_name: "BRIGHTSIDE CLEANING LTD",
+        company_number: "11111111",
+        company_status: "dissolved",
+        registered_office_address: { locality: "Bradford" },
+      },
+      "22222222": {
+        company_name: "BRIGHTSIDE KITCHENS LTD",
+        company_number: "22222222",
+        company_status: "active",
+        registered_office_address: { locality: "Leeds" },
+      },
+    };
+    h.services.clients.io.fetch = async (request) => {
+      if (request.url.includes("/search/companies"))
+        return {
+          items: [
+            { company_number: "11111111", title: "BRIGHTSIDE CLEANING LTD" },
+            { company_number: "22222222", title: "BRIGHTSIDE KITCHENS LTD" },
+          ],
+        };
+      return profiles[request.url.split("/").pop()!] ?? null;
+    };
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    const lead = project.leads.find((l) => l.company === "Brightside Kitchens");
+    expect(lead?.records.map((r) => r.id)).toEqual(["22222222"]);
+    expect(lead?.warnings.map((w) => w.id) ?? []).not.toContain("closed-company");
+  });
+
   it("doesn't show a quiet fit whose own site can't be found", async () => {
     h = await clientHarness(clientTeam({ check: checker }));
     const { bot } = await readyClientBot(h);
@@ -283,6 +424,71 @@ describe("registers", () => {
     const project = await scan(h, bot.id, 1, ["quiet"]);
     expect(project.leads).toEqual([]);
     expect(project.log.some((l) => /own website wasn't found/.test(l.text))).toBe(true);
+  });
+
+  it("asks a register for its next page each scan, and says when it has nothing more (2.2, 3.5)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    serve(h);
+    h.services.vault.set(KEY_NAMES.companiesHouse, "made-up-key");
+    const asked: string[] = [];
+    h.services.clients.io.fetch = async (request) => {
+      if (!/advanced-search/.test(request.url)) return null;
+      asked.push(new URL(request.url).searchParams.get("start_index")!);
+      // Two pages of 50 in all.
+      const start = Number(new URL(request.url).searchParams.get("start_index"));
+      return { hits: "100", items: start === 0 ? Array(50).fill(COMPANIES.items[0]) : COMPANIES.items };
+    };
+    await scan(h, bot.id, 1, ["quiet"]);
+    await scan(h, bot.id, 1, ["quiet"]);
+    const third = await scan(h, bot.id, 1, ["quiet"]);
+    // Both queries (by industry code, and new companies): page 1, then page 2 (the last); the third scan asks nothing.
+    expect(asked).toEqual(["0", "0", "50", "50"]);
+    expect(third.scan!.skipped.join()).toMatch(
+      /UK Companies House: every company it has for your profile has been read/,
+    );
+    // An industry with no code: said why, not "gave 0 records".
+    await patch(h, `/api/bots/${bot.id}/client/profile`, { industries: ["dog groomers"] });
+    const some = await scan(h, bot.id, 1, ["quiet"]);
+    expect(some.scan!.skipped.join()).toMatch(
+      /no industry code for “dog groomers”, so it was asked for new companies only/,
+    );
+    await patch(h, `/api/bots/${bot.id}/client/profile`, { signals: ["hiring"] });
+    const none = await scan(h, bot.id, 1, ["quiet"]);
+    expect(none.scan!.skipped.join()).toMatch(
+      /UK Companies House: no industry code for “dog groomers”: add a broader industry/,
+    );
+  });
+
+  it("judges a company turned down as a quiet fit again later, not never (1.8)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    serve(h);
+    const searches: string[] = [];
+    h.services.clients.io.search = async (_bot, query) => {
+      searches.push(query);
+      return null;
+    };
+    h.services.vault.set(KEY_NAMES.companiesHouse, "made-up-key");
+    h.services.clients.io.fetch = async (request) => (/advanced-search/.test(request.url) ? COMPANIES : null);
+    const first = await scan(h, bot.id, 1, ["quiet"]);
+    // Remembered as not shown, with why, and not as shown to you.
+    expect(first.notShown).toMatchObject([{ name: "PINE CAFE LTD", reason: "its own website wasn't found" }]);
+    expect(first.seen).toEqual([]);
+    // A scan soon after doesn't look it up again.
+    const looked = searches.length;
+    await scan(h, bot.id, 1, ["quiet"]);
+    expect(searches.length).toBe(looked);
+    // After a while it's judged again: its site can be found now, and it becomes a lead.
+    // (The register's one page was read too: a month later it's read again, from the start.)
+    h.services.clients.edit(bot.id, (p) => {
+      p.notShown = p.notShown.map((entry) => ({ ...entry, at: "2020-01-01T00:00:00.000Z" }));
+      for (const read of Object.values(p.registerPages)) read.at = "2020-01-01T00:00:00.000Z";
+    });
+    h.services.clients.io.search = async (_bot, query) => (/"PINE CAFE/i.test(query) ? [PINE] : null);
+    const later = await scan(h, bot.id, 1, ["quiet"]);
+    expect(later.leads.map((l) => l.company)).toEqual(["PINE CAFE LTD"]);
+    expect(later.notShown).toEqual([]);
   });
 });
 
@@ -335,7 +541,90 @@ describe("the watch list", () => {
     const project = await scan(h, bot.id, 1, ["quiet"]);
     expect(project.scan!.movedUp).toBe(1);
     expect(project.leads[0]).toMatchObject({ kind: "signs", movedUp: "Hiring for your work" });
-    expect(botSaid(h, bot).at(-1)).toMatch(/1 watched company now shows signs/);
+    expect(botSaid(h, bot).at(-1)).toMatch(/Checked 1 watched company for new signs: 1 now shows one/);
+  });
+});
+
+describe("scans that run while you are away (Phase 5)", () => {
+  const CAPTCHA = "https://forum.test/thread/payroll";
+
+  it("sets a page that needs you aside, carries on, and asks at the end (5.4)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    const pages = {
+      ...SITE_PAGES(),
+      [CAPTCHA]: page(CAPTCHA, pad("Checking your browser"), { humanCheck: true }),
+    };
+    const readers = savedReaders(pages);
+    h.services.clients.io.readers = { text: readers.text };
+    h.services.clients.io.search = async (_bot, query) =>
+      /"Brightside Kitchens"/.test(query)
+        ? [SITE]
+        : /Payroll Administrator/.test(query)
+          ? [CAPTCHA, NEWS]
+          : null;
+    h.services.clients.io.handoffLimitMs = 50;
+    const project = await scan(h, bot.id, 2, ["signs"]);
+    // Set aside, then Brightside was found, and only then were you asked: the page didn't hold up the scan.
+    const at = (pattern: RegExp) => project.log.findIndex((l) => pattern.test(l.text));
+    expect(project.leads.map((l) => l.company)).toEqual(["Brightside Kitchens"]);
+    expect(at(/Set aside forum\.test/)).toBeGreaterThanOrEqual(0);
+    expect(at(/Set aside forum\.test/)).toBeLessThan(at(/Found: Brightside/));
+    expect(at(/Found: Brightside/)).toBeLessThan(at(/Waiting for you on forum\.test/));
+    // Asked at the end, nobody answered: said in the closing words.
+    expect(project.scan!.stopReason).toMatch(/1 page that needed you was left unread\.$/);
+    expect(project.status).toBe("ready");
+  });
+
+  it("ends a slow step at the time limit, as the time limit, not a failure (5.5)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    h.services.clients.io.search = async () => [NEWS];
+    // A page that never answers until the scan's signal ends it.
+    h.services.clients.io.readers = {
+      text: {
+        id: "text",
+        read: (_url, context) =>
+          new Promise((_resolve, reject) =>
+            context.signal.addEventListener("abort", () => reject(new Error("aborted"))),
+          ),
+      },
+    };
+    const { SCAN_LIMITS } = await import("./scan");
+    h.services.clients.io.limits = { ...SCAN_LIMITS, minutes: 0.002 };
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    expect(project.scan!.stopReason).toBe("Reached the time limit for one scan.");
+    expect(project.status).toBe("ready");
+    expect(project.error).toBeNull();
+  });
+
+  it("marks a failed scan as ended (5.6)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    const { SCAN_LIMITS } = await import("./scan");
+    h.services.clients.io.limits = {
+      ...SCAN_LIMITS,
+      pages: () => {
+        throw new Error("boom");
+      },
+    };
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    expect(project.status).toBe("error");
+    expect(project.scan!.endedAt).not.toBeNull();
+    expect(project.scan!.stopReason).toBe("The scan failed: boom");
+  });
+
+  it("doesn't count a Checker that gave no answer against the site (5.9)", async () => {
+    const urls = ["a", "b", "c"].map((p) => `https://news.test/leeds/${p}`);
+    h = await clientHarness(clientTeam({ check: (url) => (urls.includes(url) ? "fail" : checker(url)) }));
+    const { bot } = await readyClientBot(h);
+    const readers = savedReaders(Object.fromEntries(urls.map((u) => [u, page(u, NEWS_PAGE)])));
+    h.services.clients.io.readers = { text: readers.text };
+    h.services.clients.io.search = async () => urls;
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    // Before, two model failures blocked news.test for the scan, so the third page was never read.
+    expect(readers.calls).toEqual(urls);
+    expect(project.scan!.stopReason).toMatch(/The Checker failed 3 times in a row/);
   });
 });
 
@@ -351,6 +640,21 @@ describe("the chat", () => {
     await until(h, bot.id, (p) => p.scan !== null);
     await h.services.clients.idle(bot.id);
     expect(projectOf(h, bot.id).leads).toHaveLength(1);
+  });
+
+  it("says which kinds it will look for, and takes 'only tenders' in the answer (3.4)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    serve(h);
+    await type(h, bot, "find me some clients");
+    await until(h, bot.id, (p) => p.askingCount);
+    expect(botSaid(h, bot).at(-1)).toMatch(
+      /I'll look for asking now \(tenders and requests\), companies with signs and quiet fits/,
+    );
+    await type(h, bot, "2, only tenders");
+    await until(h, bot.id, (p) => p.scan !== null);
+    await h.services.clients.idle(bot.id);
+    expect(projectOf(h, bot.id).scan).toMatchObject({ target: 2, kinds: ["asking"] });
   });
 });
 
@@ -378,6 +682,55 @@ describe("the board", () => {
     // Never comes back.
     const again = await scan(h, bot.id, 1, ["signs"]);
     expect(again.leads).toEqual([]);
+  });
+
+  it("uses your price and buyers: a size suggestion, and who to ask for (3.3, 6.1)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h, { sizeMax: null, price: "£300 a month for up to 50 staff" });
+    const project = projectOf(h, bot.id);
+    // Suggested from the price, never applied by itself.
+    expect(project.suggestions).toMatchObject([{ field: "sizeMax", value: "50" }]);
+    expect(project.profile.sizeMax).toBeNull();
+    serve(h);
+    await scan(h, bot.id, 1, ["signs"]);
+    const csv = await h.app.inject({
+      method: "GET",
+      url: `/api/bots/${bot.id}/client/export.csv`,
+      headers: auth,
+    });
+    const [header, row] = csv.body.split("\r\n");
+    const at = header!.split(",").indexOf("Ask for");
+    expect(at).toBeGreaterThan(0);
+    expect(row).toContain(projectOf(h, bot.id).profile.buyerTitles.join(" or "));
+  });
+
+  it("forgets what was read about a lead in the role threads too, and keeps the threads (3.1)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot, project: made } = await readyClientBot(h);
+    serve(h);
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    const lead = project.leads[0]!;
+    const pair = h.store.threads
+      .list()
+      .find((t) => t.pair && t.memberIds.includes(made.roles.checker.botId))!;
+    const texts = () => h.store.messages.list(pair.id).map((m) => JSON.stringify(m.parts));
+    expect(texts().some((t) => t.includes("hello@brightside-kitchens.test"))).toBe(true);
+    // Once its turn has ended, a Checker's task keeps only the start of the page.
+    const { checkTask, keptTask } = await import("./roles/checker");
+    const { emptyOffer, playbookOf } = await import("@mrog/clients");
+    const long = checkTask(
+      { url: SITE, title: "Long", text: "x".repeat(10_000) },
+      [],
+      emptyOffer(),
+      playbookOf(emptyOffer()),
+    );
+    expect(long.length).toBeGreaterThan(10_000);
+    expect(keptTask(long).length).toBeLessThan(2_000);
+    expect(keptTask(long)).toContain(`ADDRESS: ${SITE}`);
+    await post(h, `/api/bots/${bot.id}/client/leads/${lead.id}/forget`, { block: false });
+    expect(texts().some((t) => /brightside/i.test(t))).toBe(false);
+    expect(texts().some((t) => t.includes("you forgot this lead"))).toBe(true);
+    expect(h.store.threads.get(pair.id)).not.toBeNull();
   });
 
   it("learns lookalikes from your favourite clients, with a key", async () => {
@@ -409,10 +762,25 @@ describe("the board", () => {
         registered_office_address: { locality: "York" },
       },
     };
+    profiles["00000009"] = {
+      company_name: "ALPHA CLEANING LTD",
+      company_number: "00000009",
+      sic_codes: ["81210"],
+      date_of_creation: "2001-01-01",
+      registered_office_address: { locality: "Hull" },
+    };
     const numbers: Record<string, string> = { Alpha: "00000001", Beta: "00000002", Gamma: "00000003" };
     h.services.clients.io.fetch = async (request) => {
       const q = new URL(request.url).searchParams.get("q");
-      if (q) return { items: [{ company_number: numbers[q.split(" ")[0]!] }] };
+      const item = (number: string) => ({
+        company_number: number,
+        title: (profiles[number] as { company_name: string }).company_name,
+      });
+      // Another company sharing a word comes first for Alpha: the first result was taken before (1.5).
+      if (q)
+        return {
+          items: [...(q.startsWith("Alpha") ? [item("00000009")] : []), item(numbers[q.split(" ")[0]!]!)],
+        };
       return profiles[request.url.split("/").pop()!] ?? null;
     };
     const res = await post(h, `/api/bots/${bot.id}/client/lookalikes`, {
@@ -420,6 +788,12 @@ describe("the board", () => {
     });
     const look = res.json().project.lookalikes;
     expect(look.profile).toMatchObject({ sicCodes: ["56101"], area: "Leeds", from: 3 });
+    // Which register entry each client was matched to, so a wrong one can be seen and removed.
+    expect(look.matched).toEqual([
+      { client: "Alpha Diner", record: "ALPHA DINER LTD", id: "00000001" },
+      { client: "Beta Bistro", record: "BETA BISTRO LTD", id: "00000002" },
+      { client: "Gamma Grill", record: "GAMMA GRILL LTD", id: "00000003" },
+    ]);
     expect(look.approved).toBe(false);
     expect(res.json().project.lists.clients).toHaveLength(3);
     const ok = await patch(h, `/api/bots/${bot.id}/client/lookalikes`, {
@@ -456,7 +830,193 @@ describe("verdicts from two pages", () => {
   });
 });
 
+describe("a company's own site (2.8–2.10)", () => {
+  const SITE_ONLY = pad(
+    "Brightside Kitchens\nA family restaurant group in Leeds. Our team of 30 serves three restaurants.",
+  );
+  const CONTACT = `${SITE}contact-us`;
+
+  it("reads its contact page when the home page only links to it (2.9)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    const pages = {
+      ...SITE_PAGES(),
+      [SITE]: page(SITE, SITE_ONLY, { links: [{ text: "Contact us", url: CONTACT }] }),
+      [CONTACT]: page(CONTACT, pad("Contact us: hello@brightside-kitchens.test or Tel: 0113 496 0000")),
+    };
+    serve(h);
+    h.services.clients.io.readers = { text: savedReaders(pages).text };
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    const lead = project.leads.find((l) => l.company === "Brightside Kitchens");
+    expect(lead?.contacts.map((c) => c.value)).toEqual(
+      expect.arrayContaining(["hello@brightside-kitchens.test", "0113 496 0000"]),
+    );
+  });
+
+  it("takes a short contact page read in the browser (2.7, 2.9)", async () => {
+    h = await clientHarness(clientTeam({ check: checker }));
+    const { bot } = await readyClientBot(h);
+    // Under 500 characters, as real contact pages often are.
+    const short =
+      "Contact us\nBrightside Kitchens, 12 Briggate, Leeds LS1 6HD\nEmail hello@brightside-kitchens.test or Tel: 0113 496 0000\nOpen Tuesday to Sunday.";
+    const pages = {
+      ...SITE_PAGES(),
+      [SITE]: page(SITE, SITE_ONLY, { links: [{ text: "Contact us", url: CONTACT }] }),
+      [CONTACT]: page(CONTACT, short),
+    };
+    serve(h);
+    const text = savedReaders(pages).text;
+    const browsed: string[] = [];
+    h.services.clients.io.readers = {
+      text,
+      // The browser shows the same short page: long enough for a company's own site there.
+      browser: {
+        id: "browser",
+        async read(url, context) {
+          browsed.push(url);
+          return { ...(await text.read(url, context))!, reader: "browser" };
+        },
+      },
+    };
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    expect(browsed).toContain(CONTACT);
+    const lead = project.leads.find((l) => l.company === "Brightside Kitchens");
+    expect(lead?.contacts.map((c) => c.value)).toEqual(
+      expect.arrayContaining(["hello@brightside-kitchens.test"]),
+    );
+  });
+
+  it("tries plain http when https can't be reached, which is the no-https clue (2.8)", async () => {
+    const plain = SITE.replace("https:", "http:");
+    h = await clientHarness(clientTeam({ check: (url) => (url === plain ? SITE_REPORT : checker(url)) }));
+    const { bot } = await readyClientBot(h, { clues: ["no_https"] });
+    serve(h);
+    const pages = { ...SITE_PAGES(), [plain]: page(plain, SITE_PAGES()[SITE]!.text) };
+    delete (pages as Record<string, unknown>)[SITE];
+    h.services.clients.io.readers = { text: savedReaders(pages).text };
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    const lead = project.leads.find((l) => l.company === "Brightside Kitchens");
+    expect(lead?.ownSite).toBe(true);
+    expect(lead?.evidence.map((e) => e.id)).toContain("no_https");
+  });
+
+  it("isn't the news page's own address when the Checker gives that as the website (found in the benchmark)", async () => {
+    h = await clientHarness(
+      clientTeam({
+        check: (url) =>
+          url === NEWS
+            ? {
+                ...NEWS_REPORT,
+                facts: [...NEWS_REPORT.facts!, { name: "website", value: NEWS, quote: NEWS }],
+              }
+            : checker(url),
+      }),
+    );
+    const { bot } = await readyClientBot(h);
+    serve(h);
+    const project = await scan(h, bot.id, 1, ["signs"]);
+    expect(project.leads.map((l) => l.domain)).toEqual(["brightside-kitchens.test"]);
+  });
+
+  it("is picked from search results by their title too, not the address alone (2.10)", async () => {
+    const { pickOwnSite } = await import("./finder");
+    const results = [
+      { url: "https://brightside.test/", title: "Brightside Dental Practice | Leeds" },
+      {
+        url: "https://brightside-kitchens.test/",
+        title: "Brightside Kitchens – family restaurants in Leeds",
+      },
+    ];
+    expect(pickOwnSite(results, "Brightside Kitchens")).toBe("https://brightside-kitchens.test/");
+    // No titles: the first address that fits, as before.
+    expect(
+      pickOwnSite(
+        results.map((r) => r.url),
+        "Brightside Kitchens",
+      ),
+    ).toBe("https://brightside.test/");
+  });
+});
+
+describe("the Checker's task (2.6)", () => {
+  it("asks only for what the page can give, and never for traits", async () => {
+    const { checkTask } = await import("./roles/checker");
+    const { emptyOffer, mergeOffer, playbookOf } = await import("@mrog/clients");
+    const profile = mergeOffer(emptyOffer(), {
+      offer: "Payroll for restaurants",
+      areas: ["Leeds"],
+      industries: ["any"],
+    });
+    const site = { url: SITE, title: "Brightside", text: "Brightside Kitchens" };
+    const any = checkTask(site, [], profile, playbookOf(profile));
+    const own = checkTask(site, [], profile, playbookOf(profile), {
+      expect: "company",
+      company: "Brightside",
+    });
+    const tender = checkTask(site, [], profile, playbookOf(profile), { expect: "request" });
+    for (const task of [any, own, tender]) expect(task).not.toMatch(/TRAITS/);
+    expect(own).toMatch(/Leave links and companies empty/);
+    expect(own).toMatch(/FACTS TO GIVE/);
+    expect(tender).not.toMatch(/FACTS TO GIVE|SIGNS TO LOOK FOR/);
+    // Only the signs you look for.
+    expect(any).toMatch(/SIGNS TO LOOK FOR[^\n]*hiring/);
+    expect(any).not.toMatch(/SIGNS TO LOOK FOR[^\n]*funding/);
+  });
+});
+
 describe("the Checker's tool", () => {
+  it("reads save_offer's arguments written as JSON inside a text field (found in the benchmark)", async () => {
+    const { saveOfferTool } = await import("./tools");
+    const { emptyOffer, mergeOffer } = await import("@mrog/clients");
+    const base = mergeOffer(emptyOffer(), { offer: "IT support", industries: ["accountants"] });
+    const capture: Capture = { base, said: "Also add law firms as an industry." };
+    const tool = saveOfferTool(capture);
+    const args = tool.args.parse({ offer: '{"industries": ["law firms"]}' });
+    await tool.run(args as never, {} as never);
+    expect(capture.profile?.industries).toEqual(["accountants", "law firms"]);
+    expect(capture.profile?.offer).toBe("IT support");
+  });
+
+  it("reads its lists named a little wrong or written as JSON text (found in the benchmark)", async () => {
+    const { finishPageTool } = await import("./tools");
+    const tool = finishPageTool({});
+    const prepared = tool.prepare!({
+      kind: "signal",
+      signs: '[{"kind": "hiring", "quote": "Brightside Kitchens is hiring", "date": "3 November 2026"}]',
+      verdicts: '[{"id": "r1", "verdict": "meets", "reason": "Restaurants."}]',
+    });
+    const args = tool.args.parse(prepared);
+    expect(args.signals).toEqual([
+      { kind: "hiring", quote: "Brightside Kitchens is hiring", date: "3 November 2026" },
+    ]);
+    expect(args.verdicts).toEqual([{ id: "r1", verdict: "meets", reason: "Restaurants." }]);
+  });
+
+  it("reads a company's sign written nested under it (found in the benchmark)", async () => {
+    const { finishPageTool } = await import("./tools");
+    const capture: Capture = {};
+    const tool = finishPageTool(capture);
+    const args = tool.args.parse({
+      kind: "signal",
+      companies: [
+        {
+          name: "Brightside Kitchens",
+          quote: "Brightside Kitchens is advertising for a Payroll Administrator",
+          // As the model wrote it: its own "kind" is the page's, the sign's is nested.
+          kind: "company",
+          sign: { kind: "hiring", date: "3 November 2026", quote: "Brightside Kitchens is hiring" },
+        },
+      ],
+    });
+    await tool.run(args as never, {} as never);
+    expect(capture.result?.companies[0]).toMatchObject({
+      name: "Brightside Kitchens",
+      kind: "hiring",
+      date: "3 November 2026",
+      signQuote: "Brightside Kitchens is hiring",
+    });
+  });
+
   it("accepts a fact with no value instead of refusing the whole report", async () => {
     const { finishPageTool } = await import("./tools");
     const capture: Capture = {};
@@ -635,10 +1195,34 @@ describe("the page budget (found in the live run)", () => {
   });
 });
 
-describe("the Visual helper's time limit (found in the live run)", () => {
-  it("gives up a slow page without stopping the scan", async () => {
+describe("the Visual helper's limits (found in the live run; 5.10)", () => {
+  async function setup(vision: boolean) {
     const { visualReader } = await import("./visual-reader");
     const { Halt } = await import("./run-role");
+    const { createClientState } = await import("./state");
+    h = await clientHarness(clientTeam());
+    const { bot } = await makeClientBot(h);
+    // Its own state over the same saved project, in a scan.
+    const state = createClientState({ store: h.store, bus: h.services.bus });
+    state.change(bot.id, (p) => {
+      p.status = "scanning";
+      p.scan = {
+        number: 1,
+        target: 5,
+        kinds: ["signs"],
+        found: 0,
+        weaker: 0,
+        movedUp: 0,
+        watched: 0,
+        pagesRead: 0,
+        visualPages: 0,
+        searchRounds: 0,
+        skipped: [],
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        stopReason: null,
+      };
+    });
     const roles = {
       run: (_b: string, _r: string, _t: string, signal: AbortSignal) =>
         new Promise((_resolve, reject) => {
@@ -646,22 +1230,37 @@ describe("the Visual helper's time limit (found in the live run)", () => {
           else signal.addEventListener("abort", () => reject(new Halt()));
         }),
     };
-    const state = { load: () => ({ roles: { visual: { botId: "v" } } }) };
     const browser = { goto: async () => ({}) };
-    const reader = visualReader(browser as never, state as never, roles as never, () => 20);
-    const outer = new AbortController();
-    await expect(
-      reader.read("https://slow.test/", { botId: "b", signal: outer.signal, phase: {} as never, why: "x" }),
-    ).rejects.toThrow(/took more than/);
+    const models = {
+      catalog: { info: async () => ({ capabilities: vision ? ["completion", "vision"] : ["completion"] }) },
+      runtime: { settings: { sharedModel: "ollama:test:1b" } },
+    };
+    const reader = visualReader(browser as never, state, roles as never, models as never, () => 20);
+    const ctx = (signal: AbortSignal) => ({ botId: bot.id, signal, phase: {} as never, why: "x" });
+    return { reader, state, bot, ctx, Halt };
+  }
+
+  it("gives up a slow page without stopping the scan, and counts every try", async () => {
+    const { reader, state, bot, ctx, Halt } = await setup(true);
+    await expect(reader.read("https://slow.test/", ctx(new AbortController().signal))).rejects.toThrow(
+      /took more than/,
+    );
+    // A try that failed counts toward the 5 a scan, as one that worked.
+    expect(state.need(bot.id).scan!.visualPages).toBe(1);
     // Stop still stops: the Halt goes through.
     const stopped = new AbortController();
-    const reading = reader.read("https://slow.test/", {
-      botId: "b",
-      signal: stopped.signal,
-      phase: {} as never,
-      why: "x",
-    });
+    const reading = reader.read("https://slow.test/", ctx(stopped.signal));
     stopped.abort();
     await expect(reading).rejects.toBeInstanceOf(Halt);
+    state.flush();
+  });
+
+  it("isn't tried, and says so once a scan, when its model can't see pictures", async () => {
+    const { reader, state, bot, ctx } = await setup(false);
+    expect(await reader.read("https://a.test/", ctx(new AbortController().signal))).toBeNull();
+    expect(await reader.read("https://b.test/", ctx(new AbortController().signal))).toBeNull();
+    expect(state.need(bot.id).log.filter((l) => l.text.includes("can't see pictures"))).toHaveLength(1);
+    expect(state.need(bot.id).scan!.visualPages).toBe(0);
+    state.flush();
   });
 });

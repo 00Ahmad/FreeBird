@@ -237,6 +237,13 @@ export function diagramMarks(project: Feedback, now = 0): Map<string, NodeMark> 
       slow: isSlowCard(card, project, now),
     });
   }
+  // A connection with no card of its own is done when every file it links is.
+  for (const edge of project.edges) {
+    if (marks.has(edge.id)) continue;
+    const files = edge.files.map((id) => marks.get(id));
+    if (files.length > 0 && files.every((mark) => mark?.done))
+      marks.set(edge.id, { ...NO_MARK, column: "done", done: true });
+  }
   return marks;
 }
 

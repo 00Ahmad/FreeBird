@@ -35,6 +35,8 @@ interface LeverPosting {
   descriptionPlain?: string;
   lists?: { text?: string; content?: string }[];
   additionalPlain?: string;
+  /** When the posting was made, in milliseconds (checked against a live answer, 2026-11-20). */
+  createdAt?: number;
 }
 
 const WORKPLACE: Record<string, string> = { remote: "Remote", hybrid: "Hybrid", "on-site": "On-site" };
@@ -47,6 +49,9 @@ function postingPage(posting: LeverPosting, site: string): SourcePage | null {
   const workplace = WORKPLACE[posting.workplaceType ?? ""];
   if (workplace) lines.push(`Workplace: ${workplace}`);
   if (posting.categories?.commitment) lines.push(`Employment: ${posting.categories.commitment}`);
+  // The posting date, so an old posting gets its warning (Lever's own pages don't show one).
+  if (typeof posting.createdAt === "number" && Number.isFinite(posting.createdAt))
+    lines.push(`Posted: ${new Date(posting.createdAt).toISOString().slice(0, 10)}`);
   const salary = posting.salaryRange;
   if (salary?.min !== undefined && salary.max !== undefined)
     lines.push(
@@ -81,7 +86,11 @@ export const lever: JobSource = {
       text: listed
         .map((posting) => `${posting.text} - ${posting.categories?.location ?? ""} (${posting.hostedUrl})`)
         .join("\n"),
-      links: listed.map((posting) => ({ text: posting.text!, url: posting.hostedUrl! })),
+      links: listed.map((posting) => ({
+        text: posting.text!,
+        url: posting.hostedUrl!,
+        ...(posting.categories?.location ? { place: posting.categories.location } : {}),
+      })),
     };
   },
 };

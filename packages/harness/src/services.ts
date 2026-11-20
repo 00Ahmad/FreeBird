@@ -5,7 +5,13 @@ import type { SettingsRepo, Store } from "@mrog/store";
 import type { Vault } from "@mrog/vault";
 
 import { installAgent, type Agent } from "./agent";
-import { installSkills } from "./skills/install";
+import { installApprovalsWait } from "./approvals-wait";
+import type { FileHistory } from "./file-history";
+import { installFileUndo } from "./file-undo";
+import { installSkills, type Skills } from "./skills/install";
+import { installAssignedSkills, type AssignedSkills } from "./skills/assigned";
+import { codingRoleDefaults, codingTeamSkills } from "./coding-skills";
+import { codingAutoApprove } from "./coding-auto-approve";
 import { BrowserManager } from "./browser";
 import type { EventBus } from "./bus";
 import { ModelCatalog } from "./catalog";
@@ -38,6 +44,10 @@ export interface Services {
   catalog: ModelCatalog;
   turns: TurnManager;
   agent: Agent;
+  /** Which skills each bot has; features add whose skills a bot shares (a Coding Bot's roles). */
+  skills: Skills;
+  /** Skills a bot applies on every turn (a Coding Bot's roles start with some). */
+  assignedSkills: AssignedSkills;
   providers: ProviderManager;
   routines: RoutineRunner;
   connectors: ConnectorManager;
@@ -52,6 +62,8 @@ export interface Services {
   coding: Coding;
   jobs: Jobs;
   clients: Clients;
+  /** Copies of files bots changed, for undo from the chat. */
+  fileHistory: FileHistory;
   fetchImpl: typeof fetch;
   /** Cleanup hooks run on shutdown, in reverse order. */
   disposers: (() => void | Promise<void>)[];
@@ -148,6 +160,8 @@ export function createServices({
     fetchImpl,
     disposers: [() => clearTimeout(statusTimer), () => turns.stopAll()],
     agent: undefined as unknown as Agent,
+    skills: undefined as unknown as Skills,
+    assignedSkills: undefined as unknown as AssignedSkills,
     providers: undefined as unknown as ProviderManager,
     routines: new RoutineRunner({ store, bus, turns }),
     connectors: new ConnectorManager({ store, vault, bus }),
@@ -161,6 +175,7 @@ export function createServices({
     coding: undefined as unknown as Coding,
     jobs: undefined as unknown as Jobs,
     clients: undefined as unknown as Clients,
+    fileHistory: undefined as unknown as FileHistory,
   } satisfies Services;
   services.disposers.push(modelsChanged, () => clearTimeout(releaseTimer));
   services.scrubber = new SecretScrubber(() => services.vaultService.secretValues());
@@ -175,16 +190,35 @@ export function createServices({
   const scrub = (text: string) => services.scrubber.scrub(text);
   turns.extensions.scrub = scrub;
   services.agent = installAgent(services);
-  installSkills(services);
+  services.skills = installSkills(services);
+  services.skills.owners.push(codingTeamSkills((id) => store.bots.get(id)));
+  services.assignedSkills = installAssignedSkills(services, services.skills);
+  // Asked only when a turn is built, by which time the Coding Bot (installed below) is there.
+  services.assignedSkills.defaults.push(
+    codingRoleDefaults(
+      (id) => store.bots.get(id),
+      (id) => services.coding.get(id),
+    ),
+  );
   services.agent.scrub = scrub;
   services.connectors.scrub = scrub;
   services.providers = new ProviderManager(services, fetchImpl);
   services.providers.load();
   installTeam(services);
+  installApprovalsWait(services);
+  // Asked only when a turn is built, by which time the Coding, Job and Client Bots (installed below) are there.
+  services.fileHistory = installFileUndo(services);
   services.delegation = installDelegation(services);
   services.discussions = installDiscussions(services);
   services.races = installRaces(services);
   services.coding = installCoding(services);
+  // A Coding Bot's Auto-approve covers its QA's routine commands too, not only the plan.
+  services.agent.approvals.autoAllows.push(
+    codingAutoApprove(
+      (id) => store.bots.get(id),
+      (id) => services.coding.get(id),
+    ),
+  );
   // After the Coding Bot: the Job Bot chains the turn extensions the Coding Bot set.
   services.jobs = installJobs(services);
   // After the Job Bot: the Client Bot chains the turn extensions both set.

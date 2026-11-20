@@ -99,7 +99,7 @@ describe("what a role may write", () => {
     expect(readFileSync(join(out, "src", "main.ts"), "utf8")).toBe("// src/main.ts\n");
   });
 
-  it("lets a connection change only the files it links", async () => {
+  it("lets a connection change only the files it links, on an older board that has connection cards", async () => {
     const team = codingTeam({
       plans: [{ tool: LINES }],
       develop: (card) =>
@@ -113,6 +113,7 @@ describe("what a role may write", () => {
           : {},
     });
     h = await startTeam(team);
+    h.services.coding.timing.connectionCards = true;
     const out = tmp("out");
     const { bot } = await makeCoding(h, out, { autoApprove: true });
     await type(h, bot, "Three files");
@@ -160,7 +161,7 @@ describe("what a role may read", () => {
 });
 
 describe("QA's commands", () => {
-  it("always show a card, even with commands set to always allowed", async () => {
+  it("always show a card without Auto-approve, even with commands set to always allowed", async () => {
     const team = codingTeam({
       plans: [{ tool: ONE_FILE }],
       review: () => ({ pass: true, command: "echo hi" }),
@@ -168,8 +169,10 @@ describe("QA's commands", () => {
     h = await startTeam(team);
     const approvals = h.services.agent.approvals;
     approvals.savePermissions({ ...approvals.permissions(), localExecution: "always" });
-    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: true });
+    const { bot } = await makeCoding(h, tmp("out"), { autoApprove: false });
     await type(h, bot, "Make a note");
+    await until(h, bot.id, (p) => p.status === "awaiting_approval");
+    expect((await post(h, `/api/bots/${bot.id}/coding/approve`)).statusCode).toBe(200);
     let card: { id: string } | undefined;
     for (let i = 0; i < 400 && !card; i++) {
       for (const message of h.store.messages.list(bot.threadId))
@@ -453,11 +456,12 @@ describe("no dead ends", () => {
     expect(asked).toContain('"path": "a.txt"');
     expect(asked).toContain("add a README");
     expect(asked).toContain("Keep every file the change doesn't touch exactly as it is");
+    // A card per file: the connection stays in the plan, with no card of its own.
     expect(updated.cards.map((c) => [c.title, c.column])).toEqual([
       ["a.txt", "done"],
       ["README.md", "todo"],
-      ["a.txt ↔ README.md", "todo"],
     ]);
+    expect(updated.edges).toHaveLength(1);
     // The kept card keeps its history; the new ones carry the request.
     expect(updated.cards[0]!.comments.map((c) => c.author)).toContain("developer");
     expect(updated.cards[1]!.comments).toEqual([
@@ -470,7 +474,7 @@ describe("no dead ends", () => {
     const keys = turnsOf(team, "developer")
       .slice(developedBefore)
       .map((s) => /^(?:File|Connection): (.+)$/m.exec(s.task)![1]);
-    expect(keys).toEqual(["README.md", "the README explains the note"]);
+    expect(keys).toEqual(["README.md"]);
     expect(readFileSync(join(out, "README.md"), "utf8")).toBe("// README.md\n");
   });
 
@@ -514,7 +518,7 @@ describe("no dead ends", () => {
     await type(h, bot, "give it a heading");
     await until(h, bot.id, (p) => p.status === "done" && turnsOf(team, "developer").length === 2);
     const fix = turnsOf(team, "developer")[1]!;
-    expect(fix.task).toMatch(/You \(round \d\): Change asked for: give it a heading/);
+    expect(fix.task).toMatch(/The user \(round \d\): Change asked for: give it a heading/);
     expect(fix.task).toContain("What the code in it should do: a note with a heading");
   });
 
@@ -657,6 +661,8 @@ describe("small things", () => {
     const { bot } = await makeCoding(h, out, { autoApprove: true });
     await type(h, bot, "Build a greeter");
     const done = await until(h, bot.id, (p) => p.status === "done");
-    expect(done.cards).toHaveLength(THREE_FILES.nodes.length + THREE_FILES.edges.length);
+    // A card per file; the connections stay in the plan without cards of their own.
+    expect(done.cards).toHaveLength(THREE_FILES.nodes.length);
+    expect(done.edges).toHaveLength(THREE_FILES.edges.length);
   });
 });

@@ -25,6 +25,19 @@ describe("checklist", () => {
     expect(list.summary).toBe("0 of 5 done");
   });
 
+  it("ticks a connection with no card of its own once every file it links is done", () => {
+    const list = buildChecklist({
+      nodes,
+      edges,
+      cards: [fileCard("a", "done"), fileCard("b", "done"), fileCard("c", "qa")],
+    });
+    expect(list.connectors.map((c) => [c.label, c.done])).toEqual([
+      ["e1", true],
+      ["e2", false],
+    ]);
+    expect(list.summary).toBe("3 of 5 done");
+  });
+
   it("ticks what is in Done, and only that", () => {
     const list = buildChecklist({
       nodes,

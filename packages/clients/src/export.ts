@@ -17,6 +17,7 @@ const COLUMNS = [
   "Why now",
   "Sign date",
   "Contacts",
+  "Ask for",
   "Source",
   "Warnings",
   "Your note",
@@ -31,7 +32,11 @@ export function csvCell(value: string | number | null): string {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-export function leadsCsv(leads: readonly Lead[]): string {
+/**
+ * The board as CSV. `askFor`: the job titles of the people who buy what you sell (from your profile), the same on
+ * every lead: who to ask for there, never a person looked up (6.1).
+ */
+export function leadsCsv(leads: readonly Lead[], askFor: readonly string[] = []): string {
   const rows = leads.map((lead) => {
     const top = lead.signals[0];
     return [
@@ -46,6 +51,7 @@ export function leadsCsv(leads: readonly Lead[]): string {
       top ? `${signalKind(top.kind).label}: ${top.quote}` : null,
       top?.date ?? null,
       lead.contacts.map((c) => c.value).join(" | ") || null,
+      askFor.join(" or ") || null,
       lead.url,
       lead.warnings.map((w) => w.text).join(" | ") || null,
       lead.note || null,

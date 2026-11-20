@@ -45,6 +45,8 @@ export const CodingNode = z.object({
   /** Relative to the output folder, with forward slashes. */
   path: z.string(),
   purpose: z.string(),
+  /** "Done when" checks the browser runs on the page (written in the forms of ./done-checks): what the file must do. */
+  done: z.array(z.string()).optional(),
 });
 export type CodingNode = z.infer<typeof CodingNode>;
 
@@ -99,6 +101,11 @@ export const CodingCard = z.object({
   comments: z.array(CardComment),
   /** Time and tokens spent on it so far; missing on cards made before this was tracked. */
   work: CardWork.optional(),
+  /**
+   * Set aside for the user: it was sent back as many times as the round limit, so the Developer leaves it while the
+   * rest of the board carries on. Resume, or a higher round limit, brings it back.
+   */
+  parked: z.boolean().optional(),
 });
 export type CodingCard = z.infer<typeof CodingCard>;
 
@@ -123,11 +130,19 @@ export const CodingProject = z.object({
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS_LIMIT),
   /** QA rounds used so far. */
   round: z.number().int().min(0),
+  /** Times the plan was changed by itself for cards that kept failing (see the harness's coding-replan). */
+  replans: z.number().int().min(0).optional(),
   /** What you asked for. */
   brief: z.string(),
   /** Files in the order the planner chose to build them. */
   nodes: z.array(CodingNode),
   edges: z.array(CodingEdge),
+  /**
+   * The connections read from the code as it was written (a page loading a script, a script importing another), as
+   * the diagram draws them. Not part of the plan: cleared when the plan changes, and never exported. Missing until a
+   * file is written.
+   */
+  codeLinks: z.array(CodingEdge).optional(),
   cards: z.array(CodingCard),
   /** One line about what is happening now, shown above the board. */
   note: z.string().nullable(),

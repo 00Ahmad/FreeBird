@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 import { leadsTeam, teamParentOf } from "./codingTeam";
 import {
   ageText,
+  askForLine,
   boardColumns,
+  changesLine,
   clientComposer,
   kindsFrom,
   leadLine,
@@ -55,6 +57,30 @@ describe("the Client Bot's screen", () => {
     ]);
     expect(columns[0]!.leads.map((l) => l.id)).toEqual(["a", "s", "q"]);
     expect(columns.find((c) => c.column === "won")!.leads).toHaveLength(1);
+  });
+
+  it("says what changed with the latest scan, and who to ask for (6.4, 6.1)", () => {
+    const project = {
+      scan: { number: 2, startedAt: "2026-11-14T10:00:00.000Z" },
+      leads: [
+        lead({ id: "n", scan: 2 }),
+        lead({ id: "o", scan: 1 }),
+        lead({
+          id: "m",
+          scan: 1,
+          kind: "signs",
+          movedUp: "Hiring for your work",
+          updatedAt: NOW.toISOString(),
+        }),
+        lead({ id: "s", scan: 1, warnings: [{ id: "stale", text: "Old sign" }] }),
+      ],
+    } as unknown as ClientProject;
+    expect(changesLine(project)).toBe("With the latest scan: 1 new, 1 moved up, 1 gone stale.");
+    expect(changesLine({ ...project, leads: [lead({ scan: 1 })] })).toBeNull();
+    expect(askForLine({ buyerTitles: ["Finance Director", "Head of HR"] } as OfferProfile)).toBe(
+      "Ask for the Finance Director or the Head of HR.",
+    );
+    expect(askForLine({ buyerTitles: [] } as unknown as OfferProfile)).toBeNull();
   });
 
   it("says each lead's strongest sign with its age, or its trait", () => {

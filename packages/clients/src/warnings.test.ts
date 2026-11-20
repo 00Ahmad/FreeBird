@@ -38,7 +38,15 @@ describe("lead warnings", () => {
       foundAt: NOW.toISOString(),
     };
     expect(ids({ signals: [old] })).toEqual(["stale"]);
-    const tender = { register: "x", id: "1", url: "u", label: "l", deadline: "2026-11-01", status: null };
+    const tender = {
+      register: "x",
+      id: "1",
+      url: "u",
+      label: "l",
+      deadline: "2026-11-01",
+      status: null,
+      incorporated: null,
+    };
     expect(leadWarnings(context({ records: [tender] }))[0]!.text).toBe("The tender closed on 2026-11-01.");
   });
 
@@ -50,6 +58,7 @@ describe("lead warnings", () => {
       label: "l",
       deadline: null,
       status: "dissolved",
+      incorporated: null,
     };
     expect(ids({ records: [dissolved] })).toEqual(["closed-company"]);
     expect(ids({ pages: "We offer payroll services to restaurants." })).toEqual(["maybe-competitor"]);

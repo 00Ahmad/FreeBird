@@ -1,6 +1,7 @@
 import { canonicalUrl, words } from "@mrog/jobs";
 
 import { hostIn } from "./facts";
+import { labelFitsName } from "./names";
 
 /**
  * Telling one company from another: by its own web address, else by its name. Job systems, social sites, registers
@@ -57,12 +58,8 @@ export function siteFitsName(raw: string, name: string): boolean {
   const host = companyDomain(raw);
   if (!host) return false;
   const label = host.replace(SUFFIX, "").split(".").pop()!.replace(/-/g, "");
-  const parts = nameKey(name).split(" ").filter(Boolean);
-  if (parts.length === 0 || label.length < 3) return false;
-  const compact = parts.join("");
-  if (label.includes(compact) || (label.length >= 5 && compact.includes(label))) return true;
-  const first = parts[0]!;
-  return first.length >= 5 && label.includes(first);
+  // The same name match as everywhere else: a place or a trade word in the address isn't enough (1.4).
+  return labelFitsName(label, name);
 }
 
 /**

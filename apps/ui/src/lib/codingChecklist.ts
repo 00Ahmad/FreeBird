@@ -31,7 +31,10 @@ export interface Checklist {
   summary: string;
 }
 
-/** Every file and every connector in the plan, ticked when its card is in Done (a plan item with no card is not). */
+/**
+ * Every file and every connector in the plan, ticked when its card is in Done. A connection with no card of its own
+ * (plans have had none since connections are checked inside the file cards) is ticked once every file it links is.
+ */
 export function buildChecklist(plan: Pick<CodingProject, "nodes" | "edges" | "cards">): Checklist {
   const cards = cardsByRef(plan.cards);
   const labels = edgeLabels(plan.edges);
@@ -46,7 +49,9 @@ export function buildChecklist(plan: Pick<CodingProject, "nodes" | "edges" | "ca
     label: labels.get(edge.id) ?? edge.id,
     description: edge.description,
     files: linkedFiles(edge, plan.nodes),
-    done: cards.get(edge.id)?.column === "done",
+    done: cards.has(edge.id)
+      ? cards.get(edge.id)?.column === "done"
+      : edge.files.length > 0 && edge.files.every((id) => cards.get(id)?.column === "done"),
   }));
   const filesDone = files.filter((file) => file.done).length;
   const connectorsDone = connectors.filter((connector) => connector.done).length;

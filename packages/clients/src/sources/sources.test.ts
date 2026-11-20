@@ -4,6 +4,7 @@ import { emptyOffer, mergeOffer } from "../profile";
 import { payroll } from "../playbooks/payroll";
 import { companiesHouse, companyRecord, nameSearch } from "./companies-house";
 import { contractsFinder } from "./contracts-finder";
+import { findATender } from "./find-a-tender";
 import { foodHygiene, premisesCount, premisesFit } from "./food-hygiene";
 import { REGISTERS, recordFacts, recordPage, recordSignals, registersFor, sicCodesFor } from "./index";
 
@@ -81,6 +82,7 @@ describe("registers", () => {
     expect(new Set(REGISTERS.map((r) => r.id)).size).toBe(REGISTERS.length);
     expect(registersFor(profile, payroll).map((r) => r.id)).toEqual([
       "contracts-finder",
+      "find-a-tender",
       "companies-house",
       "food-hygiene",
     ]);
@@ -93,15 +95,100 @@ describe("registers", () => {
   });
 });
 
+describe("register pages across scans (2.2)", () => {
+  it("are remembered by a key that doesn't change from day to day", async () => {
+    const { queryKey } = await import("./register-pages");
+    const today = companiesHouse.queries(profile, payroll, NOW);
+    const later = companiesHouse.queries(profile, payroll, new Date("2026-11-20T12:00:00Z"));
+    expect(today.map((q) => queryKey(companiesHouse, q))).toEqual(
+      later.map((q) => queryKey(companiesHouse, q)),
+    );
+    // The two queries (by code, and new companies) still have their own keys.
+    expect(new Set(today.map((q) => queryKey(companiesHouse, q))).size).toBe(today.length);
+  });
+});
+
+describe("Find a Tender (6.3)", () => {
+  // Shaped like the live answer checked on 2026-11-20 (made-up content).
+  const ANSWER = {
+    releases: [
+      {
+        id: "110001-2026",
+        ocid: "ocds-test-0001",
+        date: "2026-11-10T10:00:00Z",
+        buyer: { name: "Test City Council" },
+        tender: {
+          title: "Payroll services",
+          description: "<p>The council seeks a payroll provider.</p>",
+          status: "active",
+          tenderPeriod: { endDate: "2026-12-20T12:00:00Z" },
+          value: { amount: 250000, currency: "GBP" },
+        },
+        links: [{ rel: "canonical", href: "https://notices.test/0001" }],
+      },
+      {
+        id: "110002-2026",
+        ocid: "ocds-test-0001",
+        date: "2026-11-12T10:00:00Z",
+        buyer: { name: "Test City Council" },
+        tender: { title: "Payroll services (amended)", status: "active" },
+      },
+      {
+        id: "3",
+        ocid: "ocds-test-0003",
+        buyer: { name: "Closed Trust" },
+        tender: { title: "Cleaning", status: "complete" },
+      },
+    ],
+    links: { next: "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?cursor=abc" },
+  };
+
+  it("asks for open tenders updated lately, with no key", () => {
+    const [query] = findATender.queries(profile, payroll, NOW);
+    const request = findATender.request(query!, null);
+    expect(request.url).toBe(
+      "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=100&updatedFrom=2026-10-15T00%3A00%3A00",
+    );
+    expect(findATender.needsKey).toBeNull();
+  });
+
+  it("reads one record per procurement, the newest release, open ones only", () => {
+    const records = findATender.parse(ANSWER);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      register: "find-a-tender",
+      id: "ocds-test-0001",
+      name: "Test City Council",
+      kind: "tender",
+      title: "Payroll services (amended)",
+      published: "2026-11-12",
+    });
+    expect(findATender.parse({ nothing: true })).toEqual([]);
+  });
+});
+
 describe("Companies House", () => {
   it("asks by place and industry codes, and for new companies, with the key as basic auth", () => {
     const queries = companiesHouse.queries(profile, payroll, NOW);
     expect(queries).toHaveLength(2);
     const request = companiesHouse.request(queries[1]!, "test-key");
     expect(request.url).toBe(
-      "https://api.company-information.service.gov.uk/advanced-search/companies?company_status=active&size=50&location=Leeds&sic_codes=56101%2C56102&incorporated_from=2025-11-14",
+      "https://api.company-information.service.gov.uk/advanced-search/companies?company_status=active&size=50&start_index=0&location=Leeds&sic_codes=56101%2C56102&incorporated_from=2025-11-14",
     );
     expect(request.headers.authorization).toBe(`Basic ${btoa("test-key:")}`);
+    // The next page starts where the last stopped (2.2).
+    expect(companiesHouse.request({ ...queries[1]!, page: 3 }, "k").url).toContain("start_index=100");
+    const items = (n: number) => Array.from({ length: n }, () => ({}));
+    expect(companiesHouse.isLastPage!({ hits: "120", items: items(20) }, { ...queries[1]!, page: 3 })).toBe(
+      true,
+    );
+    expect(companiesHouse.isLastPage!({ hits: "500", items: items(50) }, { ...queries[1]!, page: 3 })).toBe(
+      false,
+    );
+    // Each place you serve, not only the first (2.3).
+    expect(
+      companiesHouse.queries({ ...profile, areas: ["Leeds", "York"] }, payroll, NOW).map((q) => q.place),
+    ).toEqual(["Leeds", "Leeds", "York", "York"]);
     expect(companiesHouse.queries({ ...profile, industries: ["any"], signals: [] }, payroll, NOW)).toEqual(
       [],
     );

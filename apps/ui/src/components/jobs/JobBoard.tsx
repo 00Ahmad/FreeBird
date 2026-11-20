@@ -1,10 +1,21 @@
-import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import { useState } from "react";
 
 import type { Bot, JobCard, JobProject } from "@mrog/shared";
-import { cn } from "@mrog/ui-kit";
+import { Button, cn } from "@mrog/ui-kit";
 
-import { boardColumns, cardCompany, cardTitle, COLUMN_LABELS, scoreTone } from "../../lib/jobs";
+import { useCheckOpen } from "../../hooks/jobs";
+import {
+  boardColumns,
+  canScan,
+  cardCompany,
+  cardTitle,
+  COLUMN_LABELS,
+  foundOn,
+  isNew,
+  scoreTone,
+  type BoardSort,
+} from "../../lib/jobs";
 import { JobDetails } from "./JobDetails";
 
 const TONE = {
@@ -17,6 +28,9 @@ const TONE = {
 export function JobBoard({ bot, project }: { bot: Bot; project: JobProject }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [folded, setFolded] = useState<Record<string, boolean>>({ not_for_me: true, rejected: true });
+  const [sort, setSort] = useState<BoardSort>("best");
+  const [onlyNew, setOnlyNew] = useState(false);
+  const check = useCheckOpen(bot.id);
   const open = project.cards.find((card) => card.id === openId);
   if (open) return <JobDetails bot={bot} card={open} onBack={() => setOpenId(null)} />;
   if (project.cards.length === 0)
@@ -28,40 +42,70 @@ export function JobBoard({ bot, project }: { bot: Bot; project: JobProject }) {
           : "Once your profile is approved, start a scan."}
       </p>
     );
+  const columns = boardColumns(project.cards, {
+    sort,
+    onlyNew,
+    latestScan: project.scan?.number ?? null,
+  }).filter((column) => column.cards.length > 0);
   return (
     <div className="flex flex-col gap-3 p-3">
-      {boardColumns(project.cards)
-        .filter((column) => column.cards.length > 0)
-        .map(({ column, cards }) => {
-          const shut = folded[column] ?? false;
-          return (
-            <section key={column} aria-label={COLUMN_LABELS[column]}>
-              <button
-                type="button"
-                onClick={() => setFolded((current) => ({ ...current, [column]: !shut }))}
-                className="flex w-full items-center gap-1 px-1 pb-1 text-[12px] font-medium text-ink-2"
-                aria-expanded={!shut}
-              >
-                {shut ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                {COLUMN_LABELS[column]} <span className="text-ink-3">· {cards.length}</span>
-              </button>
-              {!shut && (
-                <ul className="flex flex-col gap-1.5">
-                  {cards.map((card) => (
-                    <li key={card.id}>
-                      <CardRow card={card} onOpen={() => setOpenId(card.id)} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          );
-        })}
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        <select
+          aria-label="Sort the board"
+          value={sort}
+          onChange={(event) => setSort(event.target.value as BoardSort)}
+          className="h-7 rounded-lg border border-border bg-bg px-2"
+        >
+          <option value="best">Best match first</option>
+          <option value="newest">Newest first</option>
+        </select>
+        <label className="flex items-center gap-1 text-ink-2">
+          <input type="checkbox" checked={onlyNew} onChange={(event) => setOnlyNew(event.target.checked)} />
+          Only new
+        </label>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="ml-auto"
+          onClick={() => check.mutate()}
+          disabled={check.isPending || !canScan(project)}
+          title="Reads each Found and Shortlisted job again (no model), and marks the ones gone or closed"
+        >
+          <RefreshCw size={12} /> Check still open
+        </Button>
+      </div>
+      {check.error && <p className="text-[12px] text-danger">{check.error.message}</p>}
+      {columns.length === 0 && <p className="px-1 text-[12.5px] text-ink-3">No jobs from the latest scan.</p>}
+      {columns.map(({ column, cards }) => {
+        const shut = folded[column] ?? false;
+        return (
+          <section key={column} aria-label={COLUMN_LABELS[column]}>
+            <button
+              type="button"
+              onClick={() => setFolded((current) => ({ ...current, [column]: !shut }))}
+              className="flex w-full items-center gap-1 px-1 pb-1 text-[12px] font-medium text-ink-2"
+              aria-expanded={!shut}
+            >
+              {shut ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+              {COLUMN_LABELS[column]} <span className="text-ink-3">· {cards.length}</span>
+            </button>
+            {!shut && (
+              <ul className="flex flex-col gap-1.5">
+                {cards.map((card) => (
+                  <li key={card.id}>
+                    <CardRow card={card} fresh={isNew(card, project)} onOpen={() => setOpenId(card.id)} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        );
+      })}
     </div>
   );
 }
 
-function CardRow({ card, onOpen }: { card: JobCard; onOpen(): void }) {
+function CardRow({ card, fresh, onOpen }: { card: JobCard; fresh: boolean; onOpen(): void }) {
   const tone = scoreTone(card.score);
   return (
     <button
@@ -75,9 +119,16 @@ function CardRow({ card, onOpen }: { card: JobCard; onOpen(): void }) {
         {card.score}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] font-medium">{cardTitle(card)}</span>
+        <span className="flex items-center gap-1.5">
+          <span className="truncate text-[13px] font-medium">{cardTitle(card)}</span>
+          {fresh && (
+            <span className="shrink-0 rounded bg-accent/15 px-1 text-[10.5px] font-semibold text-accent">
+              New
+            </span>
+          )}
+        </span>
         <span className="block truncate text-[12px] text-ink-3">
-          {cardCompany(card)}
+          {cardCompany(card)} · found {foundOn(card)}
           {card.summary ? ` · ${card.summary}` : ""}
         </span>
       </span>

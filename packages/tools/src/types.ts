@@ -27,6 +27,14 @@ export interface ToolContext {
   ask(question: string, options?: AskChoices): Promise<string>;
   /** Extra environment for commands (secrets the user granted). */
   env?: Record<string, string>;
+  /** The id of the call being run (set by the tool host). */
+  callId?: string;
+  /**
+   * Keeps a copy of a file just before a tool changes it, so the user can undo the change from the chat. Called once
+   * the write is certain to happen; the function it returns is called with what was written. Undefined when no copy
+   * is kept (this bot keeps none, or the file is too large).
+   */
+  keepCopy?(path: string, callId: string): Promise<((written: string) => Promise<void> | void) | undefined>;
 }
 
 /** Warning badges shown on approval cards. */

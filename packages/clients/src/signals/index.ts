@@ -10,7 +10,8 @@ import { newCompany } from "./new-company";
 import type { SignalKind } from "./types";
 import { unhappy } from "./unhappy";
 
-export type { SearchContext, SignalKind } from "./types";
+export type { SearchContext, SignalKind, SignContext } from "./types";
+export { largestSum, namesServiceNear, serviceWords } from "./words";
 export { namesTitle } from "./hiring";
 
 /** Every kind of sign, strongest first. */

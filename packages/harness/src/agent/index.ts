@@ -71,6 +71,11 @@ export interface Agent {
   limitNotes: ((bot: Bot) => string | null)[];
   /** Takes the user's secret values out of tool results and errors (set once the scrubber exists). */
   scrub?(text: string): string;
+  /**
+   * Keeps copies of the files a turn's tools change, so the user can undo them (set by file-undo.ts). `messageId` is
+   * the turn's own message, where the tool card is.
+   */
+  keepCopyFor?(bot: Bot, thread: Thread, messageId: string): ToolContext["keepCopy"];
   /** For a connected app's tool: the app and what the tool does there (set once connectors exist). */
   describeApp?(toolName: string): { id: string; name: string; kind: AppToolKind } | null;
 }
@@ -354,6 +359,8 @@ export function installAgent(services: Services): Agent {
         botName: bot.name,
         threadId: thread.id,
         ask: (question, choices) => questions.ask(question, scope, choices),
+        // A helper's file changes are undone in its own thread with the coordinator, where its tool card is.
+        keepCopy: agent.keepCopyFor?.(bot, thread, messageId),
         // A getter, so every call sees the secrets granted so far: the owner can hand one over in the middle of this
         // very turn (request_secret, use_login) and the command that follows needs it.
         get env() {

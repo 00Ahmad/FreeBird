@@ -4,6 +4,8 @@ import type { JobReader } from "@mrog/shared";
 export interface PageLink {
   text: string;
   url: string;
+  /** Where the job is, when a job system's list says (its own field, not the link's words). */
+  place?: string;
 }
 
 /** A page as one of the readers read it. Every job card's facts are checked against this text. */

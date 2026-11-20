@@ -35,6 +35,11 @@ export const MessagePart = z.discriminatedUnion("type", [
      * silent retry. Saved before the call starts, so it survives a crash in the middle of it.
      */
     outward: z.boolean().optional(),
+    /**
+     * A file change the user can undo from the chat (write_file, edit_file): the id of the copy kept of the file as it
+     * was, and whether it was undone. An undone change is replayed to the bot as undone.
+     */
+    undo: z.object({ id: z.string(), undone: z.boolean().optional() }).optional(),
     /** Who settled an approval: the user, a saved rule, the command policy, the group-chat rule, the clock or Stop. */
     decidedBy: z.enum(["user", "rule", "policy", "group_chat", "timeout", "stopped"]).optional(),
     /** Set while the call waits for the user's decision (drives the approval card). */
@@ -96,6 +101,11 @@ export const Message = z.object({
   model: z.string().nullable(),
   usage: Usage.nullable(),
   replyToId: MessageId.nullable(),
+  /**
+   * A bot's reply: the user's messages sent while it was being written that it took in between steps. They are saved
+   * after it, so later turns are told they were answered here rather than reading them as new.
+   */
+  tookIn: z.array(MessageId).optional(),
   /** Emoji reactions from the user (acknowledgement only, never approval). */
   reactions: z.array(z.string()),
   createdAt: z.iso.datetime(),

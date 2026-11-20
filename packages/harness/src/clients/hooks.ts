@@ -2,6 +2,7 @@ import type { Message, Thread } from "@mrog/shared";
 import type { ToolSpec } from "@mrog/tools";
 
 import type { Services } from "../services";
+import { checkerSteer } from "../teams/checker-nudge";
 import { ROLES } from "./roles";
 import type { RoleRunner } from "./run-role";
 import type { ClientTeam } from "./team";
@@ -38,7 +39,14 @@ export function installClientHooks(
     const found = team.roleOf(bot);
     if (!found) return options;
     const plain = { ...options, selfCheck: false, stepLimitNote: false, maxSteps: MAX_STEPS[found.role] };
-    return found.role === "visual" ? plain : { ...plain, think: false, thinkOff: true };
+    if (found.role === "visual") return plain;
+    const capture = roles.captureOf(bot.id);
+    // A small model often writes its report as text and stops: told once, in the same turn, to call its tool.
+    const steer =
+      found.role === "checker" && capture
+        ? { steer: checkerSteer("finish_page", () => !!capture.result) }
+        : {};
+    return { ...plain, think: false, thinkOff: true, ...steer };
   };
 
   const DROPS = ["save it with remember", "call update_plan"];

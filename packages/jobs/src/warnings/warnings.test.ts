@@ -35,6 +35,14 @@ describe("warning signs", () => {
     expect(daysSincePosted("Posted today", NOW)).toBe(0);
     expect(daysSincePosted("Posted: 2026-09-01", NOW)).toBe(74);
     expect(daysSincePosted("soonish", NOW)).toBeNull();
+    // No year: this year's date, not 2001's (which made "Posted May 5" about 9,000 days old).
+    expect(daysSincePosted("Posted Nov 5", NOW)).toBe(daysSincePosted("Posted: 2026-11-05", NOW));
+    expect(daysSincePosted("Posted 5 November", NOW)).toBe(daysSincePosted("Posted: 2026-11-05", NOW));
+    // Still to come this year: last year's.
+    expect(daysSincePosted("Posted Dec 30", NOW)).toBe(daysSincePosted("2025-12-30", NOW));
+    expect(daysSincePosted("1 September 2026", NOW)).toBe(daysSincePosted("2026-09-01", NOW));
+    // 03/04/2026 reads as 3 April or 4 March: the newer of the two.
+    expect(daysSincePosted("03/04/2026", NOW)).toBe(daysSincePosted("2026-04-03", NOW));
     expect(oldPosting.check(context({ facts: posted("2 months ago") }))).toMatch(/^Posted about 60 days ago/);
     expect(oldPosting.check(context({ facts: posted("3 weeks ago") }))).toBeNull();
   });

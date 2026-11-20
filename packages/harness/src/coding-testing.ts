@@ -61,6 +61,8 @@ export interface DevAct {
   failAt?: number;
   /** Call finish_card (default yes). */
   finish?: boolean;
+  /** How many times to call finish_card (default 1), as a small model may call it again and again. */
+  finishTimes?: number;
   /** Wait for this before answering (a slow model). */
   wait?: Promise<void>;
 }
@@ -85,6 +87,8 @@ export interface Behave {
   ): {
     pass: boolean;
     comment?: string;
+    /** QA says the plan itself is the problem (review_card's plan_problem). */
+    planProblem?: boolean;
     command?: string;
     wait?: Promise<void>;
     failAt?: number;
@@ -174,7 +178,8 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
       if (act.command) calls.push(["run_command", { command: act.command }]);
       if (kind === "file" && act.write !== null)
         calls.push(["write_file", { path: key, content: act.write ?? `// ${key}\n` }]);
-      if (act.finish !== false) calls.push(["finish_card", { note: `Did ${key}` }]);
+      if (act.finish !== false)
+        for (let n = 0; n < (act.finishTimes ?? 1); n++) calls.push(["finish_card", { note: `Did ${key}` }]);
       if (done === 0 && act.wait) await act.wait;
       const next = act.loop
         ? (["read_file", { path: `notes/${done}.txt` }] as [string, unknown])
@@ -206,7 +211,11 @@ export function codingTeam(over: Partial<Behave> = {}, models?: string[]) {
       if (verdict.command) calls.push(["run_command", { command: verdict.command }]);
       calls.push([
         "review_card",
-        { verdict: verdict.pass ? "pass" : "fail", comment: verdict.comment ?? "" },
+        {
+          verdict: verdict.pass ? "pass" : "fail",
+          comment: verdict.comment ?? "",
+          ...(verdict.planProblem ? { plan_problem: true } : {}),
+        },
       ]);
       const next = calls[done];
       rows = next ? call(next[0], next[1]) : text("Reviewed.");

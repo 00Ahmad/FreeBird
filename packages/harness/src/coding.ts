@@ -30,6 +30,7 @@ import {
   type MessagePart,
   type Thread,
 } from "@mrog/shared";
+import type { SteerMoment } from "@mrog/engine";
 import type { ChatMessage } from "@mrog/providers";
 import { resolvePath, safe, type ToolSpec } from "@mrog/tools";
 import { describeRun, detectRun, formatFindings, visualQaMessage, type RunSpec } from "@mrog/visual-qa";
@@ -40,6 +41,7 @@ import { protectedPathReason, secretFileReason } from "./coding-paths";
 import {
   alreadyWritten,
   cardsFor,
+  fileCardsFor,
   filesReady,
   connectorsTouching,
   nextForDeveloper,
@@ -74,12 +76,36 @@ import {
 import { fail, parse } from "./http";
 import type { Services } from "./services";
 import { TurnCancelled, type Surface } from "./turns";
+import { quickCommandsAllowed } from "./coding-auto-approve";
+import { cutOffLine, DEVELOPER_MAX_EDITS, editVerdict } from "./coding-runaway";
+import { idleLine, idleNudge } from "./coding-idle";
+import { contractFor, kindOf, linksAsEdges, readContract } from "./coding-contract";
+import { doneFiles } from "./coding-done";
+import { SELF_FIXES, selfCheck } from "./coding-selfcheck";
+import { linkedTo, lineDiff, providedBy } from "./coding-changes";
+import { bringBack, PROJECT_ROUND_CAP, setAsideIfSpent, setAsideLine, timesSentBack } from "./coding-budget";
+import {
+  fillArgs,
+  fillKeys,
+  findKeys,
+  hideInProject,
+  hideKeys,
+  keysNote,
+  type BriefKey,
+} from "./coding-keys";
+import { existingForPlanner, filesFromBefore, replacedBy, replacingLine } from "./coding-existing";
+import { passChecks } from "./coding-pass-checks";
+import { MAX_REPLANS, PLAN_FLAG_AFTER, replannedNote, replanReply, replanRequest } from "./coding-replan";
+import { filesNamed, listOf, NAME_A_FILE, passedOnReply, reportsFault, userNote } from "./coding-user-notes";
+import { quickVisualCheck } from "./visual-qa/quick";
 import { stopAllSessions, VisualSession } from "./visual-qa/session";
 import { visualQaTools } from "./visual-qa/tools";
 
 const settingsKey = (botId: string) => `coding:${botId}`;
 /** A change the user asked for that the Planner hasn't answered yet: saved, so a Stop or a restart doesn't lose it. */
 const revisionKey = (botId: string) => `coding-revision:${botId}`;
+/** The keys taken out of the brief (see coding-keys.ts), kept on this computer like the rest of the project. */
+const keysKey = (botId: string) => `coding-keys:${botId}`;
 const TEAM_SECTION = "Coding team";
 /** The longest Coding Bot name: its role bots are named after it ("<name> Developer"). */
 export const MAX_CODING_NAME = 49;
@@ -110,6 +136,8 @@ class StoppedFromTeam extends Error {}
 interface Revision {
   text: string;
   built: boolean;
+  /** Asked for by the Coding Bot itself, for cards that keep failing (see coding-replan.ts). */
+  replan?: boolean;
 }
 
 /** Same file on this computer's file system: Windows and macOS don't tell case apart. */
@@ -173,6 +201,24 @@ export function installCoding(services: Services) {
     store.settings.get<Revision>(revisionKey(botId)) ?? null;
   const setRevision = (botId: string, revision: Revision | null) =>
     revision ? store.settings.set(revisionKey(botId), revision) : store.settings.delete(revisionKey(botId));
+
+  /** The keys the user gave in the brief and later messages, by name. */
+  const keysOf = (botId: string): BriefKey[] => store.settings.get<BriefKey[]>(keysKey(botId)) ?? [];
+
+  /**
+   * What the user wrote, with any new keys in it taken out and kept, and every known key shown by name. `fresh`: a new
+   * brief, which starts the keys over.
+   */
+  const withoutKeys = (botId: string, text: string, fresh = false): string => {
+    const known = fresh ? [] : keysOf(botId);
+    const found = findKeys(text, known);
+    const keys = [...known, ...found];
+    if (found.length > 0 || fresh) {
+      if (keys.length > 0) store.settings.set(keysKey(botId), keys);
+      else store.settings.delete(keysKey(botId));
+    }
+    return hideKeys(text, keys);
+  };
 
   /**
    * What a project interrupted mid-work becomes: a plan that was never approved goes back to waiting for approval, unless
@@ -241,6 +287,9 @@ export function installCoding(services: Services) {
     const project = load(botId);
     if (!project) return null;
     fn(project);
+    // A key the user gave never sits in the project's text (a failed request's address in a finding, say).
+    const keys = keysOf(botId);
+    if (keys.length > 0) hideInProject(project, keys);
     persist(project);
     return project;
   };
@@ -261,7 +310,8 @@ export function installCoding(services: Services) {
       threadId: bot.threadId,
       role: "bot",
       botId,
-      parts: [{ type: "text", text }],
+      // What the Coding Bot says never repeats a key the user gave (see coding-keys.ts).
+      parts: [{ type: "text", text: hideKeys(text, keysOf(botId)) }],
     });
     bus.publish({ type: "message.created", message });
     return message;
@@ -395,11 +445,20 @@ export function installCoding(services: Services) {
       run: async (args, ctx) => {
         const refused = refusal(args as Record<string, unknown>, ctx.workspace);
         if (refused) return refused;
+        // A turn that keeps editing without finishing is ended (see coding-runaway.ts).
+        const verdict = editVerdict(capture.edits ?? 0, timing.maxEdits);
+        if (verdict.kind === "stop") {
+          capture.cutOff = true;
+          capture.stop?.();
+          return verdict.result;
+        }
+        capture.edits = (capture.edits ?? 0) + 1;
         const result = await spec.run(args, ctx);
+        const text = typeof result === "string" ? result : result.text;
         // An edit whose text wasn't found changed nothing.
-        if (/^(Wrote|Replaced) /.test(typeof result === "string" ? result : result.text))
-          capture.wrote = true;
-        return result;
+        if (/^(Wrote|Replaced) /.test(text)) capture.wrote = true;
+        if (verdict.kind !== "warn") return result;
+        return typeof result === "string" ? result + verdict.note : { ...result, text: text + verdict.note };
       },
     };
   };
@@ -485,10 +544,27 @@ export function installCoding(services: Services) {
   };
 
   // The roles work in the user's own project folder: their commands always show a card, whatever the command policy
-  // or a saved rule says.
+  // or a saved rule says. Only the Coding Bot's own Auto-approve lets QA's routine ones run without (see
+  // coding-auto-approve.ts).
   agent.approvals.alwaysAsk.push((botId) => {
     const bot = store.bots.get(botId);
     return !!bot && roleOf(bot) !== null;
+  });
+
+  // A role's card left unanswered doesn't quietly count as "no" (QA would only work around the command): the team
+  // waits for the answer, and the Coding Bot reminds the user in its own chat each time the usual wait passes.
+  agent.approvals.keepWaiting.push((botId, summary, waitedMs) => {
+    const bot = store.bots.get(botId);
+    const team = bot && roleOf(bot);
+    if (!team) return false;
+    const minutes = Math.round(waitedMs / 60_000);
+    const asked = clip(summary.split("\n")[0] ?? summary, 120);
+    note(team.codingBot.id, `${ROLE_NAMES[team.role]} is waiting for your answer: ${asked}`);
+    say(
+      team.codingBot.id,
+      `${ROLE_NAMES[team.role]} has waited ${minutes} minute${minutes === 1 ? "" : "s"} for your answer on: ${asked}. The team waits until you answer the card in this chat (or press Stop).`,
+    );
+    return true;
   });
 
   // The Coding Bot has no tools; each role has exactly its own, guarded for the files it may read and write.
@@ -507,7 +583,25 @@ export function installCoding(services: Services) {
           : spec.name === "read_file" || spec.name === "search_files"
             ? guardRead(spec, team.codingBot.id, team.role, capture)
             : spec,
-      );
+      )
+      .map((spec) => withKeys(spec, team.codingBot.id));
+  });
+
+  /**
+   * The keys the user gave, around a role's tool (see coding-keys.ts): a {{NAME}} written into a file becomes the real
+   * key on disk, and a key in what the tool hands back (a file read, a search, a command's output) shows as its name.
+   */
+  const withKeys = (spec: ToolSpec, codingBotId: string): ToolSpec => ({
+    ...spec,
+    run: async (args, ctx) => {
+      const keys = keysOf(codingBotId);
+      if (keys.length === 0) return spec.run(args, ctx);
+      const writes = spec.name === "write_file" || spec.name === "edit_file";
+      const result = await spec.run(writes ? fillArgs(args, keys) : args, ctx);
+      return typeof result === "string"
+        ? hideKeys(result, keys)
+        : { ...result, text: hideKeys(result.text, keys) };
+    },
   });
 
   agent.toolSources.push((bot): ToolSpec[] => {
@@ -517,7 +611,8 @@ export function installCoding(services: Services) {
     // A turn that isn't the loop's (the Details panel listing tools) gets a capture nothing reads.
     const capture = live ?? {};
     if (team.role === "planner") return [proposePlanTool(capture)];
-    if (team.role === "developer") return [finishCardTool(capture)];
+    if (team.role === "developer")
+      return [finishCardTool(capture, (signal) => budgetedCheck(team.codingBot.id, capture, signal))];
     const planned = () => load(team.codingBot.id)?.nodes.map((node) => node.path) ?? [];
     // A card review gets only its verdict, the check of the whole project only its own: a small model offered both
     // sometimes calls the wrong one.
@@ -575,6 +670,23 @@ export function installCoding(services: Services) {
     ];
   };
 
+  /**
+   * What a role's turn is told between steps: the Developer's note when it runs short of steps, and once, a turn that
+   * is ending without having called any tool is told to use them (see coding-idle.ts).
+   */
+  const roleSteer =
+    (codingBotId: string, role: CodingRole, capture: TurnCapture) =>
+    (moment: SteerMoment): ChatMessage[] => {
+      // After a batch of tool calls the turn has used its tools, even if a call was refused (bad arguments).
+      if (moment === "between") capture.usedTool = true;
+      const told = role === "developer" ? developerSteer(codingBotId, capture)() : [];
+      const nudge = moment === "ending" ? idleNudge(role, capture) : null;
+      if (!nudge) return told;
+      capture.idleNudged = true;
+      note(codingBotId, idleLine(ROLE_NAMES[role]));
+      return [...told, { role: "user", content: nudge }];
+    };
+
   // A role's turn is a plain task: no self-check pass, and room for a file's worth of tool calls.
   const baseOptions = turns.extensions.turnOptions;
   turns.extensions.turnOptions = (bot, thread, info) => {
@@ -584,19 +696,21 @@ export function installCoding(services: Services) {
     const plain = { ...options, selfCheck: false, stepLimitNote: false };
     // The Developer's card is one file: no thinking before each move, and a turn that needs more than a handful of
     // rounds is going round in circles (it gets another try, then the project stops).
-    if (team.role === "developer") {
-      const capture = captures.get(bot.id);
-      const steer = capture ? { steer: developerSteer(team.codingBot.id, capture) } : {};
+    const capture = captures.get(bot.id);
+    const steer = capture ? { steer: roleSteer(team.codingBot.id, team.role, capture) } : {};
+    if (team.role === "developer")
       return { ...plain, think: false, thinkOff: true, maxSteps: DEVELOPER_MAX_STEPS, ...steer };
-    }
-    if (captures.get(bot.id)?.visual)
-      return { ...plain, maxSteps: Math.max(options.maxSteps ?? 0, VISUAL_QA_MAX_STEPS) };
-    return { ...plain, maxSteps: Math.max(options.maxSteps ?? 0, 20) };
+    if (capture?.visual)
+      return { ...plain, maxSteps: Math.max(options.maxSteps ?? 0, VISUAL_QA_MAX_STEPS), ...steer };
+    return { ...plain, maxSteps: Math.max(options.maxSteps ?? 0, 20), ...steer };
   };
 
-  // A Coding Bot has no model: nothing starts a model turn for it.
+  // A Coding Bot has no model: nothing starts a model turn for it. Other bots are left to the hooks installed before.
+  const baseRefuses = turns.extensions.refuses;
   turns.extensions.refuses = (bot) =>
-    bot.coding ? "A Coding Bot runs its team instead of answering with a model." : null;
+    bot.coding
+      ? "A Coding Bot runs its team instead of answering with a model."
+      : (baseRefuses?.(bot) ?? null);
 
   // ---- status messages --------------------------------------------------------------------------------------
 
@@ -691,7 +805,17 @@ export function installCoding(services: Services) {
     retryBackoffMs: [2000, 10_000],
     /** How long Stop waits for the work to wind down before it reports. */
     stopWaitMs: STOP_WAIT_MS,
+    /** Writes and edits a Developer turn may make without calling finish_card (see coding-runaway.ts). */
+    maxEdits: DEVELOPER_MAX_EDITS,
+    /**
+     * Give each connection a card of its own, as plans made before connections lost their cards had (the tests of how
+     * such older boards still run turn it on). Off: a card per file only.
+     */
+    connectionCards: false,
   };
+  /** The cards of a new board: one per file, plus one per connection only on an older-style board. */
+  const boardCards = (nodes: CodingNode[], edges: CodingEdge[]) =>
+    timing.connectionCards ? cardsFor(nodes, edges) : fileCardsFor(nodes);
   /** Cards already warned about as slow in a round (by role), so the activity list gets one line each. */
   const warned = new Set<string>();
 
@@ -743,11 +867,16 @@ export function installCoding(services: Services) {
     // A team thread that was deleted (or given other members) is made again rather than ending the project.
     const pair = roleBot && ensurePair(botId, roleBot, role);
     if (signal.aborted || !project || !roleBot || !pair) throw new Halt();
+    // A note of the user's held for this card is seen by this turn: it doesn't send the card back again afterwards.
+    if (card) heardDuring.get(botId)?.delete(card.id);
+    // The keys the user gave never reach a model: they are shown by name, and the role is told how to use them.
+    const keys = keysOf(botId);
+    const task = keys.length === 0 ? text : [hideKeys(text, keys), keysNote(role, keys)].join("\n\n");
     const sent = store.messages.create({
       threadId: pair.id,
       role: "bot",
       botId,
-      parts: [{ type: "text", text }],
+      parts: [{ type: "text", text: task }],
     });
     bus.publish({ type: "message.created", message: sent });
     const startedMs = timing.now();
@@ -756,6 +885,9 @@ export function installCoding(services: Services) {
       ...(finalCheck ? { finalCheck: true } : {}),
       ...(visual ? { visual: true } : {}),
     };
+    // A turn can be ended on its own, without stopping the project (a Developer going round in circles).
+    const cut = new AbortController();
+    capture.stop = () => cut.abort();
     captures.set(roleBot.id, capture);
     change(botId, (p) => {
       p.active = { role, cardId: card?.id ?? null, since: new Date(startedMs).toISOString() };
@@ -814,9 +946,11 @@ export function installCoding(services: Services) {
         delegated: true,
         standalone: true,
         surface: phase.surface,
-        parentSignal: signal,
+        parentSignal: AbortSignal.any([signal, cut.signal]),
       });
       if (signal.aborted) throw new Halt();
+      // Ended for going round in circles, or for finishing its card again: what it wrote goes on (the caller decides).
+      if (capture.cutOff || (cut.signal.aborted && capture.finished)) return { reply, capture };
       if (reply.status === "error") return { reply, capture, error: errorOf(reply) };
       // Not finished and not the project's own Stop: someone pressed Stop or Clear chat in the team thread (a cleared
       // reply is gone before it could be marked stopped, so it still says streaming).
@@ -865,7 +999,7 @@ export function installCoding(services: Services) {
     edges: CodingEdge[],
     revision: Revision | null,
   ): { cards: CodingCard[]; kept: number } => {
-    const cards = cardsFor(nodes, edges);
+    const cards = boardCards(nodes, edges);
     if (!revision || old.cards.length === 0) return { cards, kept: 0 };
     const key = (path: string) => path.toLowerCase();
     const oldNode = (path: string) => old.nodes.find((node) => key(node.path) === key(path));
@@ -903,8 +1037,12 @@ export function installCoding(services: Services) {
         card.column = before.column === "in_progress" ? "todo" : before.column;
         card.comments = before.comments;
         card.work = before.work ?? card.work;
+        // A re-plan that kept a stuck card's file as it was hasn't helped it: it stays set aside.
+        if (revision.replan && before.parked) card.parked = true;
         if (card.column === "done") kept += 1;
-      } else if (built)
+      } else if (revision.replan)
+        card.comments.push(comment("planner", "note", replannedNote(revision.text), old.round));
+      else if (built)
         card.comments.push(comment("user", "note", `Change asked for: ${revision.text}`, old.round));
     }
     return { cards, kept };
@@ -914,9 +1052,13 @@ export function installCoding(services: Services) {
     const phase = openPhase(botId, "Planning: the Planner is drawing the files and connections…");
     let closing: [string, "done" | "stopped"] = ["Stopped.", "stopped"];
     const revision = revisionOf(botId);
+    // Files in the folder from before the project: the Planner is told, and the user which ones the plan replaces.
+    const before = filesFromBefore(need(botId).outputFolder, need(botId).startedAt);
     try {
       let problems: string[] = [];
       let lastError = "";
+      /** Plans turned down (not model errors): after two, the Planner is asked for a short one. */
+      let rejected = 0;
       for (let attempt = 0; attempt <= MAX_PLAN_RETRIES; attempt++) {
         const project = need(botId);
         const { reply, capture, error } = await runRole(
@@ -924,7 +1066,15 @@ export function installCoding(services: Services) {
           "planner",
           plannerMessage(project, {
             problems,
-            ...(revision ? { revision: revision.text, built: revision.built } : {}),
+            ...(revision
+              ? {
+                  revision: revision.text,
+                  built: revision.built,
+                  ...(revision.replan ? { replan: true } : {}),
+                }
+              : {}),
+            ...(rejected >= 2 ? { short: true } : {}),
+            existing: existingForPlanner(before),
           }),
           phase,
           signal,
@@ -946,6 +1096,20 @@ export function installCoding(services: Services) {
         const found =
           capture.plan ??
           (raw ? validatePlan(raw) : { ok: false as const, errors: capture.rejected ?? [NO_PLAN] });
+        // A re-plan that changed nothing for the cards that keep failing: the plan stays, and they wait for the user.
+        if (
+          found.ok &&
+          revision?.replan &&
+          boardFor(project, found.nodes, found.edges, revision).cards.every(
+            (card) => card.column === "done" || card.parked,
+          )
+        ) {
+          setRevision(botId, null);
+          note(botId, "The Planner kept the plan as it was for the files that keep failing");
+          waitForYou(botId);
+          closing = ["The Planner kept the plan as it was. Waiting for you.", "done"];
+          return;
+        }
         if (found.ok) {
           let auto = false;
           let kept = 0;
@@ -955,6 +1119,8 @@ export function installCoding(services: Services) {
             p.nodes = found.nodes;
             p.edges = found.edges;
             p.cards = board.cards;
+            // Read from the old plan's code: its file ids may now mean other files.
+            delete p.codeLinks;
             p.round = 0;
             p.error = null;
             auto = p.autoApprove;
@@ -970,20 +1136,42 @@ export function installCoding(services: Services) {
               p,
               `Planner finished the plan: ${found.nodes.length} files, ${found.edges.length} connections`,
             );
+            if (found.dropped?.length)
+              logLine(
+                p,
+                `Left out ${found.dropped.length} done check${found.dropped.length === 1 ? "" : "s"} not written in one of the forms`,
+              );
           });
           setRevision(botId, null);
           closing = [
-            `${kept > 0 ? "Updated plan ready" : "Plan ready"}: ${found.nodes.length} files and ${found.edges.length} connections${kept > 0 ? `; ${kept} card${kept === 1 ? "" : "s"} that didn't change stay done` : ""}.${auto ? " Auto-approve is on, so the Developer starts now." : " Approve it, or tell me what to change."}`,
+            `${kept > 0 ? "Updated plan ready" : "Plan ready"}: ${found.nodes.length} files and ${found.edges.length} connections${kept > 0 ? `; ${kept} card${kept === 1 ? "" : "s"} that didn't change stay done` : ""}.${replacingLine(
+              replacedBy(
+                found.nodes.map((node) => node.path),
+                before,
+              ),
+              auto,
+            )}${auto ? " Auto-approve is on, so the Developer starts now." : " Approve it, or tell me what to change."}`,
             "done",
           ];
           return;
         }
         problems = found.errors;
+        rejected += 1;
         lastError = "";
+        if (rejected === 2)
+          note(botId, "The plan was turned down twice: asking the Planner for a short plan");
         phase.say(
           `The Planner's plan had problems; asking again (try ${attempt + 2} of ${MAX_PLAN_RETRIES + 1})…`,
         );
         note(botId, `Plan not accepted: ${clip(problems[0] ?? "", 120)}`);
+      }
+      // A re-plan the Planner couldn't make leaves the plan and the board as they were: the cards wait for the user.
+      if (revision?.replan) {
+        setRevision(botId, null);
+        note(botId, "The Planner couldn't change the plan; the cards that keep failing wait for you");
+        waitForYou(botId);
+        closing = ["The Planner couldn't change the plan. Waiting for you.", "done"];
+        return;
       }
       throw new Failure(
         lastError
@@ -1019,16 +1207,54 @@ export function installCoding(services: Services) {
    * because it was checked against what the file used to say. (A card still waiting in QA, Todo or In progress will be
    * looked at anyway.) The project can't be done while one of them is waiting.
    */
-  const requeueStale = (botId: string, cardId: string, before: Map<string, string>) => {
+  const requeueStale = (
+    botId: string,
+    cardId: string,
+    before: Map<string, string>,
+    contractBefore?: ReturnType<typeof readContract>,
+  ) => {
     const project = load(botId);
     if (!project) return;
     const after = fingerprints(project);
     const changed = project.nodes.filter((node) => before.get(node.path) !== after.get(node.path));
     if (changed.length === 0) return;
+    // A file that changed what it provides (ids, classes, exports, what it loads): the files linked to it in the code
+    // were checked against what it used to provide. A first write isn't a change; nor is an edit that keeps the contract.
+    const contractAfter = readContract(projectFiles(project));
+    const shifted = contractBefore
+      ? changed.filter(
+          (node) =>
+            contractBefore.files.has(node.path) &&
+            providedBy(contractBefore.files.get(node.path)) !==
+              providedBy(contractAfter.files.get(node.path)),
+        )
+      : [];
+    const relying = new Map<string, string>();
+    for (const node of shifted)
+      for (const path of [
+        ...linkedTo(node.path, contractBefore!.links),
+        ...linkedTo(node.path, contractAfter.links),
+      ])
+        if (!relying.has(path)) relying.set(path, node.path);
     change(botId, (p) => {
       const worked = cardOf(p, cardId);
       for (const other of p.cards) {
         if (other.id === cardId || other.column !== "done") continue;
+        const path = other.kind === "file" ? p.nodes.find((node) => node.id === other.ref)?.path : undefined;
+        const source = path ? relying.get(path) : undefined;
+        if (source) {
+          other.column = "qa";
+          other.comments.push(
+            comment(
+              "qa",
+              "requeue",
+              `Back in QA: ${source} changed what it provides (its ids, classes, exports or what it loads) after this card passed, so it is checked against it again.`,
+              p.round + 1,
+            ),
+          );
+          logLine(p, `${source} changed what it provides; ${other.title} goes back to QA`);
+          continue;
+        }
         const touched = changed.find((node) =>
           other.kind === "file"
             ? other.ref === node.id
@@ -1072,12 +1298,13 @@ export function installCoding(services: Services) {
         `Developing (round ${project.round + 1}): ${card.title} (${project.cards.indexOf(card) + 1} of ${project.cards.length})${tries > 1 ? `, try ${tries}` : ""}…`,
       );
       const before = fingerprints(project);
+      const contractBefore = readContract(projectFiles(project));
       let turn: Awaited<ReturnType<typeof runRole>>;
       try {
         turn = await runRole(
           botId,
           "developer",
-          developerMessage(project, card, last),
+          developerMessage(project, card, last, undefined, contractOf(project, card)),
           phase,
           signal,
           tries > 1 ? `Developer is trying ${card.title} again` : `Developer started ${card.title}`,
@@ -1085,7 +1312,8 @@ export function installCoding(services: Services) {
         );
       } finally {
         // Whatever became of the turn, the files it touched are not what other cards were checked against.
-        requeueStale(botId, cardId, before);
+        requeueStale(botId, cardId, before, contractBefore);
+        refreshCodeLinks(botId);
       }
       const { capture, error } = turn;
       const after = fingerprints(need(botId));
@@ -1095,18 +1323,35 @@ export function installCoding(services: Services) {
         !!node &&
         after.get(node.path) !== before.get(node.path) &&
         writtenIn(project.outputFolder)(node.path);
-      if (capture.finished || wrote) {
+      // Written but never handed in (no finish_card, so its check never ran): check it here, and give the Developer
+      // another try with what was found, while it has fixes left.
+      if (wrote && !capture.finished && !capture.cutOff) {
+        const problems = await budgetedCheck(botId, capture, signal);
+        if (problems.length > 0) {
+          note(botId, `${card.title} was written with problems; the Developer is asked to fix them first`);
+          last = { reads: capture.reads?.length ?? 0, wrote: true, stepLimit: false, problems };
+          tries -= 1;
+          continue;
+        }
+      }
+      if (capture.finished || wrote || capture.cutOff) {
         const finished = capture.finished;
+        const cutOff = capture.cutOff ? (capture.edits ?? 0) : 0;
+        // Handed to QA: the next time it comes back, it has its self-fixes again.
+        selfFixes.delete(cardId);
         change(botId, (p) => {
           const target = cardOf(p, cardId)!;
           target.column = "qa";
           if (finished?.note) target.comments.push(comment("developer", "note", finished.note, p.round));
+          holdForNote(botId, p, target);
           p.note = null;
           logLine(
             p,
             finished
               ? `Developer finished ${card.title}`
-              : `${node!.path} was written; sent to QA (finish_card wasn't called)`,
+              : cutOff
+                ? cutOffLine(cutOff, card.title)
+                : `${node!.path} was written; sent to QA (finish_card wasn't called)`,
           );
         });
         return;
@@ -1170,6 +1415,10 @@ export function installCoding(services: Services) {
           p.note = "QA is checking the whole project.";
         });
         closing = ["Every card has passed QA. The whole project is checked next.", "done"];
+      } else if (onlySetAsideLeft(project)) {
+        closing = replanOrWait(botId)
+          ? ["The cards left keep failing: the Planner is changing that part of the plan.", "done"]
+          : ["Every card left was set aside for you. Waiting for you.", "done"];
       } else throw new Failure("No card can be worked on: the board is stuck.");
     } finally {
       phase?.close(...closing);
@@ -1179,7 +1428,11 @@ export function installCoding(services: Services) {
   // ---- QA ---------------------------------------------------------------------------------------------------
 
   /** Applies QA's verdict: the service moves the card, and a file that fails sends its finished connections back to QA. */
-  const applyReview = (botId: string, cardId: string, review: { pass: boolean; comment: string }) => {
+  const applyReview = (
+    botId: string,
+    cardId: string,
+    review: { pass: boolean; comment: string; planProblem?: boolean },
+  ) => {
     change(botId, (p) => {
       const card = cardOf(p, cardId)!;
       if (review.comment)
@@ -1189,10 +1442,20 @@ export function installCoding(services: Services) {
       if (review.pass) {
         card.column = "done";
         logLine(p, `QA passed ${card.title}`);
+        holdForNote(botId, p, card);
         return;
       }
+      heardDuring.get(botId)?.delete(card.id);
       card.column = "todo";
       logLine(p, `QA sent ${card.title} back: ${clip(review.comment, 70)}`);
+      // QA says the plan is the problem: from the card's second fail on, it goes to the Planner after this pass.
+      if (review.planProblem && timesSentBack(card) >= PLAN_FLAG_AFTER) {
+        const flags = planFlags.get(botId) ?? new Set<string>();
+        flags.add(card.id);
+        planFlags.set(botId, flags);
+        logLine(p, `QA says the plan is the problem for ${card.title}`);
+      }
+      if (setAsideIfSpent(card, p.maxRounds)) logLine(p, setAsideLine(card));
       if (card.kind !== "file") return;
       // A file that changes can break a connection that already passed.
       for (const connector of connectorsTouching(p, card.ref)) {
@@ -1220,7 +1483,14 @@ export function installCoding(services: Services) {
       const { capture, error } = await runRole(
         botId,
         "qa",
-        qaMessage(project, card, tries > 1),
+        qaMessage(
+          project,
+          card,
+          tries > 1,
+          undefined,
+          contractOf(project, card),
+          changesFor(botId, project, card),
+        ),
         phase,
         signal,
         tries > 1 ? `QA is looking at ${card.title} again` : `QA started ${card.title}`,
@@ -1228,6 +1498,7 @@ export function installCoding(services: Services) {
       );
       // A verdict QA gave stands even when the model failed afterwards.
       if (capture.review) {
+        rememberReviewed(botId, project, card);
         applyReview(botId, cardId, capture.review);
         return capture.review.pass;
       }
@@ -1242,6 +1513,102 @@ export function installCoding(services: Services) {
       lastError
         ? `QA couldn't review “${title}” after ${MAX_TRIES} tries: ${clip(lastError, 200)} Resume to try again.`
         : `QA didn't give a verdict on “${title}” after ${MAX_TRIES} tries (it never called review_card). Resume to try again.`,
+    );
+  };
+
+  /** Whether the only cards not done are ones set aside for the user. */
+  const onlySetAsideLeft = (project: CodingProject) => {
+    const left = project.cards.filter((card) => card.column !== "done");
+    return left.length > 0 && left.every((card) => card.parked);
+  };
+
+  /**
+   * Stops and waits for the user: the cards set aside (each sent back as many times as the round limit), or, at the
+   * project's safety cap, every card still failing. Says which, with QA's last word on each.
+   */
+  // ---- plan problems go back to the Planner (see coding-replan.ts) ----------------------------------------------
+
+  /** Cards QA said the plan is the problem for, by Coding Bot, waiting for the end of the QA pass. */
+  const planFlags = new Map<string, Set<string>>();
+
+  /**
+   * Asks the Planner to change the plan for these cards, which keep failing, while the project has re-plans left. The
+   * updated plan waits for approval as any plan does (unless auto-approve is on). True when it asked.
+   */
+  const replanFor = (botId: string, cardIds: string[]): boolean => {
+    const project = need(botId);
+    planFlags.delete(botId);
+    const cards = cardIds.flatMap((id) => cardOf(project, id) ?? []);
+    const used = project.replans ?? 0;
+    if (cards.length === 0 || used >= MAX_REPLANS) return false;
+    setRevision(botId, { text: replanRequest(cards), built: true, replan: true });
+    change(botId, (p) => {
+      p.replans = used + 1;
+      p.status = "planning";
+      p.error = null;
+      p.note = "The Planner is changing the plan for the files that keep failing.";
+      logLine(
+        p,
+        `Asked the Planner to change the plan for ${cards.map((card) => card.title).join(", ")} (re-plan ${used + 1} of ${MAX_REPLANS})`,
+      );
+    });
+    say(
+      botId,
+      replanReply(
+        cards.map((card) => card.title),
+        project.autoApprove,
+        used + 1,
+      ),
+    );
+    return true;
+  };
+
+  /**
+   * Nothing left but cards that used their rounds (or the safety limit): they go back to the Planner while the project
+   * has re-plans left, and only then wait for the user. True when it re-planned.
+   */
+  const replanOrWait = (botId: string): boolean => {
+    const left = need(botId).cards.filter((card) => card.column !== "done");
+    const stuck = left.filter((card) => card.parked);
+    if (
+      replanFor(
+        botId,
+        (stuck.length > 0 ? stuck : left).map((card) => card.id),
+      )
+    )
+      return true;
+    waitForYou(botId);
+    return false;
+  };
+
+  const waitForYou = (botId: string) => {
+    const project = need(botId);
+    const left = project.cards.filter((card) => card.column !== "done");
+    const capped = left.some((card) => !card.parked);
+    const summary = left
+      .map((card) => {
+        const last = card.comments.findLast((said) => said.author === "qa");
+        return `${card.title}${last ? ` (${clip(last.text, 80)})` : ""}`;
+      })
+      .join("; ");
+    change(botId, (p) => {
+      p.status = "needs_you";
+      p.note = clip(
+        capped
+          ? `Round ${p.round} reached the safety limit (${p.maxRounds * PROJECT_ROUND_CAP}) and ${left.length} card${left.length === 1 ? "" : "s"} still fail: ${summary}`
+          : `${left.length} card${left.length === 1 ? " was" : "s were"} sent back ${p.maxRounds} times and set aside; everything else passed: ${summary}`,
+        600,
+      );
+      logLine(
+        p,
+        capped
+          ? `Safety limit reached: ${left.length} card${left.length === 1 ? "" : "s"} still fail`
+          : `Waiting for you: ${left.length} card${left.length === 1 ? "" : "s"} set aside`,
+      );
+    });
+    say(
+      botId,
+      `${capped ? `I stopped at the safety limit of ${project.maxRounds * PROJECT_ROUND_CAP} rounds.` : `I set aside ${left.length === 1 ? "the card" : "the cards"} that failed ${project.maxRounds} times${left.length < project.cards.length ? "; everything else passed" : ""}.`} These still fail:\n${left.map((card) => `- ${card.title}`).join("\n")}\nRaise the round limit and resume, or step in and fix them.`,
     );
   };
 
@@ -1265,6 +1632,8 @@ export function installCoding(services: Services) {
   /** The planned files and a way to read them (and any other file inside the output folder), for the project checks. */
   const projectFiles = (project: CodingProject) => ({
     files: project.nodes.map((node) => node.path),
+    // A key the user gave in the brief was copied, not made up: the key check leaves it alone.
+    given: fillKeys(project.brief, keysOf(project.botId)),
     read: (path: string): string | null => {
       const abs = resolve(project.outputFolder, path);
       const rel = relative(resolve(project.outputFolder), abs);
@@ -1278,25 +1647,70 @@ export function installCoding(services: Services) {
     },
   });
 
-  /** The card a finding goes back to: the connection between the files it spans, else the card of the file it is in. */
-  const cardForFinding = (
-    project: CodingProject,
-    file: string,
-    related: string[] = [],
-  ): CodingCard | undefined => {
-    const node = project.nodes.find((candidate) => candidate.path.toLowerCase() === file.toLowerCase());
-    if (!node) return undefined;
-    const others = related.flatMap(
-      (path) => project.nodes.find((candidate) => candidate.path.toLowerCase() === path.toLowerCase()) ?? [],
+  /**
+   * The cards a finding goes back to: the card of the file it is in, and of each other file it spans (a button on the
+   * page that does nothing is fixed in the script the page loads). Each one's Developer fixes its own side. Never a
+   * connection's card, even on an older board that has them: a connection turn has no one file to fix (a crash in the
+   * script a page loads went to the page ↔ script card, which said "already wired" and changed nothing).
+   */
+  const cardsForFinding = (project: CodingProject, file: string, related: string[] = []): CodingCard[] => {
+    const cards: CodingCard[] = [];
+    for (const path of [file, ...related]) {
+      const node = project.nodes.find((candidate) => candidate.path.toLowerCase() === path.toLowerCase());
+      const card =
+        node && project.cards.find((candidate) => candidate.kind === "file" && candidate.ref === node.id);
+      if (card && !cards.includes(card)) cards.push(card);
+    }
+    return cards;
+  };
+
+  // ---- the user's notes on cards (see coding-user-notes.ts) ------------------------------------------------------
+
+  /** Cards a note of the user's reached while a role was working on them, by Coding Bot. */
+  const heardDuring = new Map<string, Set<string>>();
+
+  /**
+   * Called as a card leaves a turn for QA or Done: if the user's note reached it during that turn (which didn't see
+   * it), it goes back to the Developer instead.
+   */
+  const holdForNote = (botId: string, p: CodingProject, card: CodingCard) => {
+    if (!heardDuring.get(botId)?.delete(card.id)) return;
+    card.column = "todo";
+    logLine(
+      p,
+      `Your note on ${card.title} came in while it was being worked on, so it goes back to the Developer`,
     );
-    const edge = project.edges.find(
-      (candidate) =>
-        candidate.files.includes(node.id) && others.some((other) => candidate.files.includes(other.id)),
-    );
-    return (
-      (edge && project.cards.find((card) => card.kind === "connector" && card.ref === edge.id)) ||
-      project.cards.find((card) => card.kind === "file" && card.ref === node.id)
-    );
+  };
+
+  /**
+   * The user's message, which names these planned files, becomes their comment on each file's card, and the card goes
+   * back to the Developer (a set-aside card too: the user has stepped in). A card being worked on right now gets the
+   * comment at once and goes back when its turn ends. Returns the cards it reached.
+   */
+  const passOn = (botId: string, said: string, paths: string[]): CodingCard[] => {
+    const project = need(botId);
+    const text = withoutKeys(botId, said);
+    const cards = [
+      ...new Map(
+        paths.flatMap((path) => cardsForFinding(project, path)).map((card) => [card.id, card]),
+      ).values(),
+    ];
+    if (cards.length === 0) return [];
+    change(botId, (p) => {
+      for (const { id } of cards) {
+        const card = cardOf(p, id);
+        if (!card) continue;
+        card.comments.push(comment("user", "note", userNote(text), p.round));
+        delete card.parked;
+        if (card.column === "in_progress" || p.active?.cardId === card.id) {
+          const held = heardDuring.get(botId) ?? new Set<string>();
+          held.add(card.id);
+          heardDuring.set(botId, held);
+        } else card.column = "todo";
+      }
+      logLine(p, `You sent a note to ${listOf(cards.map((card) => card.title))}: ${clip(text, 80)}`);
+    });
+    return cards;
   };
 
   /** Sends cards back to the Developer with what is wrong as QA's comment; returns how many cards went back. */
@@ -1318,6 +1732,7 @@ export function installCoding(services: Services) {
         card.column = "todo";
         card.comments.push(comment("qa", kind, text, round));
         logLine(p, `${source} sent ${card.title} back: ${clip(texts[0]!, 70)}`);
+        if (setAsideIfSpent(card, p.maxRounds)) logLine(p, setAsideLine(card));
       }
     });
     return byCard.size;
@@ -1336,25 +1751,34 @@ export function installCoding(services: Services) {
     const project = need(botId);
     phase.say(`QA (round ${round}): checking the whole project…`);
     const findings: Finding[] = checkProject(projectFiles(project));
+    // Problems in files no card owns can't be sent back: they are reported, and QA's turn places them.
+    let unowned: Finding[] = [];
     if (findings.length > 0) {
-      const items = findings.flatMap((finding) => {
-        const card = cardForFinding(project, finding.file, finding.related);
-        return card ? [{ card, text: finding.problem }] : [];
-      });
-      return sendBack(botId, items, round, "The automatic check", "check");
-    }
-    note(botId, "The automatic checks of the whole project found nothing");
+      const items = findings.flatMap((finding) =>
+        cardsForFinding(project, finding.file, finding.related).map((card) => ({
+          card,
+          text: finding.problem,
+        })),
+      );
+      unowned = findings.filter(
+        (finding) => cardsForFinding(project, finding.file, finding.related).length === 0,
+      );
+      if (unowned.length > 0)
+        note(botId, `The automatic check found problems no card owns: ${clip(formatFindings(unowned), 200)}`);
+      const sent = sendBack(botId, items, round, "The automatic check", "check");
+      if (sent > 0) return sent;
+    } else note(botId, "The automatic checks of the whole project found nothing");
+    const report =
+      unowned.length > 0
+        ? `they found problems in files that aren't in the plan, so no card could take them. Find which planned file has to change for each, and report it in finish_check: ${formatFindings(unowned)}`
+        : "all clear (script tags and the files they load, imports and exports, element ids, JSON files, made-up secrets).";
     let lastError = "";
     for (let tries = 1; tries <= MAX_TRIES; tries++) {
       const current = need(botId);
       const { capture, error } = await runRole(
         botId,
         "qa",
-        finalCheckMessage(
-          current,
-          "all clear (script tags and the files they load, imports and exports, element ids, JSON files, made-up secrets).",
-          tries > 1,
-        ),
+        finalCheckMessage(current, report, tries > 1),
         phase,
         signal,
         tries > 1 ? "QA is checking the whole project again" : "QA started checking the whole project",
@@ -1370,13 +1794,19 @@ export function installCoding(services: Services) {
         continue;
       }
       if (capture.check.ok) {
-        note(botId, "QA's check of the whole project: all good");
+        // Problems the automatic check found that QA says don't matter are noted, not silently lost.
+        note(
+          botId,
+          unowned.length > 0
+            ? "QA's check of the whole project: all good, though the automatic check found problems outside the plan (see above)"
+            : "QA's check of the whole project: all good",
+        );
         return 0;
       }
-      const items = capture.check.problems.flatMap((problem) => {
-        const card = cardForFinding(current, problem.file);
-        return card ? [{ card, text: problem.comment }] : [];
-      });
+      const items = capture.check.problems.flatMap((problem) =>
+        cardsForFinding(current, problem.file).map((card) => ({ card, text: problem.comment })),
+      );
+      // finish_check takes only planned files, so every problem has a card.
       return sendBack(botId, items, round, "QA's check of the whole project", "fail");
     }
     throw new Failure(
@@ -1483,14 +1913,18 @@ export function installCoding(services: Services) {
         continue;
       }
       const latest = need(botId);
-      const automatic = session.auto.flatMap((finding) => {
-        const card = cardForFinding(latest, finding.file, finding.related);
-        return card ? [{ card, text: `Visual QA: ${finding.problem}` }] : [];
-      });
-      const seen = (capture.check?.problems ?? []).flatMap((problem) => {
-        const card = cardForFinding(latest, problem.file);
-        return card ? [{ card, text: `Visual QA: ${problem.comment}` }] : [];
-      });
+      const automatic = session.auto.flatMap((finding) =>
+        cardsForFinding(latest, finding.file, finding.related).map((card) => ({
+          card,
+          text: `Visual QA: ${finding.problem}`,
+        })),
+      );
+      const seen = (capture.check?.problems ?? []).flatMap((problem) =>
+        cardsForFinding(latest, problem.file).map((card) => ({
+          card,
+          text: `Visual QA: ${problem.comment}`,
+        })),
+      );
       if (automatic.length === 0 && seen.length === 0) {
         if (session.auto.length > 0)
           note(botId, `Visual QA found problems no card owns: ${clip(formatFindings(session.auto), 200)}`);
@@ -1511,10 +1945,126 @@ export function installCoding(services: Services) {
     );
   };
 
+  /**
+   * The exact names a file card is told, read from the code of the files around it as they are now (see
+   * coding-contract.ts). Null for a connection card, or when nothing around the file is written yet.
+   */
+  /**
+   * The Developer's own check of the file it just wrote (see coding-selfcheck.ts): it parses, and the code check finds
+   * nothing in it this card can fix. For a web page, with Visual QA on and everything the page loads written, the page
+   * is also opened in a hidden tab and its console read; what is found in this file counts.
+   */
+  const developerCheck = async (
+    botId: string,
+    capture: TurnCapture,
+    signal: AbortSignal,
+  ): Promise<string[]> => {
+    const project = load(botId);
+    const path = capture.card?.kind === "file" ? capture.card.path : undefined;
+    if (!project || !path) return [];
+    const files = projectFiles(project);
+    const problems = selfCheck(path, files);
+    if (problems.length > 0 || !project.visualQa) return problems;
+    const run = detectRun({ ...files, python: process.platform === "win32" ? "python" : "python3" });
+    // Only a page FreeBird serves itself (no command runs), and only once every page, script and data file is there.
+    // Stylesheets are built last, and a missing one doesn't stop a script working (its 404 is the stylesheet's).
+    const needed = (file: string) => kindOf(file) !== "other" && kindOf(file) !== "style";
+    if (run.kind !== "page" || files.files.some((file) => needed(file) && files.read(file) === null))
+      return [];
+    const { findings, error } = await quickVisualCheck({
+      browser,
+      qaBotId: project.roles.qa.botId,
+      outputFolder: project.outputFolder,
+      files,
+      run,
+      refuse: secretFileReason,
+      signal,
+      done: doneFiles(project.nodes, (file) => files.read(file) !== null, path),
+    });
+    if (error) return [];
+    return findings
+      .filter((finding) => finding.file.toLowerCase() === path.toLowerCase())
+      .map((finding) => finding.problem);
+  };
+
+  /** Self-fixes used by each card since it was last handed to QA: SELF_FIXES each time, across its tries. */
+  const selfFixes = new Map<string, number>();
+  /** The Developer's check, while its card has self-fixes left; then nothing, and the card goes on. */
+  const budgetedCheck = async (botId: string, capture: TurnCapture, signal: AbortSignal) => {
+    const cardId = capture.card?.id;
+    if (!cardId || (selfFixes.get(cardId) ?? 0) >= SELF_FIXES) return [];
+    const problems = await developerCheck(botId, capture, signal);
+    if (problems.length > 0) selfFixes.set(cardId, (selfFixes.get(cardId) ?? 0) + 1);
+    return problems;
+  };
+
+  /**
+   * Each file as QA last reviewed it, pass or fail, so its next review sees what changed since. Kept here, not in the
+   * project (which is saved and published on every change); after a restart QA simply reads the file in full.
+   */
+  const lastReviewed = new Map<string, string>();
+  const reviewedKey = (botId: string, cardId: string) => `${botId}:${cardId}`;
+  const pathOfCard = (project: CodingProject, card: CodingCard) =>
+    card.kind === "file" ? project.nodes.find((node) => node.id === card.ref)?.path : undefined;
+  const rememberReviewed = (botId: string, project: CodingProject, card: CodingCard) => {
+    const path = pathOfCard(project, card);
+    const text = path ? projectFiles(project).read(path) : null;
+    if (text !== null) lastReviewed.set(reviewedKey(botId, card.id), text);
+  };
+  /** What changed in a card's file since QA last reviewed it, for its next review; null the first time. */
+  const changesFor = (botId: string, project: CodingProject, card: CodingCard): string | null => {
+    const path = pathOfCard(project, card);
+    const before = lastReviewed.get(reviewedKey(botId, card.id));
+    const current = path ? projectFiles(project).read(path) : null;
+    if (!path || before === undefined || current === null) return null;
+    const diff = lineDiff(before, current);
+    if (diff === "") return `${path} hasn't changed since you last reviewed it.`;
+    if (diff === null) return `${path} was largely rewritten since you last reviewed it: read it in full.`;
+    return [
+      `What changed in ${path} since you last reviewed it (- removed, + added):`,
+      "```diff",
+      diff,
+      "```",
+      "Check that these changes fix what was said on the card and break nothing; the rest of the file is as it was when you last looked. Read the file if you need more around a change.",
+    ].join("\n");
+  };
+
+  const contractOf = (project: CodingProject, card: CodingCard): string | null => {
+    if (card.kind !== "file") return null;
+    const path = project.nodes.find((node) => node.id === card.ref)?.path;
+    return path ? contractFor(path, readContract(projectFiles(project))) : null;
+  };
+
+  /**
+   * The connections the code makes, for the diagram, read again after a Developer turn. Saved only when they changed:
+   * every change saves and publishes the whole project.
+   */
+  const refreshCodeLinks = (botId: string) => {
+    const project = load(botId);
+    if (!project) return;
+    const links = linksAsEdges(readContract(projectFiles(project)).links, project.nodes);
+    if (JSON.stringify(links) === JSON.stringify(project.codeLinks ?? [])) return;
+    change(botId, (p) => void (p.codeLinks = links));
+  };
+
+  /** The code check and Visual QA's quick check at the start of every QA pass (see coding-pass-checks.ts). */
+  const checks = passChecks({
+    project: need,
+    files: (project) => projectFiles(project),
+    cardsFor: (project, file, related) => cardsForFinding(project, file, related),
+    sendBack,
+    note,
+    openApp: (input) => quickVisualCheck({ ...input, browser, refuse: secretFileReason }),
+    commandsAllowed: (project) =>
+      quickCommandsAllowed(project.autoApprove, agent.approvals.permissions().localExecution),
+  });
+
   const reviewing = async (botId: string, signal: AbortSignal) => {
     let phase: Phase | undefined;
     let closing: [string, "done" | "stopped"] = ["Stopped.", "stopped"];
     try {
+      // First the checks that need no model: the code check, and (with Visual QA on) the app opened by itself.
+      const quick = await checks.run(botId, signal);
       // Cards that come back to QA during this pass wait for the next one, after the Developer has fixed the file.
       const queue = reviewable(need(botId)).map((card) => card.id);
       let reviewed = 0;
@@ -1531,14 +2081,22 @@ export function installCoding(services: Services) {
         reviewed += 1;
       }
       const everyCardDone = need(botId).cards.every((card) => card.column === "done");
-      if (reviewed === 0 && !everyCardDone) {
+      if (reviewed === 0 && quick === 0 && !everyCardDone) {
         // Nothing could be reviewed: back to the Developer, or the board is stuck.
-        if (!nextForDeveloper(need(botId)))
+        if (!nextForDeveloper(need(botId))) {
+          if (onlySetAsideLeft(need(botId))) {
+            closing = replanOrWait(botId)
+              ? ["The cards left keep failing: the Planner is changing that part of the plan.", "done"]
+              : ["Every card left was set aside for you. Waiting for you.", "done"];
+            return;
+          }
           throw new Failure("No card can be worked on: the board is stuck.");
+        }
         change(botId, (p) => void (p.status = "developing"));
         return;
       }
-      const counted = reviewed > 0 ? change(botId, (p) => void (p.round += 1))! : need(botId);
+      // The quick check sending work back counts as a QA pass, so a page that keeps crashing still meets the round limit.
+      const counted = reviewed > 0 || quick > 0 ? change(botId, (p) => void (p.round += 1))! : need(botId);
       // Every card passed: the whole project is checked, as part of this QA pass.
       let checked = 0;
       if (counted.cards.every((card) => card.column === "done")) {
@@ -1550,34 +2108,30 @@ export function installCoding(services: Services) {
       }
       const project = need(botId);
       const left = project.cards.filter((card) => card.column !== "done");
-      const failed = reviewed - passed + checked;
+      const open = left.filter((card) => !card.parked);
+      const failed = reviewed - passed + checked + quick;
       if (left.length === 0) {
         finishProject(botId);
         closing = [
           `Round ${project.round}: all ${project.cards.length} cards passed QA and the whole project was checked.`,
           "done",
         ];
-      } else if (project.round >= project.maxRounds) {
-        const summary = left
-          .map((card) => {
-            const last = card.comments.findLast((said) => said.author === "qa");
-            return `${card.title}${last ? ` (${clip(last.text, 80)})` : ""}`;
-          })
-          .join("; ");
-        change(botId, (p) => {
-          p.status = "needs_you";
-          p.note = clip(
-            `Round ${p.round} of ${p.maxRounds} is done and ${left.length} card${left.length === 1 ? "" : "s"} still fail: ${summary}`,
-            600,
-          );
-          logLine(p, `Round limit reached: ${left.length} card${left.length === 1 ? "" : "s"} still fail`);
-        });
-        say(
-          botId,
-          `I stopped after round ${project.round} of ${project.maxRounds}. These cards still fail:\n${left.map((card) => `- ${card.title}`).join("\n")}\nRaise the round limit and resume, or step in and fix them.`,
-        );
+      } else if (open.length === 0 || project.round >= project.maxRounds * PROJECT_ROUND_CAP) {
+        // Every card left was set aside (each used its rounds), or the project hit its safety cap: the Planner gets a
+        // go at them while it has re-plans left, then the user.
         closing = [
-          `Round ${project.round} of ${project.maxRounds}: ${failed} card${failed === 1 ? "" : "s"} still failing. Waiting for you.`,
+          `Round ${project.round}: ${left.length} card${left.length === 1 ? "" : "s"} still failing. ${replanOrWait(botId) ? "The Planner is changing that part of the plan." : "Waiting for you."}`,
+          "done",
+        ];
+      } else if (
+        replanFor(
+          botId,
+          [...(planFlags.get(botId) ?? [])].filter((id) => cardOf(project, id)?.column !== "done"),
+        )
+      ) {
+        // QA said the plan is the problem for some cards (each failed at least twice): the Planner first.
+        closing = [
+          `Round ${project.round}: ${passed} of ${reviewed} passed; QA says the plan is the problem for some files, so the Planner changes that part.`,
           "done",
         ];
       } else {
@@ -1697,10 +2251,11 @@ export function installCoding(services: Services) {
     return need(botId);
   };
 
-  const revise = (botId: string, text: string): CodingProject => {
+  const revise = (botId: string, asked: string): CodingProject => {
     const project = need(botId);
     if (project.status !== "awaiting_approval")
       throw notAllowed("There is no plan waiting for your approval.");
+    const text = withoutKeys(botId, asked);
     setRevision(botId, { text, built: false });
     change(botId, (p) => {
       p.status = "planning";
@@ -1716,7 +2271,8 @@ export function installCoding(services: Services) {
    * A message to a project that is done is a change to it: the Planner gets the plan it was built from and the request,
    * and the updated plan waits for approval as any plan does. Cards of the files that don't change stay done.
    */
-  const changeBuilt = (botId: string, text: string) => {
+  const changeBuilt = (botId: string, asked: string) => {
+    const text = withoutKeys(botId, asked);
     setRevision(botId, { text, built: true });
     change(botId, (p) => {
       p.status = "planning";
@@ -1731,10 +2287,13 @@ export function installCoding(services: Services) {
     launch(botId);
   };
 
-  const begin = (botId: string, brief: string) => {
+  const begin = (botId: string, given: string) => {
     setRevision(botId, null);
+    // Keys in the brief are kept apart; the project keeps the brief with their names (see coding-keys.ts).
+    const brief = withoutKeys(botId, given, true);
     change(botId, (p) => {
       p.brief = brief;
+      delete p.replans;
       p.status = "planning";
       p.error = null;
       p.note = "The Planner is making the plan.";
@@ -1764,9 +2323,16 @@ export function installCoding(services: Services) {
     const project = need(botId);
     if (!["stopped", "needs_you", "error"].includes(project.status))
       throw notAllowed("Only a stopped project, or one waiting for you or in error, can be resumed.");
-    if (project.status === "needs_you" && project.round >= project.maxRounds)
+    // Waiting for the user because every card left used its rounds (or the safety cap was hit): Resume alone would
+    // change nothing. A higher round limit brings those cards back.
+    if (
+      project.status === "needs_you" &&
+      (project.round >= project.maxRounds * PROJECT_ROUND_CAP ||
+        (onlySetAsideLeft(project) &&
+          project.cards.every((card) => !card.parked || timesSentBack(card) >= project.maxRounds)))
+    )
       throw notAllowed(
-        `The round limit (${project.maxRounds}) is reached. Raise it in the settings, then resume.`,
+        `The round limit (${project.maxRounds}) is reached for the cards still failing. Raise it in the settings, then resume.`,
       );
     const revision = revisionOf(botId);
     const status =
@@ -1816,7 +2382,13 @@ export function installCoding(services: Services) {
     }
     let approveNow = false;
     change(botId, (p) => {
-      if (input.maxRounds !== undefined) p.maxRounds = input.maxRounds;
+      if (input.maxRounds !== undefined) {
+        p.maxRounds = input.maxRounds;
+        // Cards set aside that have rounds left under the new limit come back (they run on Resume).
+        const back = bringBack(p.cards, p.maxRounds);
+        if (back > 0)
+          logLine(p, `${back} card${back === 1 ? "" : "s"} set aside came back with the higher round limit`);
+      }
       if (input.visualQa !== undefined) {
         p.visualQa = input.visualQa;
         logLine(p, `You turned Visual QA ${input.visualQa ? "on" : "off"}`);
@@ -1907,11 +2479,13 @@ export function installCoding(services: Services) {
     change(botId, (p) => {
       p.nodes = checked.nodes;
       p.edges = checked.edges;
-      p.cards = cardsFor(checked.nodes, checked.edges);
+      p.cards = boardCards(checked.nodes, checked.edges);
+      delete p.codeLinks;
       p.round = 0;
       p.error = null;
       p.active = null;
-      if (read.brief) p.brief = read.brief;
+      // A brief that came with the plan file is a new brief: its keys are taken out like any brief's.
+      if (read.brief) p.brief = withoutKeys(botId, read.brief, true);
       else if (!p.brief) p.brief = "(a plan brought in from a file)";
       auto = p.autoApprove;
       p.status = auto ? "developing" : "awaiting_approval";
@@ -1969,13 +2543,38 @@ export function installCoding(services: Services) {
       revise(botId, text);
       return;
     }
+    // A message naming a planned file is about that file (see coding-user-notes.ts). While planning, the board is
+    // about to change, so it waits.
+    const named =
+      project.status === "planning" || project.cards.length === 0
+        ? []
+        : filesNamed(
+            text,
+            project.nodes.map((node) => node.path),
+          );
     if (project.status === "done") {
+      // A fault in a finished file is fixed on its card; anything else is a change to the plan.
+      if (named.length > 0 && reportsFault(text) && passOn(botId, text, named).length > 0) {
+        change(botId, (p) => {
+          p.status = "developing";
+          p.error = null;
+          p.note = "The Developer is fixing what you reported.";
+        });
+        say(botId, passedOnReply(named, "reopened"));
+        launch(botId);
+        return;
+      }
       changeBuilt(botId, text);
       return;
     }
-    say(botId, status(project));
+    if (named.length > 0 && passOn(botId, text, named).length > 0) {
+      say(botId, passedOnReply(named, isCodingBusy(project.status) ? "running" : "waiting"));
+      return;
+    }
+    say(botId, project.status === "planning" ? status(project) : `${status(project)} ${NAME_A_FILE}`);
   };
 
+  const baseHandles = turns.extensions.handles;
   turns.extensions.handles = (thread, message) => {
     const members = thread.memberIds.flatMap((id) => store.bots.get(id) ?? []);
     const codingBot = members.find((bot) => bot.coding);
@@ -2003,7 +2602,8 @@ export function installCoding(services: Services) {
       }
       return true;
     }
-    return false;
+    // Not a Coding Bot's thread: the hooks installed before (if any) decide.
+    return baseHandles?.(thread, message) ?? false;
   };
 
   // ---- creating and deleting --------------------------------------------------------------------------------
@@ -2106,6 +2706,7 @@ export function installCoding(services: Services) {
     projects.delete(event.botId);
     store.settings.delete(settingsKey(event.botId));
     store.settings.delete(revisionKey(event.botId));
+    store.settings.delete(keysKey(event.botId));
     for (const role of CODING_ROLES) {
       const botId = project.roles[role].botId;
       folders.delete(botId);

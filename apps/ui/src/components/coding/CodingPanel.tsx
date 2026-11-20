@@ -418,11 +418,14 @@ function RoundLimit({ project, settings }: { project: CodingProject; settings: S
 
 function AutoApprove({ project, settings }: { project: CodingProject; settings: Settings }) {
   return (
-    <label className="flex items-center gap-2">
+    <label
+      className="flex items-center gap-2"
+      title="Approves the plan, and QA's checks and test runs. A command that can't be undone, changes security, uses your secrets or works outside the project folder still asks."
+    >
       <Switch
         on={project.autoApprove}
         onChange={(autoApprove) => settings.mutate({ autoApprove })}
-        label="Auto-approve the plan"
+        label="Auto-approve the plan and QA's commands"
         disabled={settings.isPending}
       />
       Auto-approve

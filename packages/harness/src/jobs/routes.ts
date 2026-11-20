@@ -74,6 +74,7 @@ export function registerJobRoutes(app: FastifyInstance, services: Services) {
   route("post", "/profile/approve", null, (bot) => jobs.approveProfile(bot.id));
   route("post", "/scan", StartJobScanInput, (bot, input) => jobs.startScan(bot.id, input.target));
   route("post", "/stop", null, (bot) => jobs.stop(bot.id));
+  route("post", "/check-open", null, (bot) => jobs.checkOpen(bot.id));
   route("post", "/handoff", HandoffAnswerInput, (bot, input) => jobs.answerHandoff(bot.id, input.action));
   route("post", "/cards/:cardId/react", ReactToJobInput, (bot, input, params) =>
     jobs.react(bot.id, params.cardId!, input),

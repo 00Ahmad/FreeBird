@@ -13,6 +13,13 @@ export interface SearchContext {
   year: number;
 }
 
+/** What a sign's check may need beyond the quote: what you call your service, and today's date. */
+export interface SignContext {
+  /** What a company asking for you would call your service (see serviceNamesOf). */
+  serviceNames?: readonly string[];
+  now?: Date;
+}
+
 /**
  * One kind of sign that a company may need you, as a plug-in: how strong it is, how long it stays fresh, the words a
  * quote of it must have (code checks the Checker's quote), and the web searches that find it.
@@ -25,7 +32,7 @@ export interface SignalKind {
   /** Days it stays fresh: it fades to half by then and counts for nothing after. */
   freshForDays: number;
   /** Whether the quote says this sign (code, not the model). */
-  indicates(quote: string, playbook: Playbook): boolean;
+  indicates(quote: string, playbook: Playbook, context?: SignContext): boolean;
   /** Web searches that find companies showing it; none when it comes only from registers or other sources. */
   searches(context: SearchContext): string[];
 }

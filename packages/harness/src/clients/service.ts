@@ -30,9 +30,11 @@ import {
   removeEntry,
   setNote,
   setWatch,
+  suggestFromPrice,
 } from "./board";
 import { createChat } from "./chat";
 import { createFinder, type SearchFn } from "./finder";
+import { forgetPagesOf } from "./forget-pages";
 import { installClientHooks } from "./hooks";
 import { learnLookalikes } from "./lookalikes";
 import { createPageReading } from "./read-page";
@@ -62,10 +64,14 @@ export function installClients(services: Services) {
       api: apiReader(services.fetchImpl),
       text: textReader(services.fetchImpl),
       browser: browserReader(browser),
-      visual: visualReader(browser, state, roles),
+      visual: visualReader(browser, state, roles, services),
     } as Partial<Record<Exclude<JobReader, "you">, PageReader>>,
+    // With the title each result showed: it tells a company's own site from another's (2.10).
     search: (async (botId, query, signal) =>
-      (await browser.searchResults(botId, query, signal))?.map((result) => result.url) ?? null) as SearchFn,
+      (await browser.searchResults(botId, query, signal))?.map((result) => ({
+        url: result.url,
+        title: result.title,
+      })) ?? null) as SearchFn,
     fetch: fetchJson(services.fetchImpl) as FetchJson,
     reread: (botId: string) => tabPage(browser, botId, "you"),
     show: async (botId: string, url: string) => {
@@ -113,9 +119,11 @@ export function installClients(services: Services) {
     const weaker = fresh.length - fresh.filter((lead) => isGoodLead(lead.score)).length;
     if (weaker > 0)
       notes.push(`${weaker} weaker lead${weaker === 1 ? "" : "s"} also went on the board, not counted.`);
-    if (scan && scan.movedUp > 0)
+    if (scan && scan.watched > 0)
       notes.push(
-        `${scan.movedUp} watched compan${scan.movedUp === 1 ? "y now shows" : "ies now show"} signs.`,
+        `Checked ${scan.watched} watched compan${scan.watched === 1 ? "y" : "ies"} for new signs${
+          scan.movedUp > 0 ? `: ${scan.movedUp} now show${scan.movedUp === 1 ? "s" : ""} one` : ""
+        }.`,
       );
     if (scan && scan.skipped.length > 0) notes.push(`Skipped: ${scan.skipped.join("; ")}.`);
     const lines = good.map((lead) => `- ${lead.company}: ${lead.score} (${scoreLabel(lead.score)})`);
@@ -159,17 +167,25 @@ export function installClients(services: Services) {
         closing = summary(state.need(botId), await scanner(botId, target, chosen, controller.signal, phase));
       } catch (error) {
         if (!(error instanceof Halt) && !controller.signal.aborted) {
-          closing = `The scan failed: ${(error as Error).message}`;
+          const failed = `The scan failed: ${(error as Error).message}`;
           state.change(botId, (p) => {
-            p.error = closing;
-            state.logLine(p, closing);
+            p.error = failed;
+            // The scan has ended, failed: its card and the status line say so instead of looking unfinished (5.6).
+            if (p.scan && !p.scan.endedAt)
+              Object.assign(p.scan, { endedAt: state.now(), stopReason: failed });
+            state.logLine(p, failed);
           });
-        } else
+          // What it found before it failed is on the board: said, so it isn't missed (5.9).
+          closing = summary(state.need(botId), failed);
+        } else {
           state.change(botId, (p) => {
             if (p.scan && !p.scan.endedAt)
               Object.assign(p.scan, { endedAt: state.now(), stopReason: "You stopped it." });
             state.logLine(p, "Scan stopped");
           });
+          const now = state.load(botId);
+          if (now) closing = summary(now, "Scan stopped.");
+        }
       } finally {
         runs.delete(botId);
         state.change(botId, (p) => {
@@ -197,9 +213,9 @@ export function installClients(services: Services) {
     services,
     state,
     roles,
-    startScan: (botId, target) => {
+    startScan: (botId, target, kinds) => {
       try {
-        startScan(botId, target);
+        startScan(botId, target, kinds);
       } catch (error) {
         if (!(error instanceof ClientError)) throw error;
         state.say(botId, error.message);
@@ -228,6 +244,7 @@ export function installClients(services: Services) {
       } catch (error) {
         throw new ClientError(`That profile doesn't fit: ${(error as Error).message}`);
       }
+      suggestFromPrice(p);
       if (p.status === "interview" && missingForScan(p.profile).length === 0) p.status = "awaiting_profile";
     });
 
@@ -268,7 +285,12 @@ export function installClients(services: Services) {
     try {
       const learned = await learnLookalikes(registers, text, new Date(), controller.signal);
       return edit(botId, (p) => {
-        p.lookalikes = { clients: learned.clients, profile: learned.profile, approved: false };
+        p.lookalikes = {
+          clients: learned.clients,
+          matched: learned.matched,
+          profile: learned.profile,
+          approved: false,
+        };
         // Your favourite clients are clients: never shown as leads.
         addLines(p, "clients", text);
         state.logLine(p, learned.note);
@@ -299,6 +321,8 @@ export function installClients(services: Services) {
       team.removeTeam(project);
     }),
   );
+  // The last changes are saved before closing (saves wait up to SAVE_EVERY_MS).
+  services.disposers.push(() => state.flush());
   services.disposers.push(() => {
     for (const run of runs.values()) run.controller.abort();
   });
@@ -327,8 +351,19 @@ export function installClients(services: Services) {
       edit(botId, (p) => moveLead(p, leadId, column)),
     note: (botId: string, leadId: string, note: string) => edit(botId, (p) => setNote(p, leadId, note)),
     watch: (botId: string, leadId: string, watch: boolean) => edit(botId, (p) => setWatch(p, leadId, watch)),
-    forget: (botId: string, leadId: string, block: boolean) =>
-      idleEdit(botId, (p) => forgetLead(p, leadId, block)),
+    forget: (botId: string, leadId: string, block: boolean) => {
+      const lead = state.need(botId).leads.find((l) => l.id === leadId);
+      const project = idleEdit(botId, (p) => forgetLead(p, leadId, block));
+      if (!lead) return project;
+      // The pages read for it go from the role threads too, not only the card (3.1).
+      const cleared = forgetPagesOf(services, team, state.need(botId), lead);
+      return edit(botId, (p) =>
+        state.logLine(
+          p,
+          `Forgot ${lead.company}${cleared > 0 ? ` and what was read about it (${cleared} messages)` : ""}`,
+        ),
+      );
+    },
     answerSuggestion: (botId: string, id: string, accept: boolean) =>
       edit(botId, (p) => answerSuggestion(p, id, accept)),
     addToList: (botId: string, list: ListName, text: string) =>
@@ -344,7 +379,7 @@ export function installClients(services: Services) {
     setLookalikes,
     updateLookalike,
     setWatchList: (botId: string, off: boolean) => edit(botId, (p) => void (p.watchOff = off)),
-    exportCsv: (botId: string) => leadsCsv(state.need(botId).leads),
+    exportCsv: (botId: string) => leadsCsv(state.need(botId).leads, state.need(botId).profile.buyerTitles),
     /** Which register keys are saved (never the keys themselves). */
     keys: () => ({ companiesHouse: registers.hasKey("companiesHouse") }),
     setKey: (name: ClientKeyName, key: string) => {
@@ -360,6 +395,8 @@ export function installClients(services: Services) {
     idle: (botId: string) => runs.get(botId)?.done ?? Promise.resolve(),
     /** Tests: put a lead straight on the board. */
     addLead: (botId: string, lead: Parameters<typeof addLead>[1]) => edit(botId, (p) => addLead(p, lead)),
+    /** Tests: change a project directly (to age what it remembers). */
+    edit,
   };
 }
 

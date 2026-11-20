@@ -5,6 +5,7 @@ import {
   CircleSlash,
   Loader2,
   SquareTerminal,
+  Undo2,
   Wrench,
   X,
 } from "lucide-react";
@@ -13,7 +14,7 @@ import { useState } from "react";
 import type { ApprovalDecision, MessagePart } from "@mrog/shared";
 import { Button, cn } from "@mrog/ui-kit";
 
-import { api } from "../../lib/api";
+import { api, ApiRequestError } from "../../lib/api";
 import { useUi } from "../../state";
 
 type ToolPart = Extract<MessagePart, { type: "tool" }>;
@@ -54,6 +55,7 @@ export function ToolCard({ part, label }: { part: ToolPart; label?: string }) {
         {STATUS_ICON[part.status]}
         <ChevronRight size={12} className={cn("shrink-0 transition-transform", open && "rotate-90")} />
       </button>
+      {part.undo && part.status === "done" && <UndoFileChange undo={part.undo} />}
       {open && (
         <div className="mt-1.5 overflow-hidden rounded-lg border border-border bg-surface text-[12px]">
           <pre className="max-h-40 overflow-auto border-b border-border px-3 py-2 font-mono whitespace-pre-wrap text-ink-2 select-text">
@@ -65,6 +67,48 @@ export function ToolCard({ part, label }: { part: ToolPart; label?: string }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** Undo for a file the bot wrote or edited: puts the file back as it was before this call. */
+function UndoFileChange({ undo }: { undo: NonNullable<ToolPart["undo"]> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (undo.undone) return <span className="ml-2 text-[12px] text-ink-3">Undone</span>;
+
+  const run = async (force: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/file-versions/${undo.id}/undo`, { method: "POST", body: { force } });
+    } catch (caught) {
+      // The file changed again since: undoing would lose that too, so ask first.
+      if (!force && caught instanceof ApiRequestError && caught.body?.error === "changed_since") {
+        if (
+          window.confirm(`${caught.message}
+
+Undo anyway?`)
+        )
+          return run(true);
+      } else setError((caught as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span className="ml-2 inline-flex items-center gap-1.5">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void run(false)}
+        title="Put the file back as it was before this change"
+        className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[12px] text-ink-3 hover:bg-hover hover:text-ink disabled:opacity-50"
+      >
+        <Undo2 size={12} /> Undo
+      </button>
+      {error && <span className="text-[12px] text-danger">{error}</span>}
+    </span>
   );
 }
 

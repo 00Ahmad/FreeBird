@@ -6,7 +6,9 @@ import {
   mergeOffer,
   parseEntries,
   removeFromList,
+  sizeFromPrice,
   suggestFrom,
+  type Suggested,
 } from "@mrog/clients";
 import {
   MAX_CLIENT_SUGGESTIONS,
@@ -23,20 +25,31 @@ import { ClientError } from "./state";
 
 /** The board and your lists: plain functions on a project; the service saves and publishes after each. */
 
-/** Adds a lead; when the board is full, the oldest "Not a fit" goes first, then the weakest "New" one. */
-export function addLead(project: ClientProject, lead: Lead) {
-  project.leads.push(lead);
-  while (project.leads.length > MAX_LEADS) {
-    const notFit = project.leads.findIndex((l) => l.column === "not_a_fit");
-    const drop =
-      notFit >= 0
-        ? notFit
-        : (project.leads
-            .map((l, index) => ({ l, index }))
-            .filter(({ l }) => l.column === "new")
-            .toSorted((a, b) => a.l.score - b.l.score)[0]?.index ?? 0);
-    project.leads.splice(drop, 1);
+/**
+ * Adds a lead. When the board is full, the oldest "Not a fit" lead makes room, else the weakest "New" one, and only
+ * for a stronger lead ("weaker": not added). A lead you're working (shortlisted, contacted, replied, won) is never
+ * dropped: with only those, the lead isn't added ("full"), and the scan says the board is full (3.2).
+ */
+export function addLead(project: ClientProject, lead: Lead): "added" | "weaker" | "full" {
+  if (project.leads.length < MAX_LEADS) {
+    project.leads.push(lead);
+    return "added";
   }
+  const notFit = project.leads.findIndex((l) => l.column === "not_a_fit");
+  if (notFit >= 0) {
+    project.leads.splice(notFit, 1);
+    project.leads.push(lead);
+    return "added";
+  }
+  const weakest = project.leads
+    .map((l, index) => ({ l, index }))
+    .filter(({ l }) => l.column === "new")
+    .toSorted((a, b) => a.l.score - b.l.score)[0];
+  if (!weakest) return "full";
+  if (weakest.l.score >= lead.score) return "weaker";
+  project.leads.splice(weakest.index, 1);
+  project.leads.push(lead);
+  return "added";
 }
 
 const leadIn = (project: ClientProject, leadId: string) => {
@@ -61,15 +74,25 @@ export function reactToLead(project: ClientProject, leadId: string, input: React
     lead.column = "shortlisted";
   if (!input.reaction) return;
   const suggestion = suggestFrom(input.reaction, input.reason ?? "", lead, project.profile, project.leads);
-  if (!suggestion) return;
-  const same = project.suggestions.some(
-    (s) => s.field === suggestion.field && s.value.toLowerCase() === suggestion.value.toLowerCase(),
-  );
-  if (!same)
-    project.suggestions = [...project.suggestions, { id: randomUUID(), ...suggestion }].slice(
-      -MAX_CLIENT_SUGGESTIONS,
-    );
+  if (suggestion) addSuggestions(project, [suggestion]);
 }
+
+/** Adds suggestions not already waiting (by field and value), keeping the last few. */
+export function addSuggestions(project: ClientProject, suggested: readonly Suggested[]) {
+  for (const suggestion of suggested) {
+    const same = project.suggestions.some(
+      (s) => s.field === suggestion.field && s.value.toLowerCase() === suggestion.value.toLowerCase(),
+    );
+    if (!same)
+      project.suggestions = [...project.suggestions, { id: randomUUID(), ...suggestion }].slice(
+        -MAX_CLIENT_SUGGESTIONS,
+      );
+  }
+}
+
+/** After a profile change: the client size your price states, suggested (3.3). */
+export const suggestFromPrice = (project: ClientProject) =>
+  addSuggestions(project, sizeFromPrice(project.profile));
 
 /** Accepting a suggestion changes the profile; either way it goes. */
 export function answerSuggestion(project: ClientProject, id: string, accept: boolean) {

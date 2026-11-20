@@ -1,12 +1,20 @@
 import { ArrowLeft, Eye, EyeOff, ExternalLink, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import { useState } from "react";
 
-import { LEAD_COLUMNS, type Bot, type Lead, type LeadColumn, type MatchVerdict } from "@mrog/shared";
+import {
+  LEAD_COLUMNS,
+  type Bot,
+  type ClientProject,
+  type Lead,
+  type LeadColumn,
+  type MatchVerdict,
+} from "@mrog/shared";
 import { Button, cn } from "@mrog/ui-kit";
 
 import { useForgetLead, useLeadNote, useMoveLead, useReactToLead, useWatchLead } from "../../hooks/clients";
 import {
   ageText,
+  askForLine,
   COLUMN_LABELS,
   CONTACT_LABELS,
   evidenceLabel,
@@ -24,7 +32,17 @@ const VERDICT: Record<MatchVerdict, [string, string]> = {
 const linkClass = "inline-flex items-center gap-1 text-accent";
 
 /** One lead in full: why now, why you, how to reach them, warnings, your note and your reaction. */
-export function LeadDetails({ bot, lead, onBack }: { bot: Bot; lead: Lead; onBack(): void }) {
+export function LeadDetails({
+  bot,
+  lead,
+  project,
+  onBack,
+}: {
+  bot: Bot;
+  lead: Lead;
+  project: ClientProject;
+  onBack(): void;
+}) {
   const react = useReactToLead(bot.id);
   const move = useMoveLead(bot.id);
   const note = useLeadNote(bot.id);
@@ -67,7 +85,12 @@ export function LeadDetails({ bot, lead, onBack }: { bot: Bot; lead: Lead; onBac
             </>
           )}
         </p>
-        {lead.summary && <p className="mt-1 text-ink-3">{lead.summary}</p>}
+        {lead.summary && (
+          <p className="mt-1 text-ink-3">
+            <span className="text-[11.5px] font-medium">The Checker's summary: </span>
+            {lead.summary}
+          </p>
+        )}
         {lead.movedUp && <p className="mt-1 text-success">Moved up: {lead.movedUp}</p>}
         {lead.kind === "quiet" && (
           <p className="mt-1 text-ink-3">Fits your ideal client; no recent signs yet.</p>
@@ -109,13 +132,21 @@ export function LeadDetails({ bot, lead, onBack }: { bot: Bot; lead: Lead; onBac
 
       <section>
         <h4 className="mb-1 text-[12.5px] font-medium text-ink-2">Why you: how it fits your ideal client</h4>
+        <p className="mb-1.5 text-[11.5px] text-ink-3">
+          Reasons are the Checker's own words, except those marked "checked by the app".
+        </p>
         <ul className="flex flex-col gap-1.5">
           {lead.fit.map((line) => (
             <li key={line.requirement} className="flex gap-2">
               <span aria-label={VERDICT[line.verdict][1]}>{VERDICT[line.verdict][0]}</span>
               <span className="min-w-0">
                 {line.requirement}
-                {line.reason && <span className="block text-[12px] text-ink-3">{line.reason}</span>}
+                {line.reason && (
+                  <span className="block text-[12px] text-ink-3">
+                    {line.reason}
+                    {line.byCode && <span className="ml-1 text-[11px] italic">(checked by the app)</span>}
+                  </span>
+                )}
               </span>
             </li>
           ))}
@@ -133,6 +164,12 @@ export function LeadDetails({ bot, lead, onBack }: { bot: Bot; lead: Lead; onBac
 
       <section>
         <h4 className="mb-1 text-[12.5px] font-medium text-ink-2">How to reach them</h4>
+        {askForLine(project.profile) && (
+          <p className="mb-1 text-[12.5px]">
+            {askForLine(project.profile)}{" "}
+            <span className="text-ink-3">(from your profile; no person is looked up)</span>
+          </p>
+        )}
         {lead.contacts.length === 0 ? (
           <p className="text-ink-3">No contact route was found.</p>
         ) : (

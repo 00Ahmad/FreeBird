@@ -8,12 +8,14 @@ import {
   canScan,
   cardCompany,
   cardTitle,
+  isNew,
   jobComposer,
   listFrom,
   profileChange,
   scanTarget,
   statusLine,
   suggestedTarget,
+  uncheckedLine,
 } from "./jobs";
 
 const card = (over: Partial<JobCard> = {}): JobCard => ({
@@ -35,6 +37,7 @@ const card = (over: Partial<JobCard> = {}): JobCard => ({
   company: [],
   reaction: null,
   reason: null,
+  unchecked: 0,
   ...over,
 });
 
@@ -70,6 +73,35 @@ describe("the Job Bot's screen", () => {
       "not_for_me",
     ]);
     expect(columns[0]!.cards.map((c) => c.id)).toEqual(["b", "a"]);
+  });
+
+  it("can sort newest first, and show only the latest scan's jobs", () => {
+    const cards = [
+      card({ id: "old", score: 90, scan: 1, foundAt: "2026-11-01T10:00:00.000Z" }),
+      card({ id: "new", score: 55, scan: 2, foundAt: "2026-11-14T10:00:00.000Z" }),
+      card({ id: "newer", score: 70, scan: 2, foundAt: "2026-11-14T11:00:00.000Z" }),
+    ];
+    expect(boardColumns(cards, { sort: "newest" })[0]!.cards.map((c) => c.id)).toEqual([
+      "newer",
+      "new",
+      "old",
+    ]);
+    expect(boardColumns(cards, { onlyNew: true, latestScan: 2 })[0]!.cards.map((c) => c.id)).toEqual([
+      "newer",
+      "new",
+    ]);
+    // No scan yet: nothing counts as new.
+    expect(boardColumns(cards, { onlyNew: true, latestScan: null })[0]!.cards).toEqual([]);
+    expect(isNew(card({ scan: 2 }), project({ scan: { number: 2 } as JobProject["scan"] }))).toBe(true);
+    expect(isNew(card({ scan: 1 }), project({ scan: { number: 2 } as JobProject["scan"] }))).toBe(false);
+  });
+
+  it("says when a card has requirements its last reading didn't check", () => {
+    expect(uncheckedLine(card({ unchecked: 0 }))).toBeNull();
+    expect(uncheckedLine(card({ unchecked: 1 }))).toBe(
+      "1 newer requirement wasn't checked on this job: it was read before you added it.",
+    );
+    expect(uncheckedLine(card({ unchecked: 3 }))).toMatch(/^3 newer requirements weren't checked/);
   });
 
   it("names a card by its facts, with the site when the company isn't stated", () => {

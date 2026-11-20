@@ -89,6 +89,39 @@ export function boardColumns(leads: readonly Lead[]): { column: LeadColumn; lead
   }));
 }
 
+/** Found by the latest scan. */
+export const isNewLead = (lead: Lead, project: ClientProject) =>
+  !!project.scan && lead.scan === project.scan.number;
+
+/** Moved up (a watched quiet fit showed a sign) in the latest scan. */
+export const movedUpNow = (lead: Lead, project: ClientProject) =>
+  !!lead.movedUp && !!project.scan && lead.updatedAt >= project.scan.startedAt;
+
+/** Its signs have faded: a lead you haven't acted on whose reason to call now has gone. */
+export const goneStale = (lead: Lead) =>
+  (lead.column === "new" || lead.column === "shortlisted") && lead.warnings.some((w) => w.id === "stale");
+
+/** What changed with the latest scan, in a line ("Since the last scan: 3 new, 1 moved up, 2 gone stale"), or null. */
+export function changesLine(project: ClientProject): string | null {
+  const fresh = project.leads.filter((lead) => isNewLead(lead, project)).length;
+  const up = project.leads.filter((lead) => movedUpNow(lead, project)).length;
+  const stale = project.leads.filter(goneStale).length;
+  const parts = [
+    fresh > 0 && `${fresh} new`,
+    up > 0 && `${up} moved up`,
+    stale > 0 && `${stale} gone stale`,
+  ].filter(Boolean);
+  return parts.length > 0 ? `With the latest scan: ${parts.join(", ")}.` : null;
+}
+
+/** "Ask for the Finance Director or the Head of HR": who buys what you sell, from your profile (6.1). */
+export function askForLine(profile: OfferProfile): string | null {
+  const titles = profile.buyerTitles;
+  if (titles.length === 0) return null;
+  const named = titles.map((title) => `the ${title}`);
+  return `Ask for ${named.length > 1 ? `${named.slice(0, -1).join(", ")} or ${named.at(-1)}` : named[0]}.`;
+}
+
 export const leadFact = (lead: Lead, name: ClientFactName) =>
   lead.facts.find((fact) => fact.name === name)?.value ?? null;
 

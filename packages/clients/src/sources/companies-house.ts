@@ -2,7 +2,7 @@ import type { OfferProfile } from "@mrog/shared";
 
 import { daysBefore } from "../dates";
 import { anyIndustry } from "../profile";
-import { isUkArea, placeOf } from "../region";
+import { isUkArea, placeOf, placesIn } from "../region";
 import { sicCodesFor } from "./sic";
 import {
   record,
@@ -18,6 +18,8 @@ import {
  * user name. Rate limit: 600 requests per 5 minutes; a scan sends a handful.
  */
 const API = "https://api.company-information.service.gov.uk";
+/** Places a register is asked about in one scan. */
+export const REGISTER_PLACES = 3;
 const PUBLIC = "https://find-and-update.company-information.service.gov.uk/company/";
 
 const auth = (key: string | null): Record<string, string> =>
@@ -62,9 +64,19 @@ export function companyRecord(item: ChItem): RegisterRecord | null {
   });
 }
 
-/** The advanced search request for a query. */
+/** Companies asked for per page of the advanced search. */
+export const ADVANCED_PAGE = 50;
+
+/**
+ * The advanced search request for a query, at its page: `size` and `start_index` (documented at
+ * developer-specs.company-information.service.gov.uk, advanced company search; not checked live, it needs a key).
+ */
 export function advancedSearch(query: RegisterQuery, key: string | null): RegisterRequest {
-  const params = new URLSearchParams({ company_status: "active", size: "50" });
+  const params = new URLSearchParams({
+    company_status: "active",
+    size: String(ADVANCED_PAGE),
+    start_index: String(((query.page ?? 1) - 1) * ADVANCED_PAGE),
+  });
   if (query.place) params.set("location", query.place);
   if (query.sicCodes.length > 0) params.set("sic_codes", query.sicCodes.join(","));
   if (query.incorporatedFrom) params.set("incorporated_from", query.incorporatedFrom);
@@ -76,9 +88,13 @@ export function advancedSearch(query: RegisterQuery, key: string | null): Regist
   };
 }
 
-/** Finding one company by name (for your favourite clients), then its profile by number. */
+/**
+ * Finding one company by name, then its profile by number. A few results, not one: the first is often another company
+ * sharing a word of the name, so the caller picks by the name check (1.4).
+ */
+export const NAME_SEARCH_ITEMS = 5;
 export const nameSearch = (name: string, key: string | null): RegisterRequest => ({
-  url: `${API}/search/companies?${new URLSearchParams({ q: name, items_per_page: "1" })}`,
+  url: `${API}/search/companies?${new URLSearchParams({ q: name, items_per_page: String(NAME_SEARCH_ITEMS) })}`,
   method: "GET",
   headers: { accept: "application/json", ...auth(key) },
 });
@@ -104,19 +120,26 @@ export const companiesHouse: Register = {
   needsKey: "companiesHouse",
   fits: (profile) => isUkArea(profile.areas) && placeOf(profile.areas) !== "",
   queries(profile: OfferProfile, _playbook, now) {
-    const base = {
-      words: [],
-      place: placeOf(profile.areas),
-      sicCodes: anyIndustry(profile) ? [] : sicCodesFor(profile.industries),
-      incorporatedTo: null,
-    };
-    // A search by place alone, any industry, would be every company in town: only with codes, or for new companies.
+    const sicCodes = anyIndustry(profile) ? [] : sicCodesFor(profile.industries);
+    // Each place you serve, not only the first (2.3); at most a few, each paged on its own.
     const queries: RegisterQuery[] = [];
-    if (base.sicCodes.length > 0) queries.push({ ...base, incorporatedFrom: null });
-    if (profile.signals.includes("new_company"))
-      queries.push({ ...base, incorporatedFrom: daysBefore(now, 365) });
+    for (const place of placesIn(profile.areas).slice(0, REGISTER_PLACES)) {
+      const base = { words: [], place, sicCodes, incorporatedTo: null };
+      // A search by place alone, any industry, would be every company in town: only with codes, or for new companies.
+      if (sicCodes.length > 0) queries.push({ ...base, incorporatedFrom: null });
+      if (profile.signals.includes("new_company"))
+        queries.push({ ...base, incorporatedFrom: daysBefore(now, 365) });
+    }
     return queries;
   },
   request: advancedSearch,
   parse: parseItems,
+  // The answer says how many companies match (`hits`): the last page is the one that reaches it.
+  isLastPage(json, query) {
+    const hits = Number((json as { hits?: unknown })?.hits ?? 0);
+    const start = ((query.page ?? 1) - 1) * ADVANCED_PAGE;
+    return (
+      !Number.isFinite(hits) || start + itemsOf(json).length >= hits || itemsOf(json).length < ADVANCED_PAGE
+    );
+  },
 };

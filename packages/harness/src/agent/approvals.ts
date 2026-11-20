@@ -69,6 +69,17 @@ export class ApprovalBroker {
    * for them neither "Always allow commands" nor a saved rule runs a command unseen. "Never" still refuses it.
    */
   readonly alwaysAsk: Array<(botId: string) => boolean> = [];
+  /**
+   * For a bot that must always ask: its owner's go-ahead to run a command without a card (a Coding Bot's Auto-approve,
+   * for routine commands only). Never covers a command given secrets, and "Never allow commands" still refuses.
+   */
+  readonly autoAllows: Array<(botId: string, risk: Risk, command?: string) => boolean> = [];
+  /**
+   * Asked when a card has waited the usual time unanswered: true keeps it waiting (the hook reminds the user) instead
+   * of dropping the call. For work that can't sensibly go on without the answer (a Coding Bot's roles: QA would only
+   * work around a command that never ran). Asked again each time the same time passes; Stop still ends it.
+   */
+  readonly keepWaiting: Array<(botId: string, summary: string, waitedMs: number) => boolean> = [];
 
   constructor(
     private readonly deps: { store: Store; bus: EventBus; turns: TurnManager; timeoutMs?: number },
@@ -120,12 +131,17 @@ export class ApprovalBroker {
   ): { decision: "allow" | "deny"; source: "policy" | "rule" } | undefined {
     const never = risk.kind === "terminal" && this.permissions().localExecution === "never";
     // Giving secrets to a command is never settled without the user: not by "always allow commands", not by a rule.
-    // "Never allow commands" still refuses it. The same for every command of a bot that must always ask.
-    if (
-      risk.badges.includes(BADGES.secrets) ||
-      (risk.kind === "terminal" && botId !== undefined && this.alwaysAsk.some((asks) => asks(botId)))
-    )
+    // "Never allow commands" still refuses it.
+    if (risk.badges.includes(BADGES.secrets))
       return never ? { decision: "deny", source: "policy" } : undefined;
+    // A bot that must always ask isn't settled by the command policy or a rule either; only by its owner's own
+    // go-ahead for the call (a Coding Bot with Auto-approve on).
+    if (risk.kind === "terminal" && botId !== undefined && this.alwaysAsk.some((asks) => asks(botId))) {
+      if (never) return { decision: "deny", source: "policy" };
+      return this.autoAllows.some((allows) => allows(botId, risk, command))
+        ? { decision: "allow", source: "policy" }
+        : undefined;
+    }
     if (never) return { decision: "deny", source: "policy" };
     if (risk.kind === "terminal" && this.permissions().localExecution === "always")
       return { decision: "allow", source: "policy" };
@@ -233,8 +249,19 @@ export class ApprovalBroker {
       };
       const onAbort = () => finish("deny", "stopped");
       scope.signal.addEventListener("abort", onAbort, { once: true });
-      // A card left unanswered must not hold a turn (and a model slot's worth of work) for ever.
-      timer = setTimeout(() => finish("timeout", "timeout"), this.timeoutMs);
+      // A card left unanswered must not hold a turn (and a model slot's worth of work) for ever, unless the work it
+      // belongs to waits for the answer by design (keepWaiting), and then the user is reminded instead.
+      let waited = 0;
+      const expire = () => {
+        waited += this.timeoutMs;
+        if (this.keepWaiting.some((keep) => keep(scope.botId, request.risk.summary, waited))) {
+          timer = setTimeout(expire, this.timeoutMs);
+          timer.unref?.();
+          return;
+        }
+        finish("timeout", "timeout");
+      };
+      timer = setTimeout(expire, this.timeoutMs);
       timer.unref?.();
       this.pending.set(id, {
         answer: (decision) => finish(decision, "user"),
